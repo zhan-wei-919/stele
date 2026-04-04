@@ -683,5 +683,70 @@ fn GlyphAtlas.grow_and_repack(queue):
 ```yaml
 execution_plan:
   spec_path: docs/SPECS/2026-04-04-m0-renderer-spec.md
-  tasks: []
+  tasks:
+    - id: TASK-01
+      description: "项目脚手架 + 核心数据结构 + 字体模块"
+      owned_paths:
+        - Cargo.toml
+        - src/renderer/mod.rs
+        - src/renderer/draw_list.rs
+        - src/font/mod.rs
+        - src/font/discovery.rs
+        - src/font/rasterizer.rs
+      context_sections:
+        - Data Structures
+        - Module Boundaries
+        - Preconditions
+      ac_ids:
+        - AC-02
+
+    - id: TASK-02
+      description: "GlyphAtlas + ShelfPacker + 子像素检测 + WGSL shaders"
+      owned_paths:
+        - src/renderer/glyph_atlas.rs
+        - src/renderer/subpixel.rs
+        - src/renderer/shaders/glyph.wgsl
+        - src/renderer/shaders/rect.wgsl
+      context_sections:
+        - Data Structures
+        - State Machine
+        - Invariants Preserved
+        - Budgets
+      ac_ids:
+        - AC-01
+        - AC-04
+
+    - id: TASK-03
+      description: "Renderer 核心：wgpu pipeline + instance buffer + frame/apply_ops/resize"
+      owned_paths:
+        - src/renderer/pipeline.rs
+        - src/renderer/instance_buffer.rs
+        - src/renderer/mod.rs
+      context_sections:
+        - Data Structures
+        - State Machine
+        - Input Contract
+        - Output Contract
+        - Budgets
+        - Side Effects
+      ac_ids:
+        - AC-01
+        - AC-03
+        - AC-04
+        - AC-05
+
+    - id: TASK-04
+      description: "main.rs 集成：winit 事件循环 + 硬编码文本 + 全链路打通"
+      owned_paths:
+        - src/main.rs
+      context_sections:
+        - Target Object / Flow
+        - Preconditions
+        - Pseudocode
+      ac_ids:
+        - AC-01
+        - AC-02
+        - AC-03
+        - AC-04
+        - AC-05
 ```
