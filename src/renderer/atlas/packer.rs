@@ -1,3 +1,6 @@
+//! Shelf-based packing used for the glyph atlas texture.
+
+/// One horizontal shelf inside the glyph atlas texture.
 #[derive(Clone, Debug, Default)]
 pub struct Shelf {
     pub y_offset: u32,
@@ -5,6 +8,7 @@ pub struct Shelf {
     pub x_cursor: u32,
 }
 
+/// Simple shelf packer optimized for incremental glyph uploads.
 #[derive(Clone, Debug)]
 pub struct ShelfPacker {
     pub shelves: Vec<Shelf>,
@@ -13,6 +17,7 @@ pub struct ShelfPacker {
 }
 
 impl ShelfPacker {
+    /// Creates an empty packer for the provided atlas dimensions.
     pub fn new(atlas_width: u32, atlas_height: u32) -> Self {
         Self {
             shelves: Vec::new(),
@@ -21,6 +26,7 @@ impl ShelfPacker {
         }
     }
 
+    /// Allocates a rectangle inside the atlas, creating a new shelf when needed.
     pub fn allocate(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
         if width == 0 || height == 0 || width > self.atlas_width || height > self.atlas_height {
             return None;

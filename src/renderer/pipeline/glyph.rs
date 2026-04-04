@@ -1,7 +1,10 @@
+//! Glyph pipeline creation for atlas-backed subpixel text rendering.
+
 use std::borrow::Cow;
 
 use crate::renderer::instance::glyph_instance_layout;
 
+/// Builds the glyph render pipeline that samples the atlas and blends LCD coverage.
 pub fn create_glyph_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,

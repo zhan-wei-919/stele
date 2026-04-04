@@ -1,11 +1,10 @@
 mod font;
 mod renderer;
 
-pub use font::*;
-pub use renderer::*;
-
 use std::sync::Arc;
 
+use crate::font::{FontDiscovery, FreeTypeRasterizer, SubpixelBin};
+use crate::renderer::{DrawListOp, PositionedGlyph, Renderer};
 use fontdb::Source;
 use freetype::{face::LoadFlag, Library};
 use log::warn;
@@ -52,7 +51,11 @@ impl ApplicationHandler for SteleApp {
         let attributes = Window::default_attributes()
             .with_title("Stele")
             .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let window = Arc::new(event_loop.create_window(attributes).expect("failed to create window"));
+        let window = Arc::new(
+            event_loop
+                .create_window(attributes)
+                .expect("failed to create window"),
+        );
         let renderer = block_on(init_renderer(window.clone()));
 
         self.window_id = Some(window.id());

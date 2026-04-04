@@ -1,8 +1,11 @@
+//! Glyph instance encoding shared between the CPU draw list and WGSL shaders.
+
 use bytemuck::{Pod, Zeroable};
 
 use crate::renderer::atlas::AtlasRegion;
 use crate::renderer::draw_list::PositionedGlyph;
 
+/// Per-instance data for a glyph quad in the atlas-backed text pipeline.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct GlyphInstance {
@@ -15,6 +18,7 @@ pub struct GlyphInstance {
 }
 
 impl GlyphInstance {
+    /// Converts a positioned glyph and atlas lookup result into GPU instance data.
     pub fn from_positioned_glyph(
         glyph: &PositionedGlyph,
         atlas_region: AtlasRegion,
@@ -31,6 +35,7 @@ impl GlyphInstance {
     }
 }
 
+/// Returns the vertex-buffer layout expected by the glyph render pipeline.
 pub fn glyph_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x2,

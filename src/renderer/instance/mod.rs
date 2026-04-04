@@ -1,3 +1,5 @@
+//! GPU-side per-instance vertex layouts for renderer primitives.
+
 pub mod glyph;
 pub mod rect;
 

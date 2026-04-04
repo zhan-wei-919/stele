@@ -1,5 +1,7 @@
+//! Incremental draw-list updates and the positioned primitives they carry.
+
 pub mod ops;
 pub mod types;
 
 pub use ops::{DrawList, DrawListOp};
-pub use types::{GlyphKey, PositionedGlyph, RectCmd, SubpixelBin};
+pub use types::{PositionedGlyph, RectCmd};

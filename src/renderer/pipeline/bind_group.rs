@@ -1,5 +1,8 @@
+//! Shared bind-group helpers for screen-size uniforms.
+
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
+/// Creates the bind-group layout used to expose screen dimensions to shaders.
 pub fn create_screen_size_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("stele.screen_size_bind_group_layout"),
@@ -16,6 +19,7 @@ pub fn create_screen_size_bind_group_layout(device: &wgpu::Device) -> wgpu::Bind
     })
 }
 
+/// Creates a bind group and backing uniform buffer for the current surface size.
 pub fn create_screen_size_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -39,6 +43,7 @@ pub fn create_screen_size_bind_group(
     (bind_group, buffer)
 }
 
+/// Encodes the current surface dimensions into the uniform layout expected by shaders.
 pub fn screen_uniform(width: u32, height: u32) -> [f32; 4] {
     [width as f32, height as f32, 0.0, 0.0]
 }

@@ -1,9 +1,12 @@
+//! Subpixel layout detection used to match LCD glyph rasterization to the display.
+
 use std::{env, process::Command};
 
 use log::info;
 
 use crate::font::SubpixelLayout;
 
+/// Detects the platform subpixel layout using fontconfig first and environment fallbacks second.
 pub fn detect_subpixel_layout() -> SubpixelLayout {
     if let Some(layout) = fontconfig_layout() {
         info!("subpixel.layout source=fontconfig value={layout:?}");

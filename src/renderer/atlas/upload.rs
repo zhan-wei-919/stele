@@ -1,3 +1,5 @@
+//! Conversion from FreeType raster output into atlas-ready RGBA texels.
+
 use crate::font::{RasterizedGlyph, SubpixelLayout};
 
 pub(crate) struct AtlasUpload {
@@ -8,6 +10,7 @@ pub(crate) struct AtlasUpload {
 }
 
 impl AtlasUpload {
+    /// Converts a rasterized glyph into the texture layout expected by the atlas.
     pub fn from_rasterized(rasterized: &RasterizedGlyph, layout: SubpixelLayout) -> Self {
         let bearing = [rasterized.bearing_x as f32, rasterized.bearing_y as f32];
         if rasterized.width == 0 || rasterized.height == 0 || rasterized.data.is_empty() {

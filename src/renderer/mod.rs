@@ -1,15 +1,11 @@
-pub mod atlas;
-pub mod draw_list;
-pub mod instance;
-pub mod pipeline;
-mod renderer;
-pub mod subpixel;
+//! Renderer-facing draw-list types plus the GPU runtime that consumes them.
 
-pub use atlas::{AtlasRegion, GlyphAtlas, Shelf, ShelfPacker};
-pub use draw_list::{DrawList, DrawListOp, GlyphKey, PositionedGlyph, RectCmd, SubpixelBin};
-pub use instance::{glyph_instance_layout, rect_instance_layout, GlyphInstance, RectInstance};
-pub use pipeline::{
-    create_glyph_pipeline, create_rect_pipeline, create_screen_size_bind_group,
-    create_screen_size_bind_group_layout, screen_uniform,
-};
-pub use renderer::Renderer;
+pub(crate) mod atlas;
+pub mod draw_list;
+pub(crate) mod instance;
+pub(crate) mod pipeline;
+mod runtime;
+pub(crate) mod subpixel;
+
+pub(crate) use draw_list::{DrawListOp, PositionedGlyph};
+pub(crate) use runtime::Renderer;

@@ -1,5 +1,9 @@
-pub mod discovery;
-pub mod rasterizer;
+//! Font discovery, glyph cache keys, and FreeType rasterization helpers.
 
-pub use discovery::{FontDiscovery, FontDiscoveryError};
-pub use rasterizer::{FreeTypeRasterizer, RasterizedGlyph, SubpixelLayout};
+mod discovery;
+mod glyph;
+mod rasterizer;
+
+pub(crate) use discovery::FontDiscovery;
+pub(crate) use glyph::{GlyphKey, SubpixelBin};
+pub(crate) use rasterizer::{FreeTypeRasterizer, RasterizedGlyph, SubpixelLayout};

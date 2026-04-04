@@ -1,10 +1,10 @@
+//! Glyph atlas allocation, upload, and cache management.
+
 use std::collections::HashMap;
 
 use log::info;
 
-use crate::font::FreeTypeRasterizer;
-use crate::renderer::draw_list::GlyphKey;
-use crate::font::RasterizedGlyph;
+use crate::font::{FreeTypeRasterizer, GlyphKey, RasterizedGlyph};
 
 use super::packer::ShelfPacker;
 use super::upload::AtlasUpload;
@@ -12,6 +12,7 @@ use super::upload::AtlasUpload;
 const DEFAULT_ATLAS_SIZE: u32 = 2048;
 const MAX_ATLAS_SIZE: u32 = 8192;
 
+/// UVs, pixel size, and bearing for a glyph cached in the atlas.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AtlasRegion {
     pub uv_min: [f32; 2],
@@ -20,18 +21,20 @@ pub struct AtlasRegion {
     pub bearing: [f32; 2],
 }
 
+/// GPU texture atlas that caches rasterized glyph bitmaps.
 pub struct GlyphAtlas {
     device: wgpu::Device,
     format: wgpu::TextureFormat,
-    pub texture: wgpu::Texture,
-    pub view: wgpu::TextureView,
-    pub sampler: wgpu::Sampler,
-    pub packer: ShelfPacker,
-    pub cache: HashMap<GlyphKey, AtlasRegion>,
-    pub current_size: u32,
+    pub(crate) texture: wgpu::Texture,
+    pub(crate) view: wgpu::TextureView,
+    pub(crate) sampler: wgpu::Sampler,
+    pub(crate) packer: ShelfPacker,
+    pub(crate) cache: HashMap<GlyphKey, AtlasRegion>,
+    pub(crate) current_size: u32,
 }
 
 impl GlyphAtlas {
+    /// Creates an empty glyph atlas with the requested minimum texture size.
     pub fn new(device: &wgpu::Device, initial_size: u32, format: wgpu::TextureFormat) -> Self {
         let current_size = initial_size.max(DEFAULT_ATLAS_SIZE).next_power_of_two();
         let (texture, view, sampler) = Self::create_gpu_resources(device, current_size, format);
@@ -47,6 +50,7 @@ impl GlyphAtlas {
         }
     }
 
+    /// Returns the cached atlas region for a glyph, rasterizing and uploading it on demand.
     pub fn get_or_insert(
         &mut self,
         key: GlyphKey,
@@ -61,6 +65,7 @@ impl GlyphAtlas {
         self.insert_rasterized(key, &rasterized, queue, rasterizer)
     }
 
+    /// Doubles the atlas size and repacks every cached glyph into the new texture.
     pub fn grow_and_repack(&mut self, queue: &wgpu::Queue, rasterizer: &FreeTypeRasterizer) {
         let keys = self.cache.keys().copied().collect::<Vec<_>>();
         let mut new_size = self.current_size.saturating_mul(2);

@@ -1,9 +1,12 @@
+//! Rectangle pipeline creation used for backgrounds and cursor rendering.
+
 use std::borrow::Cow;
 
 use crate::renderer::instance::rect_instance_layout;
 
 use super::bind_group::create_screen_size_bind_group_layout;
 
+/// Builds the solid-rectangle render pipeline.
 pub fn create_rect_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,

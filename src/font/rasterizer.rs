@@ -1,3 +1,6 @@
+//! FreeType-backed glyph rasterization for the M0 renderer.
+
+use std::fmt;
 use std::path::Path;
 
 use fontdb::Source;
@@ -5,10 +8,11 @@ use freetype::face::LoadFlag;
 use freetype::{Bitmap, LcdFilter, Library, RenderMode};
 use log::warn;
 
-use crate::renderer::draw_list::GlyphKey;
+use crate::font::GlyphKey;
 
 use super::FontDiscovery;
 
+/// LCD arrangement used when rasterizing glyph bitmaps.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubpixelLayout {
     HorizontalRgb,
@@ -18,6 +22,7 @@ pub enum SubpixelLayout {
     None,
 }
 
+/// CPU-side bitmap produced by FreeType for a single glyph variant.
 #[derive(Clone, Debug, Default)]
 pub struct RasterizedGlyph {
     pub width: u32,
@@ -39,12 +44,25 @@ impl RasterizedGlyph {
     }
 }
 
+/// Errors produced while preparing the FreeType rasterizer.
 #[derive(Debug)]
 pub enum RasterizerError {
     Init(freetype::Error),
     InvalidFontId(u32),
 }
 
+impl fmt::Display for RasterizerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Init(error) => write!(f, "failed to initialize FreeType: {error}"),
+            Self::InvalidFontId(font_id) => write!(f, "invalid font id: {font_id}"),
+        }
+    }
+}
+
+impl std::error::Error for RasterizerError {}
+
+/// Safe wrapper around FreeType LCD glyph rasterization.
 pub struct FreeTypeRasterizer {
     library: Library,
     fonts: FontDiscovery,
@@ -52,6 +70,7 @@ pub struct FreeTypeRasterizer {
 }
 
 impl FreeTypeRasterizer {
+    /// Creates a rasterizer configured for the detected display subpixel layout.
     pub fn new(
         fonts: FontDiscovery,
         subpixel_layout: SubpixelLayout,
@@ -72,15 +91,18 @@ impl FreeTypeRasterizer {
         })
     }
 
-    pub fn fonts(&self) -> &FontDiscovery {
+    /// Returns the discovered font set used by this rasterizer.
+    pub(crate) fn fonts(&self) -> &FontDiscovery {
         &self.fonts
     }
 
-    pub fn subpixel_layout(&self) -> SubpixelLayout {
+    /// Returns the LCD subpixel layout used for glyph rasterization.
+    pub(crate) fn subpixel_layout(&self) -> SubpixelLayout {
         self.subpixel_layout
     }
 
-    pub fn rasterize_lcd(&self, glyph_key: GlyphKey) -> RasterizedGlyph {
+    /// Rasterizes a glyph variant into an LCD or grayscale bitmap.
+    pub(crate) fn rasterize_lcd(&self, glyph_key: GlyphKey) -> RasterizedGlyph {
         let font_id = self.resolve_font_id(glyph_key.font_id);
         let Ok(face) = self.load_face(font_id) else {
             warn!("font.rasterizer.load_face_failed font_id={font_id}");
@@ -139,7 +161,7 @@ impl FreeTypeRasterizer {
     }
 
     fn resolve_font_id(&self, requested_font_id: u32) -> u32 {
-        if self.fonts.db_id_for(requested_font_id).is_some() {
+        if self.fonts.face_info(requested_font_id).is_some() {
             requested_font_id
         } else {
             self.fonts.default_font_id()

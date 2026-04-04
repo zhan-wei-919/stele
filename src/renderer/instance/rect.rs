@@ -1,7 +1,10 @@
+//! Rectangle instance encoding shared between the CPU draw list and WGSL shaders.
+
 use bytemuck::{Pod, Zeroable};
 
 use crate::renderer::draw_list::RectCmd;
 
+/// Per-instance data for a solid rectangle quad.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct RectInstance {
@@ -11,6 +14,7 @@ pub struct RectInstance {
 }
 
 impl RectInstance {
+    /// Converts a rectangle command into GPU instance data.
     pub fn from_rect(cmd: RectCmd) -> Self {
         Self {
             pos: cmd.pos,
@@ -20,6 +24,7 @@ impl RectInstance {
     }
 }
 
+/// Returns the vertex-buffer layout expected by the rectangle render pipeline.
 pub fn rect_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
         wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];

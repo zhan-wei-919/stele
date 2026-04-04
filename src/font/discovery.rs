@@ -1,20 +1,25 @@
+//! Font discovery and stable application-local font identifiers.
+
 use std::collections::HashMap;
 
 use fontdb::{Database, Family, Query, ID};
 
+/// Errors produced while initializing the system font database.
 #[derive(Debug)]
 pub enum FontDiscoveryError {
+    /// No fonts were discovered on the current system.
     NoSystemFonts,
 }
 
+/// Maps fontdb face identifiers into compact IDs used by the renderer.
 pub struct FontDiscovery {
     database: Database,
     app_to_db: Vec<ID>,
-    db_to_app: HashMap<ID, u32>,
     default_font_id: u32,
 }
 
 impl FontDiscovery {
+    /// Loads system fonts and prepares a stable application-local ID mapping.
     pub fn new() -> Result<Self, FontDiscoveryError> {
         let mut database = Database::new();
         database.load_system_fonts();
@@ -45,46 +50,20 @@ impl FontDiscovery {
         Ok(Self {
             database,
             app_to_db,
-            db_to_app,
             default_font_id,
         })
     }
 
-    pub fn find_font_id(&self, family_name: &str) -> u32 {
-        self.find_font_id_opt(family_name)
-            .unwrap_or(self.default_font_id)
-    }
-
-    pub fn find_font_id_opt(&self, family_name: &str) -> Option<u32> {
-        let families = [Family::Name(family_name)];
-        self.database
-            .query(&Query {
-                families: &families,
-                ..Query::default()
-            })
-            .and_then(|db_id| self.db_to_app.get(&db_id).copied())
-    }
-
-    pub fn resolve_font_id(&self, family_name: Option<&str>) -> u32 {
-        family_name
-            .and_then(|name| self.find_font_id_opt(name))
-            .unwrap_or(self.default_font_id)
-    }
-
+    /// Returns the default sans-serif font chosen for the current system.
     pub fn default_font_id(&self) -> u32 {
         self.default_font_id
     }
 
-    pub fn db_id_for(&self, font_id: u32) -> Option<ID> {
-        self.app_to_db.get(font_id as usize).copied()
-    }
-
+    /// Resolves an application-local font ID back to the originating fontdb face.
     pub fn face_info(&self, font_id: u32) -> Option<&fontdb::FaceInfo> {
-        self.db_id_for(font_id)
+        self.app_to_db
+            .get(font_id as usize)
+            .copied()
             .and_then(|db_id| self.database.face(db_id))
-    }
-
-    pub fn database(&self) -> &Database {
-        &self.database
     }
 }
