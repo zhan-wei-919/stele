@@ -5,7 +5,7 @@ use freetype::face::LoadFlag;
 use freetype::{Bitmap, LcdFilter, Library, RenderMode};
 use log::warn;
 
-use crate::draw_list::GlyphKey;
+use crate::renderer::draw_list::GlyphKey;
 
 use super::FontDiscovery;
 

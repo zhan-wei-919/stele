@@ -1,6 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::{AtlasRegion, PositionedGlyph, RectCmd};
+use crate::renderer::atlas::AtlasRegion;
+use crate::renderer::draw_list::PositionedGlyph;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
@@ -30,24 +31,6 @@ impl GlyphInstance {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
-pub struct RectInstance {
-    pub pos: [f32; 2],
-    pub size: [f32; 2],
-    pub color: [f32; 4],
-}
-
-impl RectInstance {
-    pub fn from_rect(cmd: RectCmd) -> Self {
-        Self {
-            pos: cmd.pos,
-            size: cmd.size,
-            color: cmd.color,
-        }
-    }
-}
-
 pub fn glyph_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x2,
@@ -60,17 +43,6 @@ pub fn glyph_instance_layout() -> wgpu::VertexBufferLayout<'static> {
 
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<GlyphInstance>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &ATTRIBUTES,
-    }
-}
-
-pub fn rect_instance_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
-
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<RectInstance>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &ATTRIBUTES,
     }

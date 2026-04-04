@@ -2,8 +2,6 @@ mod font;
 mod renderer;
 
 pub use font::*;
-pub use renderer::draw_list;
-pub use renderer::instance_buffer;
 pub use renderer::*;
 
 use std::sync::Arc;
