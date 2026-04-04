@@ -1,0 +1,5 @@
+target/
+docs/
+CLAUDE.md
+.claude/
+Cargo.lock
