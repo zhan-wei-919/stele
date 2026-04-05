@@ -1,7 +1,7 @@
 //! Dirty-path rebuilding of atlas-backed instance data.
 
 use bytemuck::cast_slice;
-use log::info;
+use log::{info, warn};
 
 use super::bind_group::create_glyph_bind_group;
 use super::buffer::ensure_vertex_capacity;
@@ -32,7 +32,13 @@ impl<'window> Renderer<'window> {
             for glyph in line {
                 let key = glyph.glyph_key(self.scale_factor);
                 let cached = self.atlas.cache.contains_key(&key);
-                let region = self.atlas.get_or_insert(key, &self.queue, &self.rasterizer);
+                let region = match self.atlas.get_or_insert(key, &self.queue, &self.rasterizer) {
+                    Ok(region) => region,
+                    Err(err) => {
+                        warn!("atlas.full glyph_id={} error={err}", key.glyph_id);
+                        continue;
+                    }
+                };
                 if !cached {
                     atlas_uploads += 1;
                 }

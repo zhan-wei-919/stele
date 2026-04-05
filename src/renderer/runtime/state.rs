@@ -1,9 +1,4 @@
-//! High-level renderer state and lifecycle orchestration for the M0 prototype.
-
-mod bind_group;
-mod buffer;
-mod frame;
-mod rebuild;
+//! Renderer struct definition and core lifecycle methods.
 
 use std::mem::size_of;
 
@@ -12,41 +7,41 @@ use winit::dpi::PhysicalSize;
 
 use crate::font::FreeTypeRasterizer;
 
-use super::atlas::GlyphAtlas;
-use super::draw_list::{DrawList, DrawListOp};
-use super::instance::{GlyphInstance, RectInstance};
-use super::pipeline::{
+use super::super::atlas::GlyphAtlas;
+use super::super::draw_list::{DrawList, DrawListOp};
+use super::super::instance::{GlyphInstance, RectInstance};
+use super::super::pipeline::{
     create_glyph_pipeline, create_rect_pipeline, create_screen_size_bind_group, screen_uniform,
 };
-use bind_group::{create_glyph_bind_group, create_glyph_bind_group_layout};
-use buffer::create_vertex_buffer;
+use super::bind_group::{create_glyph_bind_group, create_glyph_bind_group_layout};
+use super::buffer::create_vertex_buffer;
 
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// GPU-backed renderer that turns draw-list updates into wgpu command buffers.
 pub struct Renderer<'window> {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    surface: wgpu::Surface<'window>,
-    glyph_pipeline: wgpu::RenderPipeline,
-    rect_pipeline: wgpu::RenderPipeline,
-    atlas: GlyphAtlas,
-    draw_list: DrawList,
-    instance_buffer: wgpu::Buffer,
-    dirty: bool,
-    surface_config: wgpu::SurfaceConfiguration,
-    rasterizer: FreeTypeRasterizer,
-    scale_factor: f32,
-    screen_bind_group: wgpu::BindGroup,
-    screen_buffer: wgpu::Buffer,
-    glyph_bind_group_layout: wgpu::BindGroupLayout,
-    glyph_bind_group: wgpu::BindGroup,
-    rect_buffer: wgpu::Buffer,
-    instance_capacity: usize,
-    rect_capacity: usize,
-    glyph_instance_count: u32,
-    rect_instance_count: u32,
-    cursor_instance_count: u32,
+    pub(super) device: wgpu::Device,
+    pub(super) queue: wgpu::Queue,
+    pub(super) surface: wgpu::Surface<'window>,
+    pub(super) glyph_pipeline: wgpu::RenderPipeline,
+    pub(super) rect_pipeline: wgpu::RenderPipeline,
+    pub(super) atlas: GlyphAtlas,
+    pub(super) draw_list: DrawList,
+    pub(super) instance_buffer: wgpu::Buffer,
+    pub(super) dirty: bool,
+    pub(super) surface_config: wgpu::SurfaceConfiguration,
+    pub(super) rasterizer: FreeTypeRasterizer,
+    pub(super) scale_factor: f32,
+    pub(super) screen_bind_group: wgpu::BindGroup,
+    pub(super) screen_buffer: wgpu::Buffer,
+    pub(super) glyph_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) glyph_bind_group: wgpu::BindGroup,
+    pub(super) rect_buffer: wgpu::Buffer,
+    pub(super) instance_capacity: usize,
+    pub(super) rect_capacity: usize,
+    pub(super) glyph_instance_count: u32,
+    pub(super) rect_instance_count: u32,
+    pub(super) cursor_instance_count: u32,
 }
 
 impl<'window> Renderer<'window> {
@@ -141,18 +136,18 @@ impl<'window> Renderer<'window> {
         self.dirty = true;
     }
 
-    fn reconfigure_surface(&self) {
+    pub(super) fn reconfigure_surface(&self) {
         if self.surface_config.width == 0 || self.surface_config.height == 0 {
             return;
         }
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    fn glyph_slice_end(&self, count: u32) -> wgpu::BufferAddress {
+    pub(super) fn glyph_slice_end(&self, count: u32) -> wgpu::BufferAddress {
         count as wgpu::BufferAddress * size_of::<GlyphInstance>() as wgpu::BufferAddress
     }
 
-    fn rect_slice_end(&self, count: u32) -> wgpu::BufferAddress {
+    pub(super) fn rect_slice_end(&self, count: u32) -> wgpu::BufferAddress {
         count as wgpu::BufferAddress * size_of::<RectInstance>() as wgpu::BufferAddress
     }
 }

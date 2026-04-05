@@ -1,10 +1,29 @@
 //! Glyph atlas allocation, upload, and cache management.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use log::info;
 
 use crate::font::{FreeTypeRasterizer, GlyphKey, RasterizedGlyph};
+
+/// The atlas texture has reached its maximum size and cannot fit more glyphs.
+#[derive(Debug)]
+pub struct AtlasFullError {
+    pub max_size: u32,
+}
+
+impl fmt::Display for AtlasFullError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "glyph atlas exceeded maximum size {}",
+            self.max_size
+        )
+    }
+}
+
+impl std::error::Error for AtlasFullError {}
 
 use super::packer::ShelfPacker;
 use super::upload::AtlasUpload;
@@ -56,9 +75,9 @@ impl GlyphAtlas {
         key: GlyphKey,
         queue: &wgpu::Queue,
         rasterizer: &FreeTypeRasterizer,
-    ) -> AtlasRegion {
+    ) -> Result<AtlasRegion, AtlasFullError> {
         if let Some(region) = self.cache.get(&key).copied() {
-            return region;
+            return Ok(region);
         }
 
         let rasterized = rasterizer.rasterize_lcd(key);
@@ -66,15 +85,20 @@ impl GlyphAtlas {
     }
 
     /// Doubles the atlas size and repacks every cached glyph into the new texture.
-    pub fn grow_and_repack(&mut self, queue: &wgpu::Queue, rasterizer: &FreeTypeRasterizer) {
+    pub fn grow_and_repack(
+        &mut self,
+        queue: &wgpu::Queue,
+        rasterizer: &FreeTypeRasterizer,
+    ) -> Result<(), AtlasFullError> {
         let keys = self.cache.keys().copied().collect::<Vec<_>>();
         let mut new_size = self.current_size.saturating_mul(2);
 
         loop {
-            assert!(
-                new_size <= MAX_ATLAS_SIZE,
-                "atlas exceeded maximum size {MAX_ATLAS_SIZE}"
-            );
+            if new_size > MAX_ATLAS_SIZE {
+                return Err(AtlasFullError {
+                    max_size: MAX_ATLAS_SIZE,
+                });
+            }
 
             let (texture, view, sampler) =
                 Self::create_gpu_resources(&self.device, new_size, self.format);
@@ -109,7 +133,7 @@ impl GlyphAtlas {
                 self.packer = packer;
                 self.cache = cache;
                 self.current_size = new_size;
-                return;
+                return Ok(());
             }
 
             new_size = new_size.saturating_mul(2);
@@ -122,12 +146,12 @@ impl GlyphAtlas {
         rasterized: &RasterizedGlyph,
         queue: &wgpu::Queue,
         rasterizer: &FreeTypeRasterizer,
-    ) -> AtlasRegion {
+    ) -> Result<AtlasRegion, AtlasFullError> {
         let upload = AtlasUpload::from_rasterized(rasterized, rasterizer.subpixel_layout());
         if upload.width == 0 || upload.height == 0 {
             let region = Self::empty_region(rasterized);
             self.cache.insert(key, region);
-            return region;
+            return Ok(region);
         }
 
         loop {
@@ -135,10 +159,10 @@ impl GlyphAtlas {
                 Self::write_texture(&self.texture, queue, origin, &upload);
                 let region = Self::region_for(origin, &upload, self.current_size);
                 self.cache.insert(key, region);
-                return region;
+                return Ok(region);
             }
 
-            self.grow_and_repack(queue, rasterizer);
+            self.grow_and_repack(queue, rasterizer)?;
         }
     }
 
