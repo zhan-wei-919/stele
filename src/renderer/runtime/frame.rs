@@ -5,6 +5,7 @@ use std::time::Instant;
 use log::{info, warn};
 
 use super::Renderer;
+use crate::renderer::draw_list::RenderLayer;
 
 impl<'window> Renderer<'window> {
     /// Renders the current draw list into the swapchain surface.
@@ -14,6 +15,8 @@ impl<'window> Renderer<'window> {
         }
 
         let frame_start = Instant::now();
+        self.tessellation_cache.begin_frame();
+        self.image_cache.begin_frame();
         if self.dirty {
             self.rebuild_gpu_data();
         }
@@ -21,14 +24,14 @@ impl<'window> Renderer<'window> {
         let Some((surface_texture, suboptimal)) = self.acquire_surface_texture() else {
             return;
         };
-        self.render_surface_texture(&surface_texture);
+        let draw_calls = self.render_surface_texture(&surface_texture);
         surface_texture.present();
 
         if suboptimal {
             self.reconfigure_surface();
         }
 
-        info!("frame.glyph_count count={}", self.glyph_instance_count);
+        info!("frame.draw_calls count={draw_calls}");
         info!("frame.time_us value={}", frame_start.elapsed().as_micros());
     }
 
@@ -48,7 +51,7 @@ impl<'window> Renderer<'window> {
         }
     }
 
-    fn render_surface_texture(&self, surface_texture: &wgpu::SurfaceTexture) {
+    fn render_surface_texture(&self, surface_texture: &wgpu::SurfaceTexture) -> u32 {
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -75,52 +78,118 @@ impl<'window> Renderer<'window> {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.record_passes(&mut pass);
+            let draw_calls = self.record_passes(&mut pass);
+            drop(pass);
+            self.queue.submit(Some(encoder.finish()));
+            return draw_calls;
+        }
+    }
+
+    fn record_passes<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) -> u32 {
+        let mut draw_calls = 0;
+        for layer in RenderLayer::ALL {
+            draw_calls += self.draw_rects_in_layer(pass, layer);
+            draw_calls += self.draw_paths_in_layer(pass, layer);
+            draw_calls += self.draw_images_in_layer(pass, layer);
+            draw_calls += self.draw_glyphs_in_layer(pass, layer);
+        }
+        draw_calls
+    }
+
+    fn draw_rects_in_layer<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        layer: RenderLayer,
+    ) -> u32 {
+        let range = self.rect_ranges_by_layer[layer.index()];
+        if range.count == 0 {
+            return 0;
         }
 
-        self.queue.submit(Some(encoder.finish()));
-    }
-
-    fn record_passes<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        self.draw_rects(pass);
-        self.draw_glyphs(pass);
-        self.draw_cursor(pass);
-    }
-
-    fn draw_rects<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
         pass.set_pipeline(&self.rect_pipeline);
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
-        if self.rect_instance_count == 0 {
-            return;
-        }
-
-        let end = self.rect_slice_end(self.rect_instance_count);
-        pass.set_vertex_buffer(0, self.rect_buffer.slice(..end));
-        pass.draw(0..6, 0..self.rect_instance_count);
+        pass.set_vertex_buffer(
+            0,
+            self.rect_buffer
+                .slice(..self.rect_slice_end(self.rect_instance_count)),
+        );
+        pass.draw(0..6, range.start..range.end());
+        1
     }
 
-    fn draw_glyphs<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
+    fn draw_paths_in_layer<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        layer: RenderLayer,
+    ) -> u32 {
+        let range = self.path_ranges_by_layer[layer.index()];
+        if range.count == 0 {
+            return 0;
+        }
+
+        pass.set_pipeline(&self.path_pipeline);
+        pass.set_bind_group(0, &self.screen_bind_group, &[]);
+        pass.set_vertex_buffer(
+            0,
+            self.path_vertex_buffer
+                .slice(..self.path_vertex_slice_end(self.path_vertex_count)),
+        );
+        pass.set_index_buffer(
+            self.path_index_buffer
+                .slice(..self.path_index_slice_end(self.path_index_count)),
+            wgpu::IndexFormat::Uint32,
+        );
+        pass.draw_indexed(range.start..range.end(), 0, 0..1);
+        1
+    }
+
+    fn draw_images_in_layer<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        layer: RenderLayer,
+    ) -> u32 {
+        if self.image_instance_count == 0 {
+            return 0;
+        }
+
+        let mut draw_calls = 0;
+        for batch in &self.image_batches_by_layer[layer.index()] {
+            let Some(image) = self.image_cache.get(batch.content_hash) else {
+                debug_assert!(false, "image batch referenced a missing cached texture");
+                continue;
+            };
+
+            pass.set_pipeline(&self.image_pipeline);
+            pass.set_bind_group(0, &image.bind_group, &[]);
+            pass.set_vertex_buffer(
+                0,
+                self.image_instance_buffer
+                    .slice(..self.image_slice_end(self.image_instance_count)),
+            );
+            pass.draw(0..6, batch.range.start..batch.range.end());
+            draw_calls += 1;
+        }
+        draw_calls
+    }
+
+    fn draw_glyphs_in_layer<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        layer: RenderLayer,
+    ) -> u32 {
+        let range = self.glyph_ranges_by_layer[layer.index()];
+        if range.count == 0 {
+            return 0;
+        }
+
         pass.set_pipeline(&self.glyph_pipeline);
         pass.set_bind_group(0, &self.glyph_bind_group, &[]);
-        if self.glyph_instance_count == 0 {
-            return;
-        }
-
-        let end = self.glyph_slice_end(self.glyph_instance_count);
-        pass.set_vertex_buffer(0, self.instance_buffer.slice(..end));
-        pass.draw(0..6, 0..self.glyph_instance_count);
-    }
-
-    fn draw_cursor<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        if self.cursor_instance_count == 0 {
-            return;
-        }
-
-        let start = self.rect_slice_end(self.rect_instance_count);
-        let end = self.rect_slice_end(self.rect_instance_count + self.cursor_instance_count);
-        pass.set_pipeline(&self.rect_pipeline);
-        pass.set_bind_group(0, &self.screen_bind_group, &[]);
-        pass.set_vertex_buffer(0, self.rect_buffer.slice(start..end));
-        pass.draw(0..6, 0..self.cursor_instance_count);
+        pass.set_vertex_buffer(
+            0,
+            self.instance_buffer
+                .slice(..self.glyph_slice_end(self.glyph_instance_count)),
+        );
+        pass.draw(0..6, range.start..range.end());
+        1
     }
 }

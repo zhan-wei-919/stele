@@ -14,11 +14,11 @@ pub struct RectInstance {
 }
 
 impl RectInstance {
-    /// Converts a rectangle command into GPU instance data.
-    pub fn from_rect(cmd: RectCmd) -> Self {
+    /// Converts logical rectangle coordinates into physical pixels for the GPU.
+    pub fn from_rect(cmd: RectCmd, scale_factor: f32) -> Self {
         Self {
-            pos: cmd.pos,
-            size: cmd.size,
+            pos: [cmd.pos[0] * scale_factor, cmd.pos[1] * scale_factor],
+            size: [cmd.size[0] * scale_factor, cmd.size[1] * scale_factor],
             color: cmd.color,
         }
     }

@@ -4,7 +4,10 @@ mod renderer;
 use std::sync::Arc;
 
 use crate::font::{FontDiscovery, FreeTypeRasterizer, SubpixelBin};
-use crate::renderer::{DrawListOp, PositionedGlyph, Renderer};
+use crate::renderer::{
+    DrawListOp, ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, PositionedGlyph,
+    RectCmd, RenderLayer, Renderer, StrokeStyle,
+};
 use fontdb::Source;
 use freetype::{face::LoadFlag, Library};
 use log::warn;
@@ -21,6 +24,9 @@ const FONT_SIZE: f32 = 14.0;
 const PADDING_X: f32 = 24.0;
 const PADDING_Y: f32 = 24.0;
 const TEXT_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
+const PANEL_BG: [f32; 4] = [0.07, 0.11, 0.17, 1.0];
+const UNDERLINE_COLOR: [f32; 4] = [0.94, 0.23, 0.27, 1.0];
+const CURSOR_COLOR: [f32; 4] = [0.96, 0.96, 0.96, 0.85];
 const HARD_CODED_TEXT: [&str; 3] = [
     "Hello, Stele! — Pixel-perfect terminal.",
     "你好世界 — CJK text rendering test.",
@@ -170,18 +176,158 @@ async fn init_renderer(window: Arc<Window>) -> Renderer<'static> {
 
 fn build_hardcoded_draw_list(rasterizer: &FreeTypeRasterizer) -> Vec<DrawListOp> {
     let font_id = rasterizer.fonts().default_font_id();
-    let line_height = line_metrics(font_id, FONT_SIZE, rasterizer).1;
+    let (ascent, line_height) = line_metrics(font_id, FONT_SIZE, rasterizer);
     let mut y_offset = PADDING_Y;
+    let image = build_demo_image();
+    let mut ops = vec![
+        DrawListOp::SetRects(build_demo_rects(ascent, line_height)),
+        DrawListOp::SetPaths(build_demo_paths()),
+        DrawListOp::SetImages(build_demo_images(image)),
+    ];
 
-    HARD_CODED_TEXT
-        .into_iter()
-        .enumerate()
-        .map(|(line_index, text)| {
-            let glyphs = layout_line(text, font_id, FONT_SIZE, y_offset, rasterizer);
-            y_offset += line_height;
-            DrawListOp::Insert { line_index, glyphs }
-        })
-        .collect()
+    for (line_index, text) in HARD_CODED_TEXT.into_iter().enumerate() {
+        let glyphs = layout_line(text, font_id, FONT_SIZE, y_offset, rasterizer);
+        y_offset += line_height;
+        ops.push(DrawListOp::Insert { line_index, glyphs });
+    }
+
+    ops
+}
+
+fn build_demo_rects(ascent: f32, line_height: f32) -> Vec<RectCmd> {
+    vec![
+        RectCmd {
+            pos: [12.0, 12.0],
+            size: [WINDOW_WIDTH as f32 - 24.0, line_height * 3.2],
+            color: PANEL_BG,
+            layer: RenderLayer::Background,
+        },
+        RectCmd {
+            pos: [PADDING_X, PADDING_Y + ascent + 4.0],
+            size: [250.0, 2.0],
+            color: UNDERLINE_COLOR,
+            layer: RenderLayer::Foreground,
+        },
+        RectCmd {
+            pos: [PADDING_X + 252.0, PADDING_Y + 4.0],
+            size: [2.0, line_height],
+            color: CURSOR_COLOR,
+            layer: RenderLayer::Overlay,
+        },
+    ]
+}
+
+fn build_demo_paths() -> Vec<PathCmd> {
+    // The M0 demo intentionally instantiates line, quadratic, and cubic paths
+    // plus every cap/join style once, so the whole primitive surface is exercised
+    // by `cargo run` instead of existing only as future-facing API shape.
+    vec![
+        PathCmd {
+            verbs: vec![
+                PathVerb::MoveTo { to: [100.0, 185.0] },
+                PathVerb::LineTo { to: [400.0, 185.0] },
+            ],
+            fill: None,
+            stroke: Some(StrokeStyle {
+                color: [1.0, 1.0, 1.0, 1.0],
+                width: 2.0,
+                line_cap: LineCap::Butt,
+                line_join: LineJoin::Bevel,
+            }),
+            layer: RenderLayer::Foreground,
+        },
+        PathCmd {
+            verbs: vec![
+                PathVerb::MoveTo { to: [90.0, 260.0] },
+                PathVerb::CubicTo {
+                    ctrl1: [180.0, 170.0],
+                    ctrl2: [310.0, 350.0],
+                    to: [430.0, 250.0],
+                },
+            ],
+            fill: None,
+            stroke: Some(StrokeStyle {
+                color: [0.28, 0.85, 0.45, 1.0],
+                width: 2.0,
+                line_cap: LineCap::Square,
+                line_join: LineJoin::Miter,
+            }),
+            layer: RenderLayer::Content,
+        },
+        PathCmd {
+            verbs: vec![
+                PathVerb::MoveTo { to: [475.0, 220.0] },
+                PathVerb::QuadTo {
+                    ctrl: [605.0, 145.0],
+                    to: [725.0, 235.0],
+                },
+            ],
+            fill: None,
+            stroke: Some(StrokeStyle {
+                color: [0.98, 0.78, 0.24, 1.0],
+                width: 2.0,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+            }),
+            layer: RenderLayer::Content,
+        },
+        PathCmd {
+            verbs: vec![
+                PathVerb::MoveTo { to: [500.0, 320.0] },
+                PathVerb::LineTo { to: [720.0, 365.0] },
+                PathVerb::LineTo { to: [565.0, 520.0] },
+                PathVerb::Close,
+            ],
+            fill: Some([0.2, 0.4, 0.8, 0.5]),
+            stroke: Some(StrokeStyle {
+                color: [0.96, 0.97, 0.99, 1.0],
+                width: 1.0,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Bevel,
+            }),
+            layer: RenderLayer::Content,
+        },
+    ]
+}
+
+fn build_demo_images(image: Arc<ImageData>) -> Vec<ImageCmd> {
+    vec![
+        ImageCmd {
+            pos: [160.0, 335.0],
+            size: [128.0, 128.0],
+            data: image.clone(),
+            layer: RenderLayer::Content,
+        },
+        ImageCmd {
+            pos: [310.0, 360.0],
+            size: [96.0, 96.0],
+            data: image,
+            layer: RenderLayer::Content,
+        },
+    ]
+}
+
+fn build_demo_image() -> Arc<ImageData> {
+    let width = 64u32;
+    let height = 64u32;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+
+    for y in 0..height {
+        for x in 0..width {
+            let border = x < 4 || y < 4 || x >= width - 4 || y >= height - 4;
+            let checker = ((x / 8) + (y / 8)) % 2 == 0;
+            let color = if border {
+                [255, 255, 255, 255]
+            } else if checker {
+                [52, 171, 220, 255]
+            } else {
+                [246, 143, 84, 255]
+            };
+            rgba.extend_from_slice(&color);
+        }
+    }
+
+    Arc::new(ImageData::new(rgba, width, height))
 }
 
 fn layout_line(

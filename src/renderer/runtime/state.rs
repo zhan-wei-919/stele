@@ -8,15 +8,46 @@ use winit::dpi::PhysicalSize;
 use crate::font::FreeTypeRasterizer;
 
 use super::super::atlas::GlyphAtlas;
-use super::super::draw_list::{DrawList, DrawListOp};
-use super::super::instance::{GlyphInstance, RectInstance};
+use super::super::draw_list::{DrawList, DrawListOp, RenderLayer};
+use super::super::image_cache::ImageCache;
+use super::super::instance::{GlyphInstance, ImageInstance, PathVertex, RectInstance};
 use super::super::pipeline::{
-    create_glyph_pipeline, create_rect_pipeline, create_screen_size_bind_group, screen_uniform,
+    create_glyph_pipeline, create_image_bind_group_layout, create_image_pipeline,
+    create_image_sampler, create_path_pipeline, create_rect_pipeline,
+    create_screen_size_bind_group, create_screen_size_bind_group_layout, screen_uniform,
 };
+use super::super::tessellation::TessellationCache;
 use super::bind_group::{create_glyph_bind_group, create_glyph_bind_group_layout};
-use super::buffer::create_vertex_buffer;
+use super::buffer::{create_index_buffer, create_vertex_buffer};
 
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const LAYER_COUNT: usize = RenderLayer::ALL.len();
+
+/// A contiguous slice inside one GPU buffer for a single primitive family.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PrimitiveRange {
+    pub start: u32,
+    pub count: u32,
+}
+
+impl PrimitiveRange {
+    /// Creates a range from an inclusive start and element count.
+    pub const fn new(start: u32, count: u32) -> Self {
+        Self { start, count }
+    }
+
+    /// Returns the exclusive end of the range.
+    pub const fn end(self) -> u32 {
+        self.start + self.count
+    }
+}
+
+/// A contiguous image instance batch that can reuse one bind group.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ImageBatch {
+    pub content_hash: u64,
+    pub range: PrimitiveRange,
+}
 
 /// GPU-backed renderer that turns draw-list updates into wgpu command buffers.
 pub struct Renderer<'window> {
@@ -25,9 +56,14 @@ pub struct Renderer<'window> {
     pub(super) surface: wgpu::Surface<'window>,
     pub(super) glyph_pipeline: wgpu::RenderPipeline,
     pub(super) rect_pipeline: wgpu::RenderPipeline,
+    pub(super) path_pipeline: wgpu::RenderPipeline,
+    pub(super) image_pipeline: wgpu::RenderPipeline,
     pub(super) atlas: GlyphAtlas,
     pub(super) draw_list: DrawList,
     pub(super) instance_buffer: wgpu::Buffer,
+    pub(super) path_vertex_buffer: wgpu::Buffer,
+    pub(super) path_index_buffer: wgpu::Buffer,
+    pub(super) image_instance_buffer: wgpu::Buffer,
     pub(super) dirty: bool,
     pub(super) surface_config: wgpu::SurfaceConfiguration,
     pub(super) rasterizer: FreeTypeRasterizer,
@@ -36,12 +72,25 @@ pub struct Renderer<'window> {
     pub(super) screen_buffer: wgpu::Buffer,
     pub(super) glyph_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) glyph_bind_group: wgpu::BindGroup,
+    pub(super) image_bind_group_layout: wgpu::BindGroupLayout,
+    pub(super) image_sampler: wgpu::Sampler,
     pub(super) rect_buffer: wgpu::Buffer,
+    pub(super) tessellation_cache: TessellationCache,
+    pub(super) image_cache: ImageCache,
     pub(super) instance_capacity: usize,
     pub(super) rect_capacity: usize,
+    pub(super) path_vertex_capacity: usize,
+    pub(super) path_index_capacity: usize,
+    pub(super) image_instance_capacity: usize,
     pub(super) glyph_instance_count: u32,
     pub(super) rect_instance_count: u32,
-    pub(super) cursor_instance_count: u32,
+    pub(super) path_vertex_count: u32,
+    pub(super) path_index_count: u32,
+    pub(super) image_instance_count: u32,
+    pub(super) rect_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
+    pub(super) path_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
+    pub(super) glyph_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
+    pub(super) image_batches_by_layer: [Vec<ImageBatch>; LAYER_COUNT],
 }
 
 impl<'window> Renderer<'window> {
@@ -59,17 +108,24 @@ impl<'window> Renderer<'window> {
         surface.configure(&device, &surface_config);
 
         let atlas = GlyphAtlas::new(&device, 2048, ATLAS_FORMAT);
+        let screen_bind_group_layout = create_screen_size_bind_group_layout(&device);
         let glyph_bind_group_layout = create_glyph_bind_group_layout(&device);
         let glyph_pipeline =
             create_glyph_pipeline(&device, surface_config.format, &glyph_bind_group_layout);
-        let rect_pipeline = create_rect_pipeline(&device, surface_config.format);
-        let rect_layout = rect_pipeline.get_bind_group_layout(0);
+        let rect_pipeline =
+            create_rect_pipeline(&device, surface_config.format, &screen_bind_group_layout);
+        let path_pipeline =
+            create_path_pipeline(&device, surface_config.format, &screen_bind_group_layout);
+        let image_bind_group_layout = create_image_bind_group_layout(&device);
+        let image_pipeline =
+            create_image_pipeline(&device, surface_config.format, &image_bind_group_layout);
         let (screen_bind_group, screen_buffer) = create_screen_size_bind_group(
             &device,
-            &rect_layout,
+            &screen_bind_group_layout,
             surface_config.width,
             surface_config.height,
         );
+        let image_sampler = create_image_sampler(&device);
         let glyph_bind_group =
             create_glyph_bind_group(&device, &glyph_bind_group_layout, &screen_buffer, &atlas);
 
@@ -79,12 +135,25 @@ impl<'window> Renderer<'window> {
             surface,
             glyph_pipeline,
             rect_pipeline,
+            path_pipeline,
+            image_pipeline,
             atlas,
             draw_list: DrawList::default(),
             instance_buffer: create_vertex_buffer::<GlyphInstance>(
                 &device,
                 1,
                 "stele.glyph_instances",
+            ),
+            path_vertex_buffer: create_vertex_buffer::<PathVertex>(
+                &device,
+                1,
+                "stele.path_vertices",
+            ),
+            path_index_buffer: create_index_buffer::<u32>(&device, 1, "stele.path_indices"),
+            image_instance_buffer: create_vertex_buffer::<ImageInstance>(
+                &device,
+                1,
+                "stele.image_instances",
             ),
             dirty: false,
             surface_config,
@@ -94,12 +163,25 @@ impl<'window> Renderer<'window> {
             screen_buffer,
             glyph_bind_group_layout,
             glyph_bind_group,
+            image_bind_group_layout,
+            image_sampler,
             rect_buffer: create_vertex_buffer::<RectInstance>(&device, 1, "stele.rect_instances"),
+            tessellation_cache: TessellationCache::default(),
+            image_cache: ImageCache::default(),
             instance_capacity: 1,
             rect_capacity: 1,
+            path_vertex_capacity: 1,
+            path_index_capacity: 1,
+            image_instance_capacity: 1,
             glyph_instance_count: 0,
             rect_instance_count: 0,
-            cursor_instance_count: 0,
+            path_vertex_count: 0,
+            path_index_count: 0,
+            image_instance_count: 0,
+            rect_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
+            path_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
+            glyph_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
+            image_batches_by_layer: std::array::from_fn(|_| Vec::new()),
         }
     }
 
@@ -130,6 +212,7 @@ impl<'window> Renderer<'window> {
 
         if scale_factor_changed {
             self.atlas = GlyphAtlas::new(&self.device, self.atlas.current_size, ATLAS_FORMAT);
+            self.tessellation_cache.clear();
             self.refresh_glyph_bind_group();
         }
 
@@ -149,5 +232,17 @@ impl<'window> Renderer<'window> {
 
     pub(super) fn rect_slice_end(&self, count: u32) -> wgpu::BufferAddress {
         count as wgpu::BufferAddress * size_of::<RectInstance>() as wgpu::BufferAddress
+    }
+
+    pub(super) fn path_vertex_slice_end(&self, count: u32) -> wgpu::BufferAddress {
+        count as wgpu::BufferAddress * size_of::<PathVertex>() as wgpu::BufferAddress
+    }
+
+    pub(super) fn path_index_slice_end(&self, count: u32) -> wgpu::BufferAddress {
+        count as wgpu::BufferAddress * size_of::<u32>() as wgpu::BufferAddress
+    }
+
+    pub(super) fn image_slice_end(&self, count: u32) -> wgpu::BufferAddress {
+        count as wgpu::BufferAddress * size_of::<ImageInstance>() as wgpu::BufferAddress
     }
 }

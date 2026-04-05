@@ -1,6 +1,6 @@
 //! Incremental mutations applied to the renderer-owned draw list.
 
-use super::types::PositionedGlyph;
+use super::types::{ImageCmd, PathCmd, PositionedGlyph, RectCmd};
 
 /// Incremental update applied to a renderer-owned line list.
 #[derive(Clone, Debug)]
@@ -22,18 +22,22 @@ pub enum DrawListOp {
         line_index: usize,
         glyphs: Vec<PositionedGlyph>,
     },
+    SetRects(Vec<RectCmd>),
+    SetPaths(Vec<PathCmd>),
+    SetImages(Vec<ImageCmd>),
 }
 
-/// Renderer input state assembled from line-based glyph lists and solid rectangles.
+/// Renderer input state assembled from glyphs plus layer-aware CPU primitives.
 #[derive(Clone, Debug, Default)]
 pub struct DrawList {
     pub lines: Vec<Vec<PositionedGlyph>>,
-    pub rects: Vec<super::types::RectCmd>,
-    pub cursor: Option<super::types::RectCmd>,
+    pub rects: Vec<RectCmd>,
+    pub paths: Vec<PathCmd>,
+    pub images: Vec<ImageCmd>,
 }
 
 impl DrawList {
-    /// Creates an empty draw list with no lines, rectangles, or cursor.
+    /// Creates an empty draw list with no glyphs or primitive commands.
     ///
     /// This convenience constructor is currently only used by the unit test.
     /// Production code builds the renderer-owned draw list through Default plus
@@ -42,7 +46,7 @@ impl DrawList {
         Self::default()
     }
 
-    /// Applies incremental line operations while preserving the existing rect and cursor state.
+    /// Applies incremental line and primitive operations in-order.
     pub fn apply_ops<I>(&mut self, ops: I)
     where
         I: IntoIterator<Item = DrawListOp>,
@@ -66,6 +70,15 @@ impl DrawList {
                         continue;
                     }
                     self.lines[line_index] = glyphs;
+                }
+                DrawListOp::SetRects(rects) => {
+                    self.rects = rects;
+                }
+                DrawListOp::SetPaths(paths) => {
+                    self.paths = paths;
+                }
+                DrawListOp::SetImages(images) => {
+                    self.images = images;
                 }
             }
         }
@@ -100,9 +113,13 @@ impl DrawList {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{DrawList, DrawListOp};
     use crate::font::SubpixelBin;
-    use crate::renderer::draw_list::PositionedGlyph;
+    use crate::renderer::draw_list::{
+        ImageCmd, ImageData, PathCmd, PathVerb, PositionedGlyph, RectCmd, RenderLayer,
+    };
 
     fn glyph(id: u16) -> PositionedGlyph {
         PositionedGlyph {
@@ -132,5 +149,39 @@ mod tests {
 
         draw_list.apply_ops([DrawListOp::Remove { line_index: 0 }]);
         assert!(draw_list.lines.is_empty());
+    }
+
+    #[test]
+    fn apply_ops_replaces_rects_paths_and_images() {
+        let mut draw_list = DrawList::new();
+        let image = Arc::new(ImageData::new(vec![255, 0, 0, 255], 1, 1));
+
+        draw_list.apply_ops([
+            DrawListOp::SetRects(vec![RectCmd {
+                pos: [1.0, 2.0],
+                size: [3.0, 4.0],
+                color: [0.1, 0.2, 0.3, 1.0],
+                layer: RenderLayer::Background,
+            }]),
+            DrawListOp::SetPaths(vec![PathCmd {
+                verbs: vec![
+                    PathVerb::MoveTo { to: [0.0, 0.0] },
+                    PathVerb::LineTo { to: [10.0, 10.0] },
+                ],
+                fill: None,
+                stroke: None,
+                layer: RenderLayer::Content,
+            }]),
+            DrawListOp::SetImages(vec![ImageCmd {
+                pos: [5.0, 6.0],
+                size: [7.0, 8.0],
+                data: image,
+                layer: RenderLayer::Overlay,
+            }]),
+        ]);
+
+        assert_eq!(draw_list.rects.len(), 1);
+        assert_eq!(draw_list.paths.len(), 1);
+        assert_eq!(draw_list.images.len(), 1);
     }
 }

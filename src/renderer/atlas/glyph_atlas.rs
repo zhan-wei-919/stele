@@ -15,11 +15,7 @@ pub struct AtlasFullError {
 
 impl fmt::Display for AtlasFullError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "glyph atlas exceeded maximum size {}",
-            self.max_size
-        )
+        write!(f, "glyph atlas exceeded maximum size {}", self.max_size)
     }
 }
 
