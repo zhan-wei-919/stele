@@ -1,14 +1,10 @@
-//! Dirty-path rebuilding of atlas-backed instance data.
+//! CPU-side assembly of layered glyph, rect, path, and image draw data.
 
 use std::mem::size_of;
 
-use bytemuck::cast_slice;
 use log::{info, warn};
 
-use super::bind_group::create_glyph_bind_group;
-use super::buffer::{ensure_index_capacity, ensure_vertex_capacity};
-use super::state::{ImageBatch, PrimitiveRange};
-use super::Renderer;
+use super::super::state::{ImageBatch, PrimitiveRange, Renderer};
 use crate::renderer::draw_list::RenderLayer;
 use crate::renderer::instance::{GlyphInstance, ImageInstance, PathVertex, RectInstance};
 
@@ -16,7 +12,7 @@ const CACHE_EVICTION_AGE: u64 = 120;
 const MAX_PATH_VERTEX_BYTES: usize = 1024 * 1024;
 
 impl<'window> Renderer<'window> {
-    pub(super) fn rebuild_gpu_data(&mut self) {
+    pub(in crate::renderer::runtime) fn rebuild_gpu_data(&mut self) {
         let (glyph_instances, glyph_ranges, atlas_uploads) = self.build_glyph_instances();
         let (rect_instances, rect_ranges) = self.build_rect_instances();
         let (path_vertices, path_indices, path_ranges, tessellation_count) =
@@ -54,7 +50,13 @@ impl<'window> Renderer<'window> {
         }
     }
 
-    fn build_glyph_instances(&mut self) -> (Vec<GlyphInstance>, [PrimitiveRange; 4], usize) {
+    fn build_glyph_instances(
+        &mut self,
+    ) -> (
+        Vec<GlyphInstance>,
+        [PrimitiveRange; RenderLayer::ALL.len()],
+        usize,
+    ) {
         let mut atlas_uploads = 0usize;
         let mut glyph_instances = Vec::new();
 
@@ -83,15 +85,17 @@ impl<'window> Renderer<'window> {
             }
         }
 
-        let mut glyph_ranges = [PrimitiveRange::default(); 4];
+        let mut glyph_ranges = [PrimitiveRange::default(); RenderLayer::ALL.len()];
         glyph_ranges[RenderLayer::Content.index()] =
             PrimitiveRange::new(0, glyph_instances.len() as u32);
         (glyph_instances, glyph_ranges, atlas_uploads)
     }
 
-    fn build_rect_instances(&self) -> (Vec<RectInstance>, [PrimitiveRange; 4]) {
+    fn build_rect_instances(
+        &self,
+    ) -> (Vec<RectInstance>, [PrimitiveRange; RenderLayer::ALL.len()]) {
         let mut rect_instances = Vec::new();
-        let mut rect_ranges = [PrimitiveRange::default(); 4];
+        let mut rect_ranges = [PrimitiveRange::default(); RenderLayer::ALL.len()];
 
         for layer in RenderLayer::ALL {
             let start = rect_instances.len() as u32;
@@ -112,10 +116,17 @@ impl<'window> Renderer<'window> {
         (rect_instances, rect_ranges)
     }
 
-    fn build_path_geometry(&mut self) -> (Vec<PathVertex>, Vec<u32>, [PrimitiveRange; 4], usize) {
+    fn build_path_geometry(
+        &mut self,
+    ) -> (
+        Vec<PathVertex>,
+        Vec<u32>,
+        [PrimitiveRange; RenderLayer::ALL.len()],
+        usize,
+    ) {
         let mut path_vertices = Vec::new();
         let mut path_indices = Vec::new();
-        let mut path_ranges = [PrimitiveRange::default(); 4];
+        let mut path_ranges = [PrimitiveRange::default(); RenderLayer::ALL.len()];
         let mut tessellation_count = 0usize;
 
         for layer in RenderLayer::ALL {
@@ -135,9 +146,7 @@ impl<'window> Renderer<'window> {
                 if created {
                     tessellation_count += 1;
                 }
-                let vertex_offset = path_vertices.len() as u32;
-                path_vertices.extend_from_slice(&mesh.vertices);
-                path_indices.extend(mesh.indices.iter().map(|index| index + vertex_offset));
+                append_cached_path_mesh(&mut path_vertices, &mut path_indices, mesh);
             }
             path_ranges[layer.index()] =
                 PrimitiveRange::new(start, path_indices.len() as u32 - start);
@@ -151,7 +160,13 @@ impl<'window> Renderer<'window> {
         (path_vertices, path_indices, path_ranges, tessellation_count)
     }
 
-    fn build_image_instances(&mut self) -> (Vec<ImageInstance>, [Vec<ImageBatch>; 4], usize) {
+    fn build_image_instances(
+        &mut self,
+    ) -> (
+        Vec<ImageInstance>,
+        [Vec<ImageBatch>; RenderLayer::ALL.len()],
+        usize,
+    ) {
         let mut image_instances = Vec::new();
         let mut image_batches = std::array::from_fn(|_| Vec::<ImageBatch>::new());
         let mut image_uploads = 0usize;
@@ -182,139 +197,38 @@ impl<'window> Renderer<'window> {
                 let content_hash = cmd.data.content_hash();
                 let instance_start = image_instances.len() as u32;
                 image_instances.push(ImageInstance::from_image(cmd, self.scale_factor));
-
-                match layer_batches.last_mut() {
-                    Some(batch)
-                        if batch.content_hash == content_hash
-                            && batch.range.end() == instance_start =>
-                    {
-                        batch.range.count += 1;
-                    }
-                    _ => layer_batches.push(ImageBatch {
-                        content_hash,
-                        range: PrimitiveRange::new(instance_start, 1),
-                    }),
-                }
+                extend_or_start_image_batch(layer_batches, content_hash, instance_start);
             }
         }
 
         (image_instances, image_batches, image_uploads)
     }
+}
 
-    fn ensure_instance_capacity(
-        &mut self,
-        glyph_count: usize,
-        rect_count: usize,
-        path_vertex_count: usize,
-        path_index_count: usize,
-        image_count: usize,
-    ) {
-        ensure_vertex_capacity::<GlyphInstance>(
-            &self.device,
-            glyph_count,
-            &mut self.instance_buffer,
-            &mut self.instance_capacity,
-            "stele.glyph_instances",
-        );
-        ensure_vertex_capacity::<RectInstance>(
-            &self.device,
-            rect_count,
-            &mut self.rect_buffer,
-            &mut self.rect_capacity,
-            "stele.rect_instances",
-        );
-        ensure_vertex_capacity::<PathVertex>(
-            &self.device,
-            path_vertex_count,
-            &mut self.path_vertex_buffer,
-            &mut self.path_vertex_capacity,
-            "stele.path_vertices",
-        );
-        ensure_index_capacity::<u32>(
-            &self.device,
-            path_index_count,
-            &mut self.path_index_buffer,
-            &mut self.path_index_capacity,
-            "stele.path_indices",
-        );
-        ensure_vertex_capacity::<ImageInstance>(
-            &self.device,
-            image_count,
-            &mut self.image_instance_buffer,
-            &mut self.image_instance_capacity,
-            "stele.image_instances",
-        );
-    }
+fn append_cached_path_mesh(
+    path_vertices: &mut Vec<PathVertex>,
+    path_indices: &mut Vec<u32>,
+    mesh: &crate::renderer::tessellation::CachedMesh,
+) {
+    let vertex_offset = path_vertices.len() as u32;
+    path_vertices.extend_from_slice(&mesh.vertices);
+    path_indices.extend(mesh.indices.iter().map(|index| index + vertex_offset));
+}
 
-    fn upload_glyph_instances(&mut self, glyph_instances: &[GlyphInstance]) {
-        self.glyph_instance_count = glyph_instances.len() as u32;
-        if glyph_instances.is_empty() {
-            return;
+fn extend_or_start_image_batch(
+    layer_batches: &mut Vec<ImageBatch>,
+    content_hash: u64,
+    instance_start: u32,
+) {
+    match layer_batches.last_mut() {
+        Some(batch)
+            if batch.content_hash == content_hash && batch.range.end() == instance_start =>
+        {
+            batch.range.count += 1;
         }
-
-        info!(
-            "frame.write_buffer target=glyph_instances count={}",
-            glyph_instances.len()
-        );
-        self.queue
-            .write_buffer(&self.instance_buffer, 0, cast_slice(glyph_instances));
-    }
-
-    fn upload_rect_instances(&mut self, rect_instances: &[RectInstance]) {
-        self.rect_instance_count = rect_instances.len() as u32;
-        if rect_instances.is_empty() {
-            return;
-        }
-
-        info!(
-            "frame.write_buffer target=rect_instances count={}",
-            rect_instances.len()
-        );
-        self.queue
-            .write_buffer(&self.rect_buffer, 0, cast_slice(rect_instances));
-    }
-
-    fn upload_path_geometry(&mut self, path_vertices: &[PathVertex], path_indices: &[u32]) {
-        self.path_vertex_count = path_vertices.len() as u32;
-        self.path_index_count = path_indices.len() as u32;
-        if path_vertices.is_empty() || path_indices.is_empty() {
-            return;
-        }
-
-        info!(
-            "frame.write_buffer target=path_vertices count={}",
-            path_vertices.len()
-        );
-        self.queue
-            .write_buffer(&self.path_vertex_buffer, 0, cast_slice(path_vertices));
-        info!(
-            "frame.write_buffer target=path_indices count={}",
-            path_indices.len()
-        );
-        self.queue
-            .write_buffer(&self.path_index_buffer, 0, cast_slice(path_indices));
-    }
-
-    fn upload_image_instances(&mut self, image_instances: &[ImageInstance]) {
-        self.image_instance_count = image_instances.len() as u32;
-        if image_instances.is_empty() {
-            return;
-        }
-
-        info!(
-            "frame.write_buffer target=image_instances count={}",
-            image_instances.len()
-        );
-        self.queue
-            .write_buffer(&self.image_instance_buffer, 0, cast_slice(image_instances));
-    }
-
-    pub(super) fn refresh_glyph_bind_group(&mut self) {
-        self.glyph_bind_group = create_glyph_bind_group(
-            &self.device,
-            &self.glyph_bind_group_layout,
-            &self.screen_buffer,
-            &self.atlas,
-        );
+        _ => layer_batches.push(ImageBatch {
+            content_hash,
+            range: PrimitiveRange::new(instance_start, 1),
+        }),
     }
 }
