@@ -14,7 +14,7 @@ const MAX_PATH_VERTEX_BYTES: usize = 1024 * 1024;
 
 impl<'window> Renderer<'window> {
     pub(in crate::renderer::runtime) fn rebuild_gpu_data(&mut self) {
-        let block_groups = self.draw_list.block_groups(self.viewport_clip_rect());
+        let block_groups = self.draw_list.block_groups().to_vec();
         let (glyph_instances, glyph_ranges, atlas_uploads) =
             self.build_glyph_instances(&block_groups);
         let (rect_instances, rect_ranges) = self.build_rect_instances(&block_groups);

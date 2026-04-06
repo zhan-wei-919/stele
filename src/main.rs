@@ -285,8 +285,8 @@ fn apply_demo_block_rects(document: &mut Document, viewport: [f32; 2]) {
         .set_block_background_color(0, Some(PAGE_BG))
         .expect("demo root background must be valid");
 
-    let overlay_width = width.min(360.0).max(220.0);
-    let overlay_height = height.min(180.0).max(120.0);
+    let overlay_width = width.clamp(220.0, 360.0);
+    let overlay_height = height.clamp(120.0, 180.0);
     let overlay_x = (width - overlay_width - 32.0).max(24.0);
     let overlay_y = (height * 0.42)
         .min(height - overlay_height - 24.0)

@@ -262,13 +262,4 @@ impl<'window> Renderer<'window> {
     pub(super) fn image_slice_end(&self, count: u32) -> wgpu::BufferAddress {
         count as wgpu::BufferAddress * size_of::<ImageInstance>() as wgpu::BufferAddress
     }
-
-    pub(super) fn viewport_clip_rect(&self) -> ClipRect {
-        ClipRect::new(
-            0.0,
-            0.0,
-            self.surface_config.width as f32 / self.scale_factor.max(1.0),
-            self.surface_config.height as f32 / self.scale_factor.max(1.0),
-        )
-    }
 }

@@ -4,7 +4,7 @@ use log::info;
 
 use crate::renderer::{BlockDrawGroup, ClipRect, DrawListOp, RenderLayer};
 
-use super::layout::LayoutBlock;
+use super::flow::LayoutBlock;
 
 /// Converts laid-out blocks into renderer scene updates.
 pub(crate) fn bridge_layout(layout_blocks: &[LayoutBlock]) -> Vec<DrawListOp> {
@@ -56,8 +56,8 @@ mod tests {
             layout_block(2, 1, 15.0),
         ]);
 
-        let DrawListOp::SetBlocks(blocks) = &ops[0] else {
-            panic!("bridge must emit SetBlocks");
+        let blocks = match &ops[0] {
+            DrawListOp::SetBlocks(blocks) => blocks,
         };
         assert_eq!(blocks[0].block_index(), 1);
         assert_eq!(blocks[1].block_index(), 2);
