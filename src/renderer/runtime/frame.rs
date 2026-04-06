@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use log::{info, warn};
+use log::{trace, warn};
 
 use super::Renderer;
 use crate::renderer::draw_list::RenderLayer;
@@ -31,8 +31,8 @@ impl<'window> Renderer<'window> {
             self.reconfigure_surface();
         }
 
-        info!("frame.draw_calls count={draw_calls}");
-        info!("frame.time_us value={}", frame_start.elapsed().as_micros());
+        trace!("frame.draw_calls count={draw_calls}");
+        trace!("frame.time_us value={}", frame_start.elapsed().as_micros());
     }
 
     fn acquire_surface_texture(&self) -> Option<(wgpu::SurfaceTexture, bool)> {

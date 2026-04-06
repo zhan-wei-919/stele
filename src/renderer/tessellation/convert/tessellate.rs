@@ -19,37 +19,25 @@ pub(in crate::renderer::tessellation) fn tessellate_path(
     cmd: &PathCmd,
     scale_factor: f32,
 ) -> CachedMesh {
-    if cmd.verbs.is_empty() {
-        return CachedMesh::default();
-    }
-    if !cmd.is_visible() {
-        debug_assert!(false, "PathCmd fill and stroke cannot both be None");
+    if cmd.verbs().is_empty() {
         return CachedMesh::default();
     }
 
-    let Some(path) = build_path(&cmd.verbs, scale_factor) else {
+    let Some(path) = build_path(cmd.verbs(), scale_factor) else {
         return CachedMesh::default();
     };
     let fill_options = FillOptions::tolerance(PATH_TESSELLATION_TOLERANCE);
     let mut mesh = CachedMesh::default();
 
-    if let Some(fill) = cmd.fill {
-        if cmd.fill_is_valid() {
-            let fill_mesh = tessellate_fill_geometry(cmd, &path, fill, &fill_options);
-            append_aa_mesh(fill_mesh, &mut mesh);
-        } else {
-            debug_assert!(false, "PathCmd fill color must stay within [0, 1]");
-        }
+    if let Some(fill) = cmd.fill() {
+        let fill_mesh = tessellate_fill_geometry(cmd, &path, fill, &fill_options);
+        append_aa_mesh(fill_mesh, &mut mesh);
     }
 
-    if let Some(stroke) = cmd.stroke {
-        if stroke.is_valid() {
-            let options = stroke_options(stroke, scale_factor);
-            let stroke_mesh = tessellate_stroke_geometry(cmd, &path, stroke.color, &options);
-            append_aa_mesh(stroke_mesh, &mut mesh);
-        } else {
-            debug_assert!(false, "StrokeStyle width must be positive and color valid");
-        }
+    if let Some(stroke) = cmd.stroke() {
+        let options = stroke_options(stroke, scale_factor);
+        let stroke_mesh = tessellate_stroke_geometry(cmd, &path, stroke.color(), &options);
+        append_aa_mesh(stroke_mesh, &mut mesh);
     }
 
     mesh
@@ -126,10 +114,10 @@ fn log_tessellation_error(stage: &str, cmd: &PathCmd, error: &impl std::fmt::Dis
     warn!(
         "path.tessellate_failed stage={} layer={:?} verb_count={} fill={} stroke={} error={}",
         stage,
-        cmd.layer,
-        cmd.verbs.len(),
-        cmd.fill.is_some(),
-        cmd.stroke.is_some(),
+        cmd.layer(),
+        cmd.verbs().len(),
+        cmd.fill().is_some(),
+        cmd.stroke().is_some(),
         error,
     );
 }

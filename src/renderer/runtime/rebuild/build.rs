@@ -99,14 +99,12 @@ impl<'window> Renderer<'window> {
 
         for layer in RenderLayer::ALL {
             let start = rect_instances.len() as u32;
-            for cmd in self.draw_list.rects.iter().filter(|cmd| cmd.layer == layer) {
-                if !cmd.is_valid() {
-                    debug_assert!(
-                        false,
-                        "RectCmd size must stay positive and color normalized"
-                    );
-                    continue;
-                }
+            for cmd in self
+                .draw_list
+                .rects
+                .iter()
+                .filter(|cmd| cmd.layer() == layer)
+            {
                 rect_instances.push(RectInstance::from_rect(*cmd, self.scale_factor));
             }
             rect_ranges[layer.index()] =
@@ -131,12 +129,13 @@ impl<'window> Renderer<'window> {
 
         for layer in RenderLayer::ALL {
             let start = path_indices.len() as u32;
-            for cmd in self.draw_list.paths.iter().filter(|cmd| cmd.layer == layer) {
-                if cmd.verbs.is_empty() {
-                    continue;
-                }
-                if !cmd.is_visible() {
-                    debug_assert!(false, "PathCmd fill and stroke cannot both be None");
+            for cmd in self
+                .draw_list
+                .paths
+                .iter()
+                .filter(|cmd| cmd.layer() == layer)
+            {
+                if cmd.verbs().is_empty() {
                     continue;
                 }
 
@@ -177,14 +176,10 @@ impl<'window> Renderer<'window> {
                 .draw_list
                 .images
                 .iter()
-                .filter(|cmd| cmd.layer == layer)
+                .filter(|cmd| cmd.layer() == layer)
             {
-                if !cmd.is_valid() {
-                    debug_assert!(false, "ImageCmd size and RGBA payload must stay valid");
-                    continue;
-                }
                 if self.image_cache.get_or_insert(
-                    &cmd.data,
+                    cmd.data(),
                     &self.device,
                     &self.queue,
                     &self.image_bind_group_layout,
@@ -194,7 +189,7 @@ impl<'window> Renderer<'window> {
                     image_uploads += 1;
                 }
 
-                let content_hash = cmd.data.content_hash();
+                let content_hash = cmd.data().content_hash();
                 let instance_start = image_instances.len() as u32;
                 image_instances.push(ImageInstance::from_image(cmd, self.scale_factor));
                 extend_or_start_image_batch(layer_batches, content_hash, instance_start);

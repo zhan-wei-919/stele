@@ -55,12 +55,12 @@ impl FontDiscovery {
     }
 
     /// Returns the default sans-serif font chosen for the current system.
-    pub fn default_font_id(&self) -> u32 {
+    pub(crate) fn default_font_id(&self) -> u32 {
         self.default_font_id
     }
 
     /// Resolves an application-local font ID back to the originating fontdb face.
-    pub fn face_info(&self, font_id: u32) -> Option<&fontdb::FaceInfo> {
+    pub(crate) fn face_info(&self, font_id: u32) -> Option<&fontdb::FaceInfo> {
         self.app_to_db
             .get(font_id as usize)
             .copied()

@@ -91,9 +91,9 @@ impl FreeTypeRasterizer {
         })
     }
 
-    /// Returns the discovered font set used by this rasterizer.
-    pub(crate) fn fonts(&self) -> &FontDiscovery {
-        &self.fonts
+    /// Returns the default face chosen during system font discovery.
+    pub(crate) fn default_font_id(&self) -> u32 {
+        self.fonts.default_font_id()
     }
 
     /// Returns the LCD subpixel layout used for glyph rasterization.
@@ -166,6 +166,13 @@ impl FreeTypeRasterizer {
         } else {
             self.fonts.default_font_id()
         }
+    }
+
+    pub(super) fn load_face_for_layout(
+        &self,
+        requested_font_id: u32,
+    ) -> Result<freetype::Face, RasterizerError> {
+        self.load_face(self.resolve_font_id(requested_font_id))
     }
 
     fn load_face(&self, font_id: u32) -> Result<freetype::Face, RasterizerError> {

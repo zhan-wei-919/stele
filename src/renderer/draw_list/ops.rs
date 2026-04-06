@@ -157,27 +157,27 @@ mod tests {
         let image = Arc::new(ImageData::new(vec![255, 0, 0, 255], 1, 1));
 
         draw_list.apply_ops([
-            DrawListOp::SetRects(vec![RectCmd {
-                pos: [1.0, 2.0],
-                size: [3.0, 4.0],
-                color: [0.1, 0.2, 0.3, 1.0],
-                layer: RenderLayer::Background,
-            }]),
-            DrawListOp::SetPaths(vec![PathCmd {
-                verbs: vec![
+            DrawListOp::SetRects(vec![RectCmd::new(
+                [1.0, 2.0],
+                [3.0, 4.0],
+                [0.1, 0.2, 0.3, 1.0],
+                RenderLayer::Background,
+            )]),
+            DrawListOp::SetPaths(vec![PathCmd::new(
+                vec![
                     PathVerb::MoveTo { to: [0.0, 0.0] },
                     PathVerb::LineTo { to: [10.0, 10.0] },
                 ],
-                fill: None,
-                stroke: None,
-                layer: RenderLayer::Content,
-            }]),
-            DrawListOp::SetImages(vec![ImageCmd {
-                pos: [5.0, 6.0],
-                size: [7.0, 8.0],
-                data: image,
-                layer: RenderLayer::Overlay,
-            }]),
+                Some([0.4, 0.5, 0.6, 1.0]),
+                None,
+                RenderLayer::Content,
+            )]),
+            DrawListOp::SetImages(vec![ImageCmd::new(
+                [5.0, 6.0],
+                [7.0, 8.0],
+                image,
+                RenderLayer::Overlay,
+            )]),
         ]);
 
         assert_eq!(draw_list.rects.len(), 1);

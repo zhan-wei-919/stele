@@ -2,6 +2,7 @@
 
 mod discovery;
 mod glyph;
+mod layout;
 mod rasterizer;
 
 pub(crate) use discovery::FontDiscovery;

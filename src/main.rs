@@ -3,14 +3,11 @@ mod renderer;
 
 use std::sync::Arc;
 
-use crate::font::{FontDiscovery, FreeTypeRasterizer, SubpixelBin};
+use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::renderer::{
     DrawListOp, ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, PositionedGlyph,
     RectCmd, RenderLayer, Renderer, StrokeStyle,
 };
-use fontdb::Source;
-use freetype::{face::LoadFlag, Library};
-use log::warn;
 use pollster::block_on;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -175,19 +172,30 @@ async fn init_renderer(window: Arc<Window>) -> Renderer<'static> {
 }
 
 fn build_hardcoded_draw_list(rasterizer: &FreeTypeRasterizer) -> Vec<DrawListOp> {
-    let font_id = rasterizer.fonts().default_font_id();
-    let (ascent, line_height) = line_metrics(font_id, FONT_SIZE, rasterizer);
+    let font_id = rasterizer.default_font_id();
+    let metrics = rasterizer.line_metrics(font_id, FONT_SIZE);
     let mut y_offset = PADDING_Y;
     let image = build_demo_image();
     let mut ops = vec![
-        DrawListOp::SetRects(build_demo_rects(ascent, line_height)),
+        DrawListOp::SetRects(build_demo_rects(metrics.ascent, metrics.line_height)),
         DrawListOp::SetPaths(build_demo_paths()),
         DrawListOp::SetImages(build_demo_images(image)),
     ];
 
     for (line_index, text) in HARD_CODED_TEXT.into_iter().enumerate() {
-        let glyphs = layout_line(text, font_id, FONT_SIZE, y_offset, rasterizer);
-        y_offset += line_height;
+        let glyphs = rasterizer
+            .layout_line(text, font_id, FONT_SIZE, PADDING_X, y_offset)
+            .into_iter()
+            .map(|glyph| PositionedGlyph {
+                font_id,
+                glyph_id: glyph.glyph_id,
+                font_size: FONT_SIZE,
+                pos: glyph.pos,
+                color: TEXT_COLOR,
+                subpixel_offset: glyph.subpixel_offset,
+            })
+            .collect();
+        y_offset += metrics.line_height;
         ops.push(DrawListOp::Insert { line_index, glyphs });
     }
 
@@ -196,24 +204,24 @@ fn build_hardcoded_draw_list(rasterizer: &FreeTypeRasterizer) -> Vec<DrawListOp>
 
 fn build_demo_rects(ascent: f32, line_height: f32) -> Vec<RectCmd> {
     vec![
-        RectCmd {
-            pos: [12.0, 12.0],
-            size: [WINDOW_WIDTH as f32 - 24.0, line_height * 3.2],
-            color: PANEL_BG,
-            layer: RenderLayer::Background,
-        },
-        RectCmd {
-            pos: [PADDING_X, PADDING_Y + ascent + 4.0],
-            size: [250.0, 2.0],
-            color: UNDERLINE_COLOR,
-            layer: RenderLayer::Foreground,
-        },
-        RectCmd {
-            pos: [PADDING_X + 252.0, PADDING_Y + 4.0],
-            size: [2.0, line_height],
-            color: CURSOR_COLOR,
-            layer: RenderLayer::Overlay,
-        },
+        RectCmd::new(
+            [12.0, 12.0],
+            [WINDOW_WIDTH as f32 - 24.0, line_height * 3.2],
+            PANEL_BG,
+            RenderLayer::Background,
+        ),
+        RectCmd::new(
+            [PADDING_X, PADDING_Y + ascent + 4.0],
+            [250.0, 2.0],
+            UNDERLINE_COLOR,
+            RenderLayer::Foreground,
+        ),
+        RectCmd::new(
+            [PADDING_X + 252.0, PADDING_Y + 4.0],
+            [2.0, line_height],
+            CURSOR_COLOR,
+            RenderLayer::Overlay,
+        ),
     ]
 }
 
@@ -222,22 +230,22 @@ fn build_demo_paths() -> Vec<PathCmd> {
     // plus every cap/join style once, so the whole primitive surface is exercised
     // by `cargo run` instead of existing only as future-facing API shape.
     vec![
-        PathCmd {
-            verbs: vec![
+        PathCmd::new(
+            vec![
                 PathVerb::MoveTo { to: [100.0, 185.0] },
                 PathVerb::LineTo { to: [400.0, 185.0] },
             ],
-            fill: None,
-            stroke: Some(StrokeStyle {
-                color: [1.0, 1.0, 1.0, 1.0],
-                width: 2.0,
-                line_cap: LineCap::Butt,
-                line_join: LineJoin::Bevel,
-            }),
-            layer: RenderLayer::Foreground,
-        },
-        PathCmd {
-            verbs: vec![
+            None,
+            Some(StrokeStyle::new(
+                [1.0, 1.0, 1.0, 1.0],
+                2.0,
+                LineCap::Butt,
+                LineJoin::Bevel,
+            )),
+            RenderLayer::Foreground,
+        ),
+        PathCmd::new(
+            vec![
                 PathVerb::MoveTo { to: [90.0, 260.0] },
                 PathVerb::CubicTo {
                     ctrl1: [180.0, 170.0],
@@ -245,65 +253,60 @@ fn build_demo_paths() -> Vec<PathCmd> {
                     to: [430.0, 250.0],
                 },
             ],
-            fill: None,
-            stroke: Some(StrokeStyle {
-                color: [0.28, 0.85, 0.45, 1.0],
-                width: 2.0,
-                line_cap: LineCap::Square,
-                line_join: LineJoin::Miter,
-            }),
-            layer: RenderLayer::Content,
-        },
-        PathCmd {
-            verbs: vec![
+            None,
+            Some(StrokeStyle::new(
+                [0.28, 0.85, 0.45, 1.0],
+                2.0,
+                LineCap::Square,
+                LineJoin::Miter,
+            )),
+            RenderLayer::Content,
+        ),
+        PathCmd::new(
+            vec![
                 PathVerb::MoveTo { to: [475.0, 220.0] },
                 PathVerb::QuadTo {
                     ctrl: [605.0, 145.0],
                     to: [725.0, 235.0],
                 },
             ],
-            fill: None,
-            stroke: Some(StrokeStyle {
-                color: [0.98, 0.78, 0.24, 1.0],
-                width: 2.0,
-                line_cap: LineCap::Round,
-                line_join: LineJoin::Round,
-            }),
-            layer: RenderLayer::Content,
-        },
-        PathCmd {
-            verbs: vec![
+            None,
+            Some(StrokeStyle::new(
+                [0.98, 0.78, 0.24, 1.0],
+                2.0,
+                LineCap::Round,
+                LineJoin::Round,
+            )),
+            RenderLayer::Content,
+        ),
+        PathCmd::new(
+            vec![
                 PathVerb::MoveTo { to: [500.0, 320.0] },
                 PathVerb::LineTo { to: [720.0, 365.0] },
                 PathVerb::LineTo { to: [565.0, 520.0] },
                 PathVerb::Close,
             ],
-            fill: Some([0.2, 0.4, 0.8, 0.5]),
-            stroke: Some(StrokeStyle {
-                color: [0.96, 0.97, 0.99, 1.0],
-                width: 1.0,
-                line_cap: LineCap::Round,
-                line_join: LineJoin::Bevel,
-            }),
-            layer: RenderLayer::Content,
-        },
+            Some([0.2, 0.4, 0.8, 0.5]),
+            Some(StrokeStyle::new(
+                [0.96, 0.97, 0.99, 1.0],
+                1.0,
+                LineCap::Round,
+                LineJoin::Bevel,
+            )),
+            RenderLayer::Content,
+        ),
     ]
 }
 
 fn build_demo_images(image: Arc<ImageData>) -> Vec<ImageCmd> {
     vec![
-        ImageCmd {
-            pos: [160.0, 335.0],
-            size: [128.0, 128.0],
-            data: image.clone(),
-            layer: RenderLayer::Content,
-        },
-        ImageCmd {
-            pos: [310.0, 360.0],
-            size: [96.0, 96.0],
-            data: image,
-            layer: RenderLayer::Content,
-        },
+        ImageCmd::new(
+            [160.0, 335.0],
+            [128.0, 128.0],
+            image.clone(),
+            RenderLayer::Content,
+        ),
+        ImageCmd::new([310.0, 360.0], [96.0, 96.0], image, RenderLayer::Content),
     ]
 }
 
@@ -328,94 +331,4 @@ fn build_demo_image() -> Arc<ImageData> {
     }
 
     Arc::new(ImageData::new(rgba, width, height))
-}
-
-fn layout_line(
-    text: &str,
-    font_id: u32,
-    font_size: f32,
-    y_offset: f32,
-    rasterizer: &FreeTypeRasterizer,
-) -> Vec<PositionedGlyph> {
-    let Ok(library) = Library::init() else {
-        warn!("layout.library_init_failed");
-        return Vec::new();
-    };
-    let Some(face) = load_layout_face(&library, font_id, rasterizer) else {
-        warn!("layout.load_face_failed font_id={font_id}");
-        return Vec::new();
-    };
-    let pixel_height = font_size.max(1.0).round() as u32;
-    if face.set_pixel_sizes(0, pixel_height).is_err() {
-        warn!("layout.set_pixel_sizes_failed font_id={font_id} size={font_size}");
-        return Vec::new();
-    }
-
-    let (ascent, _) = line_metrics(font_id, font_size, rasterizer);
-    let baseline_y = y_offset + ascent;
-    let mut x = PADDING_X;
-    let mut glyphs = Vec::with_capacity(text.chars().count());
-
-    for ch in text.chars() {
-        let glyph_id = face.get_char_index(ch as usize).unwrap_or(0);
-        if let Err(error) = face.load_glyph(glyph_id, LoadFlag::DEFAULT) {
-            warn!("layout.load_glyph_failed glyph_id={glyph_id} error={error:?}");
-        }
-        let advance = face.glyph().advance().x as f32 / 64.0;
-        glyphs.push(PositionedGlyph {
-            font_id,
-            glyph_id: glyph_id.min(u16::MAX as u32) as u16,
-            font_size,
-            pos: [x, baseline_y],
-            color: TEXT_COLOR,
-            subpixel_offset: SubpixelBin::new(subpixel_bin(x), subpixel_bin(baseline_y)),
-        });
-        x += advance.max(0.0);
-    }
-
-    glyphs
-}
-
-fn line_metrics(font_id: u32, font_size: f32, rasterizer: &FreeTypeRasterizer) -> (f32, f32) {
-    let Ok(library) = Library::init() else {
-        return (font_size, font_size * 1.4);
-    };
-    let Some(face) = load_layout_face(&library, font_id, rasterizer) else {
-        return (font_size, font_size * 1.4);
-    };
-    if face
-        .set_pixel_sizes(0, font_size.max(1.0).round() as u32)
-        .is_err()
-    {
-        return (font_size, font_size * 1.4);
-    }
-
-    face.size_metrics()
-        .map(|metrics| {
-            let ascent = metrics.ascender as f32 / 64.0;
-            let line_height = (metrics.height as f32 / 64.0).max(font_size);
-            (ascent, line_height)
-        })
-        .unwrap_or((font_size, font_size * 1.4))
-}
-
-fn load_layout_face(
-    library: &Library,
-    font_id: u32,
-    rasterizer: &FreeTypeRasterizer,
-) -> Option<freetype::Face> {
-    let face_info = rasterizer.fonts().face_info(font_id)?;
-    match &face_info.source {
-        Source::File(path) | Source::SharedFile(path, _) => {
-            library.new_face(path, face_info.index as isize).ok()
-        }
-        Source::Binary(bytes) => library
-            .new_memory_face(bytes.as_ref().as_ref().to_vec(), face_info.index as isize)
-            .ok(),
-    }
-}
-
-fn subpixel_bin(value: f32) -> u8 {
-    let bin = (value.fract() * 4.0).round() as i32;
-    bin.clamp(0, 3) as u8
 }

@@ -16,10 +16,12 @@ pub struct RectInstance {
 impl RectInstance {
     /// Converts logical rectangle coordinates into physical pixels for the GPU.
     pub fn from_rect(cmd: RectCmd, scale_factor: f32) -> Self {
+        let pos = cmd.pos();
+        let size = cmd.size();
         Self {
-            pos: [cmd.pos[0] * scale_factor, cmd.pos[1] * scale_factor],
-            size: [cmd.size[0] * scale_factor, cmd.size[1] * scale_factor],
-            color: cmd.color,
+            pos: [pos[0] * scale_factor, pos[1] * scale_factor],
+            size: [size[0] * scale_factor, size[1] * scale_factor],
+            color: cmd.color(),
         }
     }
 }

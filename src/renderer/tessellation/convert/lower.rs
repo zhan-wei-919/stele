@@ -26,12 +26,12 @@ pub(super) fn build_path(verbs: &[PathVerb], scale_factor: f32) -> Option<Path> 
 }
 
 pub(super) fn stroke_options(stroke: StrokeStyle, scale_factor: f32) -> StrokeOptions {
-    let line_cap = lyon_line_cap(stroke.line_cap);
+    let line_cap = lyon_line_cap(stroke.line_cap());
     StrokeOptions::tolerance(PATH_TESSELLATION_TOLERANCE)
-        .with_line_width(stroke.width * scale_factor)
+        .with_line_width(stroke.width() * scale_factor)
         .with_start_cap(line_cap)
         .with_end_cap(line_cap)
-        .with_line_join(lyon_line_join(stroke.line_join))
+        .with_line_join(lyon_line_join(stroke.line_join()))
 }
 
 fn apply_path_verb(

@@ -60,18 +60,51 @@ impl RenderLayer {
 }
 
 /// Solid rectangle command used for backgrounds, underlines, and overlay blocks.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct RectCmd {
-    pub pos: [f32; 2],
-    pub size: [f32; 2],
-    pub color: [f32; 4],
-    pub layer: RenderLayer,
+    pos: [f32; 2],
+    size: [f32; 2],
+    color: [f32; 4],
+    layer: RenderLayer,
 }
 
 impl RectCmd {
-    /// Returns whether the rectangle can produce visible geometry.
-    pub fn is_valid(&self) -> bool {
-        self.size[0] > 0.0 && self.size[1] > 0.0 && color_is_valid(self.color)
+    /// Creates a rectangle command whose size and color are validated at the source.
+    pub fn new(pos: [f32; 2], size: [f32; 2], color: [f32; 4], layer: RenderLayer) -> Self {
+        debug_assert!(
+            size[0] > 0.0 && size[1] > 0.0,
+            "RectCmd size must stay positive"
+        );
+        debug_assert!(
+            color_is_valid(color),
+            "RectCmd color must stay within [0, 1]"
+        );
+        Self {
+            pos,
+            size,
+            color,
+            layer,
+        }
+    }
+
+    /// Returns the rectangle origin in logical pixels.
+    pub fn pos(&self) -> [f32; 2] {
+        self.pos
+    }
+
+    /// Returns the rectangle size in logical pixels.
+    pub fn size(&self) -> [f32; 2] {
+        self.size
+    }
+
+    /// Returns the rectangle color in normalized RGBA.
+    pub fn color(&self) -> [f32; 4] {
+        self.color
+    }
+
+    /// Returns the layer bucket that should contain this rectangle.
+    pub fn layer(&self) -> RenderLayer {
+        self.layer
     }
 }
 
@@ -115,16 +148,46 @@ pub enum LineJoin {
 /// Stroke style shared by path commands.
 #[derive(Clone, Copy, Debug)]
 pub struct StrokeStyle {
-    pub color: [f32; 4],
-    pub width: f32,
-    pub line_cap: LineCap,
-    pub line_join: LineJoin,
+    color: [f32; 4],
+    width: f32,
+    line_cap: LineCap,
+    line_join: LineJoin,
 }
 
 impl StrokeStyle {
-    /// Returns whether the stroke can generate visible triangles.
-    pub fn is_valid(&self) -> bool {
-        self.width > 0.0 && color_is_valid(self.color)
+    /// Creates a stroke style whose width and color are validated at construction time.
+    pub fn new(color: [f32; 4], width: f32, line_cap: LineCap, line_join: LineJoin) -> Self {
+        debug_assert!(width > 0.0, "StrokeStyle width must stay positive");
+        debug_assert!(
+            color_is_valid(color),
+            "StrokeStyle color must stay within [0, 1]"
+        );
+        Self {
+            color,
+            width,
+            line_cap,
+            line_join,
+        }
+    }
+
+    /// Returns the normalized RGBA color used for the stroke.
+    pub fn color(&self) -> [f32; 4] {
+        self.color
+    }
+
+    /// Returns the logical stroke width.
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
+    /// Returns the line-cap style forwarded to lyon.
+    pub fn line_cap(&self) -> LineCap {
+        self.line_cap
+    }
+
+    /// Returns the line-join style forwarded to lyon.
+    pub fn line_join(&self) -> LineJoin {
+        self.line_join
     }
 
     /// Writes the style into a hasher without relying on `f32: Hash`.
@@ -139,21 +202,54 @@ impl StrokeStyle {
 /// Vector path command carrying fill and/or stroke styling.
 #[derive(Clone, Debug)]
 pub struct PathCmd {
-    pub verbs: Vec<PathVerb>,
-    pub fill: Option<[f32; 4]>,
-    pub stroke: Option<StrokeStyle>,
-    pub layer: RenderLayer,
+    verbs: Vec<PathVerb>,
+    fill: Option<[f32; 4]>,
+    stroke: Option<StrokeStyle>,
+    layer: RenderLayer,
 }
 
 impl PathCmd {
-    /// Returns `true` when the command can contribute any visible geometry.
-    pub fn is_visible(&self) -> bool {
-        self.fill.is_some() || self.stroke.is_some()
+    /// Creates a path command whose fill and stroke invariants are checked once.
+    pub fn new(
+        verbs: Vec<PathVerb>,
+        fill: Option<[f32; 4]>,
+        stroke: Option<StrokeStyle>,
+        layer: RenderLayer,
+    ) -> Self {
+        debug_assert!(
+            fill.is_some() || stroke.is_some(),
+            "PathCmd must define a fill or stroke"
+        );
+        debug_assert!(
+            fill.map(color_is_valid).unwrap_or(true),
+            "PathCmd fill color must stay within [0, 1]"
+        );
+        Self {
+            verbs,
+            fill,
+            stroke,
+            layer,
+        }
     }
 
-    /// Returns `true` when the fill color is usable by the runtime.
-    pub fn fill_is_valid(&self) -> bool {
-        self.fill.map(color_is_valid).unwrap_or(false)
+    /// Returns the high-level path verbs that define this command.
+    pub fn verbs(&self) -> &[PathVerb] {
+        &self.verbs
+    }
+
+    /// Returns the optional normalized RGBA fill color.
+    pub fn fill(&self) -> Option<[f32; 4]> {
+        self.fill
+    }
+
+    /// Returns the optional stroke style.
+    pub fn stroke(&self) -> Option<StrokeStyle> {
+        self.stroke
+    }
+
+    /// Returns the layer bucket that should contain this path.
+    pub fn layer(&self) -> RenderLayer {
+        self.layer
     }
 
     /// Computes the cache key used by the tessellation cache.
@@ -230,16 +326,49 @@ impl ImageData {
 /// Image draw command referencing shared RGBA data.
 #[derive(Clone, Debug)]
 pub struct ImageCmd {
-    pub pos: [f32; 2],
-    pub size: [f32; 2],
-    pub data: Arc<ImageData>,
-    pub layer: RenderLayer,
+    pos: [f32; 2],
+    size: [f32; 2],
+    data: Arc<ImageData>,
+    layer: RenderLayer,
 }
 
 impl ImageCmd {
-    /// Returns whether the instance and underlying image payload are renderable.
-    pub fn is_valid(&self) -> bool {
-        self.size[0] > 0.0 && self.size[1] > 0.0 && self.data.is_valid()
+    /// Creates an image command whose geometry and payload are validated at the source.
+    pub fn new(pos: [f32; 2], size: [f32; 2], data: Arc<ImageData>, layer: RenderLayer) -> Self {
+        debug_assert!(
+            size[0] > 0.0 && size[1] > 0.0,
+            "ImageCmd size must stay positive"
+        );
+        debug_assert!(
+            data.is_valid(),
+            "ImageCmd payload dimensions must match the RGBA bytes"
+        );
+        Self {
+            pos,
+            size,
+            data,
+            layer,
+        }
+    }
+
+    /// Returns the image origin in logical pixels.
+    pub fn pos(&self) -> [f32; 2] {
+        self.pos
+    }
+
+    /// Returns the image size in logical pixels.
+    pub fn size(&self) -> [f32; 2] {
+        self.size
+    }
+
+    /// Returns the immutable image payload.
+    pub fn data(&self) -> &ImageData {
+        self.data.as_ref()
+    }
+
+    /// Returns the layer bucket that should contain this image.
+    pub fn layer(&self) -> RenderLayer {
+        self.layer
     }
 }
 
