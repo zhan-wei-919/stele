@@ -1,7 +1,7 @@
 //! Renderer-facing draw-list types plus the GPU runtime that consumes them.
 
 pub(crate) mod atlas;
-pub mod draw_list;
+pub(crate) mod draw_list;
 pub(crate) mod image_cache;
 pub(crate) mod instance;
 pub(crate) mod pipeline;

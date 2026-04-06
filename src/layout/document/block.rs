@@ -1,16 +1,17 @@
 //! Block, span, and document geometry used by layout.
 
-use super::{validate_optional_color, DocumentError, TextStyle};
+use super::validation::validate_optional_color;
+use super::{DocumentError, TextStyle};
 
 /// A document made of stacking blocks laid out independently.
 #[derive(Clone, Debug, Default)]
-pub struct Document {
+pub(crate) struct Document {
     blocks: Vec<Block>,
 }
 
 impl Document {
     /// Creates a document from validated blocks.
-    pub fn new(blocks: Vec<Block>) -> Self {
+    pub(crate) fn new(blocks: Vec<Block>) -> Self {
         Self { blocks }
     }
 
@@ -25,7 +26,7 @@ impl Document {
     }
 
     /// Updates one block rectangle while preserving the validated geometry type.
-    pub fn set_block_rect(
+    pub(crate) fn set_block_rect(
         &mut self,
         block_index: usize,
         rect: BlockRect,
@@ -39,7 +40,7 @@ impl Document {
     }
 
     /// Updates one block background color.
-    pub fn set_block_background_color(
+    pub(crate) fn set_block_background_color(
         &mut self,
         block_index: usize,
         background_color: Option<[f32; 4]>,
@@ -56,7 +57,7 @@ impl Document {
 
 /// A rectangle in logical pixels used for block geometry and clipping.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BlockRect {
+pub(crate) struct BlockRect {
     x: f32,
     y: f32,
     width: f32,
@@ -65,7 +66,7 @@ pub struct BlockRect {
 
 impl BlockRect {
     /// Creates a block rectangle with finite, positive geometry.
-    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Result<Self, DocumentError> {
+    pub(crate) fn new(x: f32, y: f32, width: f32, height: f32) -> Result<Self, DocumentError> {
         if !(x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite()) {
             return Err(DocumentError::InvalidRect);
         }
@@ -82,29 +83,29 @@ impl BlockRect {
     }
 
     /// Returns the x origin in logical pixels.
-    pub fn x(self) -> f32 {
+    pub(crate) fn x(self) -> f32 {
         self.x
     }
 
     /// Returns the y origin in logical pixels.
-    pub fn y(self) -> f32 {
+    pub(crate) fn y(self) -> f32 {
         self.y
     }
 
     /// Returns the width in logical pixels.
-    pub fn width(self) -> f32 {
+    pub(crate) fn width(self) -> f32 {
         self.width
     }
 
     /// Returns the height in logical pixels.
-    pub fn height(self) -> f32 {
+    pub(crate) fn height(self) -> f32 {
         self.height
     }
 }
 
 /// A stacking and clipping unit in the document tree.
 #[derive(Clone, Debug)]
-pub struct Block {
+pub(crate) struct Block {
     rect: BlockRect,
     padding: f32,
     background_color: Option<[f32; 4]>,
@@ -114,7 +115,7 @@ pub struct Block {
 
 impl Block {
     /// Creates a block with validated styling inputs.
-    pub fn new(
+    pub(crate) fn new(
         rect: BlockRect,
         padding: f32,
         background_color: Option<[f32; 4]>,
@@ -163,14 +164,14 @@ impl Block {
 
 /// A styled text span participating in a block's inline flow.
 #[derive(Clone, Debug)]
-pub struct Span {
+pub(crate) struct Span {
     text: String,
     style: TextStyle,
 }
 
 impl Span {
     /// Creates a text span.
-    pub fn new(text: impl Into<String>, style: TextStyle) -> Self {
+    pub(crate) fn new(text: impl Into<String>, style: TextStyle) -> Self {
         Self {
             text: text.into(),
             style,

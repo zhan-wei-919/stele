@@ -56,9 +56,7 @@ mod tests {
             layout_block(2, 1, 15.0),
         ]);
 
-        let blocks = match &ops[0] {
-            DrawListOp::SetBlocks(blocks) => blocks,
-        };
+        let DrawListOp::SetBlocks(blocks) = &ops[0];
         assert_eq!(blocks[0].block_index(), 1);
         assert_eq!(blocks[1].block_index(), 2);
         assert_eq!(blocks[2].block_index(), 3);

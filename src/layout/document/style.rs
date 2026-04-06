@@ -1,10 +1,11 @@
 //! Inline text styling used by the document model.
 
-use super::{validate_color, validate_optional_color, DocumentError};
+use super::validation::{validate_color, validate_optional_color};
+use super::DocumentError;
 
 /// Inline styling applied to a span's text.
 #[derive(Clone, Copy, Debug)]
-pub struct TextStyle {
+pub(crate) struct TextStyle {
     font_id: u32,
     font_size: f32,
     color: [f32; 4],
@@ -18,7 +19,11 @@ pub struct TextStyle {
 
 impl TextStyle {
     /// Creates a style with validated font and color inputs.
-    pub fn new(font_id: u32, font_size: f32, color: [f32; 4]) -> Result<Self, DocumentError> {
+    pub(crate) fn new(
+        font_id: u32,
+        font_size: f32,
+        color: [f32; 4],
+    ) -> Result<Self, DocumentError> {
         if !font_size.is_finite() || font_size <= 0.0 {
             return Err(DocumentError::InvalidFontSize);
         }
@@ -83,31 +88,31 @@ impl TextStyle {
     }
 
     /// Returns the same style with bold selection enabled or disabled.
-    pub fn with_bold(mut self, bold: bool) -> Self {
+    pub(crate) fn with_bold(mut self, bold: bool) -> Self {
         self.bold = bold;
         self
     }
 
     /// Returns the same style with italic selection enabled or disabled.
-    pub fn with_italic(mut self, italic: bool) -> Self {
+    pub(crate) fn with_italic(mut self, italic: bool) -> Self {
         self.italic = italic;
         self
     }
 
     /// Returns the same style with underline decoration enabled or disabled.
-    pub fn with_underline(mut self, underline: bool) -> Self {
+    pub(crate) fn with_underline(mut self, underline: bool) -> Self {
         self.underline = underline;
         self
     }
 
     /// Returns the same style with strikethrough decoration enabled or disabled.
-    pub fn with_strikethrough(mut self, strikethrough: bool) -> Self {
+    pub(crate) fn with_strikethrough(mut self, strikethrough: bool) -> Self {
         self.strikethrough = strikethrough;
         self
     }
 
     /// Returns the same style with an optional validated background color.
-    pub fn with_background_color(
+    pub(crate) fn with_background_color(
         mut self,
         background_color: Option<[f32; 4]>,
     ) -> Result<Self, DocumentError> {
@@ -117,7 +122,10 @@ impl TextStyle {
     }
 
     /// Returns the same style with validated letter spacing.
-    pub fn with_letter_spacing(mut self, letter_spacing: f32) -> Result<Self, DocumentError> {
+    pub(crate) fn with_letter_spacing(
+        mut self,
+        letter_spacing: f32,
+    ) -> Result<Self, DocumentError> {
         if !letter_spacing.is_finite() || letter_spacing < 0.0 {
             return Err(DocumentError::InvalidLetterSpacing);
         }
