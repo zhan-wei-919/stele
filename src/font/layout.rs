@@ -33,7 +33,7 @@ impl MeasuredGlyph {
     pub fn fallback(font_size: f32, letter_spacing: f32) -> Self {
         Self {
             glyph_id: 0,
-            advance: font_size * 0.6 + letter_spacing.max(0.0),
+            advance: font_size * 0.6 + letter_spacing,
         }
     }
 }
@@ -149,7 +149,7 @@ fn trailing_spacing(letter_spacing: f32, is_last: bool) -> f32 {
     if is_last {
         0.0
     } else {
-        letter_spacing.max(0.0)
+        letter_spacing
     }
 }
 

@@ -15,10 +15,10 @@ pub(crate) fn bridge_layout(layout_blocks: &[LayoutBlock]) -> Vec<DrawListOp> {
                 block.block_index,
                 block.z_order,
                 Some(ClipRect::new(
-                    block.clip_rect.x,
-                    block.clip_rect.y,
-                    block.clip_rect.width,
-                    block.clip_rect.height,
+                    block.clip_rect.x(),
+                    block.clip_rect.y(),
+                    block.clip_rect.width(),
+                    block.clip_rect.height(),
                 )),
             );
 
@@ -83,7 +83,7 @@ mod tests {
                 baseline: 8.0,
             }],
             background_rect: None,
-            clip_rect: BlockRect::new(x, 0.0, 40.0, 20.0),
+            clip_rect: BlockRect::new(x, 0.0, 40.0, 20.0).expect("rect must be valid"),
         }
     }
 }

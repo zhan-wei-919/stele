@@ -208,26 +208,33 @@ impl LayoutDemo {
 }
 
 fn build_demo_document(font_id: u32, viewport: [f32; 2]) -> Document {
-    let mut title = TextStyle::new(font_id, 26.0, TEXT_PRIMARY);
-    title.bold = true;
+    let title = TextStyle::new(font_id, 26.0, TEXT_PRIMARY)
+        .expect("demo title style must be valid")
+        .with_bold(true);
 
-    let mut badge = TextStyle::new(font_id, 14.0, TEXT_ACCENT);
-    badge.underline = true;
-    badge.letter_spacing = 0.8;
-    badge.background_color = Some(INLINE_BG);
+    let badge = TextStyle::new(font_id, 14.0, TEXT_ACCENT)
+        .expect("demo badge style must be valid")
+        .with_underline(true)
+        .with_letter_spacing(0.8)
+        .expect("demo badge spacing must be valid")
+        .with_background_color(Some(INLINE_BG))
+        .expect("demo badge background must be valid");
 
-    let body = TextStyle::new(font_id, 15.0, TEXT_MUTED);
+    let body = TextStyle::new(font_id, 15.0, TEXT_MUTED).expect("demo body style must be valid");
 
-    let mut overlay_title = TextStyle::new(font_id, 18.0, TEXT_PRIMARY);
-    overlay_title.italic = true;
+    let overlay_title = TextStyle::new(font_id, 18.0, TEXT_PRIMARY)
+        .expect("demo overlay title style must be valid")
+        .with_italic(true);
 
-    let mut overlay_body = TextStyle::new(font_id, 14.0, TEXT_PRIMARY);
-    overlay_body.strikethrough = true;
-    overlay_body.background_color = Some([0.24, 0.30, 0.38, 0.92]);
+    let overlay_body = TextStyle::new(font_id, 14.0, TEXT_PRIMARY)
+        .expect("demo overlay body style must be valid")
+        .with_strikethrough(true)
+        .with_background_color(Some([0.24, 0.30, 0.38, 0.92]))
+        .expect("demo overlay body background must be valid");
 
     let mut document = Document::new(vec![
         Block::new(
-            BlockRect::new(0.0, 0.0, 1.0, 1.0),
+            BlockRect::new(0.0, 0.0, 1.0, 1.0).expect("demo root rect must be valid"),
             28.0,
             Some(PAGE_BG),
             vec![
@@ -243,9 +250,10 @@ fn build_demo_document(font_id: u32, viewport: [f32; 2]) -> Document {
                 ),
             ],
             0,
-        ),
+        )
+        .expect("demo root block must be valid"),
         Block::new(
-            BlockRect::new(0.0, 0.0, 1.0, 1.0),
+            BlockRect::new(0.0, 0.0, 1.0, 1.0).expect("demo overlay rect must be valid"),
             18.0,
             Some(PANEL_ACCENT_BG),
             vec![
@@ -256,7 +264,8 @@ fn build_demo_document(font_id: u32, viewport: [f32; 2]) -> Document {
                 ),
             ],
             1,
-        ),
+        )
+        .expect("demo overlay block must be valid"),
     ]);
     apply_demo_block_rects(&mut document, viewport);
     document
@@ -266,21 +275,32 @@ fn apply_demo_block_rects(document: &mut Document, viewport: [f32; 2]) {
     let width = viewport[0].max(320.0);
     let height = viewport[1].max(240.0);
 
-    if let Some(root) = document.blocks.get_mut(0) {
-        root.rect = BlockRect::new(0.0, 0.0, width, height);
-        root.background_color = Some(PAGE_BG);
-    }
+    document
+        .set_block_rect(
+            0,
+            BlockRect::new(0.0, 0.0, width, height).expect("demo root rect must be valid"),
+        )
+        .expect("demo root block must exist");
+    document
+        .set_block_background_color(0, Some(PAGE_BG))
+        .expect("demo root background must be valid");
 
-    if let Some(overlay) = document.blocks.get_mut(1) {
-        let overlay_width = width.min(360.0).max(220.0);
-        let overlay_height = height.min(180.0).max(120.0);
-        let overlay_x = (width - overlay_width - 32.0).max(24.0);
-        let overlay_y = (height * 0.42)
-            .min(height - overlay_height - 24.0)
-            .max(24.0);
-        overlay.rect = BlockRect::new(overlay_x, overlay_y, overlay_width, overlay_height);
-        overlay.background_color = Some(PANEL_ACCENT_BG);
-    }
+    let overlay_width = width.min(360.0).max(220.0);
+    let overlay_height = height.min(180.0).max(120.0);
+    let overlay_x = (width - overlay_width - 32.0).max(24.0);
+    let overlay_y = (height * 0.42)
+        .min(height - overlay_height - 24.0)
+        .max(24.0);
+    document
+        .set_block_rect(
+            1,
+            BlockRect::new(overlay_x, overlay_y, overlay_width, overlay_height)
+                .expect("demo overlay rect must be valid"),
+        )
+        .expect("demo overlay block must exist");
+    document
+        .set_block_background_color(1, Some(PANEL_ACCENT_BG))
+        .expect("demo overlay background must be valid");
 }
 
 fn logical_viewport(size: PhysicalSize<u32>, scale_factor: f32) -> [f32; 2] {
