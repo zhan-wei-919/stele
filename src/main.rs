@@ -1,16 +1,24 @@
+#[path = "event/app.rs"]
+mod app;
 mod demo;
+mod event;
 mod font;
+mod io;
 mod layout;
 mod renderer;
 
+use std::error::Error;
 use std::sync::Arc;
 
-use crate::demo::LayoutDemo;
-use crate::font::{FontDiscovery, FreeTypeRasterizer};
-use crate::renderer::Renderer;
+use self::app::{logical_viewport, DesktopApp, REDRAW_MIN_INTERVAL};
+use self::demo::LayoutDemo;
+use self::event::EventRouter;
+use self::font::{FontDiscovery, FreeTypeRasterizer};
+use self::io::{run_mock_io_task, IoEventDriver, IoRuntime, WakeEvent};
+use self::renderer::Renderer;
 use pollster::block_on;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -18,25 +26,24 @@ use winit::window::{Window, WindowId};
 const WINDOW_WIDTH: f64 = 960.0;
 const WINDOW_HEIGHT: f64 = 640.0;
 
-fn main() -> Result<(), winit::error::EventLoopError> {
+fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
-    let event_loop = EventLoop::new()?;
-    let mut app = SteleApp::default();
-    event_loop.run_app(&mut app)
+    let event_loop = EventLoop::<WakeEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let (mut io_runtime, io_handle) = IoRuntime::new(proxy)?;
+    let io_driver = IoEventDriver::new(io_runtime.take_io_event_rx());
+    let router = EventRouter::new(io_runtime.app_command_tx());
+    io_runtime.spawn_task(run_mock_io_task(io_handle));
+
+    let mut app = DesktopApp::new(io_runtime, io_driver, router, REDRAW_MIN_INTERVAL);
+    event_loop.run_app(&mut app)?;
+    Ok(())
 }
 
-#[derive(Default)]
-struct SteleApp {
-    window: Option<Arc<Window>>,
-    window_id: Option<WindowId>,
-    renderer: Option<Renderer<'static>>,
-    demo: Option<LayoutDemo>,
-}
-
-impl ApplicationHandler for SteleApp {
+impl ApplicationHandler<WakeEvent> for DesktopApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.should_skip_resume() {
             return;
         }
 
@@ -51,11 +58,23 @@ impl ApplicationHandler for SteleApp {
         let viewport = logical_viewport(window.inner_size(), window.scale_factor() as f32);
         let (renderer, demo) = block_on(init_renderer(window.clone(), viewport));
 
-        self.window_id = Some(window.id());
-        self.renderer = Some(renderer);
-        self.demo = Some(demo);
-        self.window = Some(window.clone());
+        self.attach_surface(window.clone(), renderer, demo);
         window.request_redraw();
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        if self.is_shutting_down() {
+            return;
+        }
+
+        match event {
+            WakeEvent::Wake => {
+                if self.on_wake() {
+                    event_loop.exit();
+                }
+            }
+            WakeEvent::DeadlineExpired => self.on_deadline(),
+        }
     }
 
     fn window_event(
@@ -64,57 +83,17 @@ impl ApplicationHandler for SteleApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if Some(window_id) != self.window_id {
-            return;
-        }
-
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-
-        match event {
-            WindowEvent::RedrawRequested => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    window.pre_present_notify();
-                    renderer.frame();
-                }
-            }
-            WindowEvent::Resized(size) => {
-                self.handle_resize(size, window.scale_factor() as f32);
-            }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.handle_resize(window.inner_size(), scale_factor as f32);
-            }
-            WindowEvent::CloseRequested => {
-                self.demo = None;
-                self.renderer = None;
-                self.window = None;
-                self.window_id = None;
-                event_loop.exit();
-            }
-            _ => {}
+        if self.on_window_event(window_id, &event) {
+            event_loop.exit();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Wait);
     }
-}
 
-impl SteleApp {
-    fn handle_resize(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        renderer.resize(size, scale_factor);
-
-        if let Some(demo) = self.demo.as_mut() {
-            demo.resize(logical_viewport(size, scale_factor));
-            demo.apply(renderer);
-        }
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.on_exit();
     }
 }
 
@@ -184,11 +163,4 @@ fn build_rasterizer() -> FreeTypeRasterizer {
     let subpixel_layout = renderer::subpixel::detect_subpixel_layout();
     FreeTypeRasterizer::new(font_discovery, subpixel_layout)
         .expect("failed to initialize FreeType rasterizer")
-}
-
-fn logical_viewport(size: PhysicalSize<u32>, scale_factor: f32) -> [f32; 2] {
-    [
-        size.width as f32 / scale_factor.max(1.0),
-        size.height as f32 / scale_factor.max(1.0),
-    ]
 }
