@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use fontdb::{Database, Family, Query, ID};
+use fontdb::{Database, Family, Query, Style, Weight, ID};
 
 /// Errors produced while initializing the system font database.
 #[derive(Debug)]
@@ -15,6 +15,7 @@ pub enum FontDiscoveryError {
 pub struct FontDiscovery {
     database: Database,
     app_to_db: Vec<ID>,
+    db_to_app: HashMap<ID, u32>,
     default_font_id: u32,
 }
 
@@ -50,6 +51,7 @@ impl FontDiscovery {
         Ok(Self {
             database,
             app_to_db,
+            db_to_app,
             default_font_id,
         })
     }
@@ -65,5 +67,48 @@ impl FontDiscovery {
             .get(font_id as usize)
             .copied()
             .and_then(|db_id| self.database.face(db_id))
+    }
+
+    /// Resolves a styled face in the same family as the requested base face.
+    pub(crate) fn resolve_font(&self, requested_font_id: u32, bold: bool, italic: bool) -> u32 {
+        let Some(face) = self.face_info(requested_font_id) else {
+            return self.default_font_id;
+        };
+
+        let families = face
+            .families
+            .iter()
+            .map(|(name, _)| Family::Name(name.as_str()))
+            .collect::<Vec<_>>();
+        let query = Query {
+            families: &families,
+            weight: requested_weight(face.weight, bold),
+            stretch: face.stretch,
+            style: requested_style(face.style, italic),
+        };
+
+        self.database
+            .query(&query)
+            .and_then(|db_id| self.db_to_app.get(&db_id).copied())
+            .unwrap_or(requested_font_id)
+    }
+}
+
+fn requested_weight(base_weight: Weight, bold: bool) -> Weight {
+    if bold {
+        base_weight.max(Weight::BOLD)
+    } else {
+        base_weight
+    }
+}
+
+fn requested_style(base_style: Style, italic: bool) -> Style {
+    if italic {
+        match base_style {
+            Style::Italic | Style::Oblique => base_style,
+            Style::Normal => Style::Italic,
+        }
+    } else {
+        base_style
     }
 }

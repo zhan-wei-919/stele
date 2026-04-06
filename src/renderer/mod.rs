@@ -10,7 +10,6 @@ pub(crate) mod subpixel;
 pub(crate) mod tessellation;
 
 pub(crate) use draw_list::{
-    DrawListOp, ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, PositionedGlyph,
-    RectCmd, RenderLayer, StrokeStyle,
+    BlockDrawGroup, ClipRect, DrawListOp, PositionedGlyph, RectCmd, RenderLayer,
 };
 pub(crate) use runtime::Renderer;

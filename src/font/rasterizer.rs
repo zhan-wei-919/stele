@@ -96,6 +96,16 @@ impl FreeTypeRasterizer {
         self.fonts.default_font_id()
     }
 
+    /// Resolves a styled face in the same family as the requested base face.
+    pub(super) fn resolve_styled_font_id(
+        &self,
+        requested_font_id: u32,
+        bold: bool,
+        italic: bool,
+    ) -> u32 {
+        self.fonts.resolve_font(requested_font_id, bold, italic)
+    }
+
     /// Returns the LCD subpixel layout used for glyph rasterization.
     pub(crate) fn subpixel_layout(&self) -> SubpixelLayout {
         self.subpixel_layout

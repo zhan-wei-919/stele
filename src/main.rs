@@ -1,34 +1,30 @@
 mod font;
+mod layout;
 mod renderer;
 
 use std::sync::Arc;
 
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
-use crate::renderer::{
-    DrawListOp, ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, PositionedGlyph,
-    RectCmd, RenderLayer, Renderer, StrokeStyle,
+use crate::layout::{
+    bridge_layout, layout_document, prepare_document, Block, BlockRect, Document, PreparedBlock,
+    Span, TextStyle,
 };
+use crate::renderer::Renderer;
 use pollster::block_on;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-const WINDOW_WIDTH: f64 = 800.0;
-const WINDOW_HEIGHT: f64 = 600.0;
-const FONT_SIZE: f32 = 14.0;
-const PADDING_X: f32 = 24.0;
-const PADDING_Y: f32 = 24.0;
-const TEXT_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
-const PANEL_BG: [f32; 4] = [0.07, 0.11, 0.17, 1.0];
-const UNDERLINE_COLOR: [f32; 4] = [0.94, 0.23, 0.27, 1.0];
-const CURSOR_COLOR: [f32; 4] = [0.96, 0.96, 0.96, 0.85];
-const HARD_CODED_TEXT: [&str; 3] = [
-    "Hello, Stele! — Pixel-perfect terminal.",
-    "你好世界 — CJK text rendering test.",
-    "ABCDabcd 1234 !@#$ mixed content.",
-];
+const WINDOW_WIDTH: f64 = 960.0;
+const WINDOW_HEIGHT: f64 = 640.0;
+const PAGE_BG: [f32; 4] = [0.05, 0.08, 0.12, 1.0];
+const PANEL_ACCENT_BG: [f32; 4] = [0.16, 0.21, 0.28, 0.98];
+const TEXT_PRIMARY: [f32; 4] = [0.92, 0.95, 0.97, 1.0];
+const TEXT_MUTED: [f32; 4] = [0.75, 0.80, 0.86, 1.0];
+const TEXT_ACCENT: [f32; 4] = [0.94, 0.69, 0.28, 1.0];
+const INLINE_BG: [f32; 4] = [0.19, 0.25, 0.33, 0.95];
 
 fn main() -> Result<(), winit::error::EventLoopError> {
     env_logger::init();
@@ -43,6 +39,7 @@ struct SteleApp {
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
     renderer: Option<Renderer<'static>>,
+    demo: Option<LayoutDemo>,
 }
 
 impl ApplicationHandler for SteleApp {
@@ -59,10 +56,12 @@ impl ApplicationHandler for SteleApp {
                 .create_window(attributes)
                 .expect("failed to create window"),
         );
-        let renderer = block_on(init_renderer(window.clone()));
+        let viewport = logical_viewport(window.inner_size(), window.scale_factor() as f32);
+        let (renderer, demo) = block_on(init_renderer(window.clone(), viewport));
 
         self.window_id = Some(window.id());
         self.renderer = Some(renderer);
+        self.demo = Some(demo);
         self.window = Some(window.clone());
         window.request_redraw();
     }
@@ -89,18 +88,13 @@ impl ApplicationHandler for SteleApp {
                 }
             }
             WindowEvent::Resized(size) => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(size, window.scale_factor() as f32);
-                    window.request_redraw();
-                }
+                self.handle_resize(size, window.scale_factor() as f32);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(window.inner_size(), scale_factor as f32);
-                    window.request_redraw();
-                }
+                self.handle_resize(window.inner_size(), scale_factor as f32);
             }
             WindowEvent::CloseRequested => {
+                self.demo = None;
                 self.renderer = None;
                 self.window = None;
                 self.window_id = None;
@@ -115,7 +109,24 @@ impl ApplicationHandler for SteleApp {
     }
 }
 
-async fn init_renderer(window: Arc<Window>) -> Renderer<'static> {
+impl SteleApp {
+    fn handle_resize(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        renderer.resize(size, scale_factor);
+
+        if let Some(demo) = self.demo.as_mut() {
+            demo.resize(logical_viewport(size, scale_factor));
+            demo.apply(renderer);
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+}
+
+async fn init_renderer(window: Arc<Window>, viewport: [f32; 2]) -> (Renderer<'static>, LayoutDemo) {
     let instance = wgpu::Instance::default();
     let surface = instance
         .create_surface(window.clone())
@@ -157,7 +168,7 @@ async fn init_renderer(window: Arc<Window>) -> Renderer<'static> {
     let subpixel_layout = renderer::subpixel::detect_subpixel_layout();
     let rasterizer = FreeTypeRasterizer::new(font_discovery, subpixel_layout)
         .expect("failed to initialize FreeType rasterizer");
-    let draw_ops = build_hardcoded_draw_list(&rasterizer);
+    let demo = LayoutDemo::new(&rasterizer, viewport);
 
     let mut renderer = Renderer::new(
         device,
@@ -167,168 +178,114 @@ async fn init_renderer(window: Arc<Window>) -> Renderer<'static> {
         rasterizer,
         window.scale_factor() as f32,
     );
-    renderer.apply_ops(draw_ops);
-    renderer
+    demo.apply(&mut renderer);
+    (renderer, demo)
 }
 
-fn build_hardcoded_draw_list(rasterizer: &FreeTypeRasterizer) -> Vec<DrawListOp> {
-    let font_id = rasterizer.default_font_id();
-    let metrics = rasterizer.line_metrics(font_id, FONT_SIZE);
-    let mut y_offset = PADDING_Y;
-    let image = build_demo_image();
-    let mut ops = vec![
-        DrawListOp::SetRects(build_demo_rects(metrics.ascent, metrics.line_height)),
-        DrawListOp::SetPaths(build_demo_paths()),
-        DrawListOp::SetImages(build_demo_images(image)),
-    ];
-
-    for (line_index, text) in HARD_CODED_TEXT.into_iter().enumerate() {
-        let glyphs = rasterizer
-            .layout_line(text, font_id, FONT_SIZE, PADDING_X, y_offset)
-            .into_iter()
-            .map(|glyph| PositionedGlyph {
-                font_id,
-                glyph_id: glyph.glyph_id,
-                font_size: FONT_SIZE,
-                pos: glyph.pos,
-                color: TEXT_COLOR,
-                subpixel_offset: glyph.subpixel_offset,
-            })
-            .collect();
-        y_offset += metrics.line_height;
-        ops.push(DrawListOp::Insert { line_index, glyphs });
-    }
-
-    ops
+struct LayoutDemo {
+    document: Document,
+    prepared_blocks: Vec<PreparedBlock>,
 }
 
-fn build_demo_rects(ascent: f32, line_height: f32) -> Vec<RectCmd> {
-    vec![
-        RectCmd::new(
-            [12.0, 12.0],
-            [WINDOW_WIDTH as f32 - 24.0, line_height * 3.2],
-            PANEL_BG,
-            RenderLayer::Background,
-        ),
-        RectCmd::new(
-            [PADDING_X, PADDING_Y + ascent + 4.0],
-            [250.0, 2.0],
-            UNDERLINE_COLOR,
-            RenderLayer::Foreground,
-        ),
-        RectCmd::new(
-            [PADDING_X + 252.0, PADDING_Y + 4.0],
-            [2.0, line_height],
-            CURSOR_COLOR,
-            RenderLayer::Overlay,
-        ),
-    ]
-}
-
-fn build_demo_paths() -> Vec<PathCmd> {
-    // The M0 demo intentionally instantiates line, quadratic, and cubic paths
-    // plus every cap/join style once, so the whole primitive surface is exercised
-    // by `cargo run` instead of existing only as future-facing API shape.
-    vec![
-        PathCmd::new(
-            vec![
-                PathVerb::MoveTo { to: [100.0, 185.0] },
-                PathVerb::LineTo { to: [400.0, 185.0] },
-            ],
-            None,
-            Some(StrokeStyle::new(
-                [1.0, 1.0, 1.0, 1.0],
-                2.0,
-                LineCap::Butt,
-                LineJoin::Bevel,
-            )),
-            RenderLayer::Foreground,
-        ),
-        PathCmd::new(
-            vec![
-                PathVerb::MoveTo { to: [90.0, 260.0] },
-                PathVerb::CubicTo {
-                    ctrl1: [180.0, 170.0],
-                    ctrl2: [310.0, 350.0],
-                    to: [430.0, 250.0],
-                },
-            ],
-            None,
-            Some(StrokeStyle::new(
-                [0.28, 0.85, 0.45, 1.0],
-                2.0,
-                LineCap::Square,
-                LineJoin::Miter,
-            )),
-            RenderLayer::Content,
-        ),
-        PathCmd::new(
-            vec![
-                PathVerb::MoveTo { to: [475.0, 220.0] },
-                PathVerb::QuadTo {
-                    ctrl: [605.0, 145.0],
-                    to: [725.0, 235.0],
-                },
-            ],
-            None,
-            Some(StrokeStyle::new(
-                [0.98, 0.78, 0.24, 1.0],
-                2.0,
-                LineCap::Round,
-                LineJoin::Round,
-            )),
-            RenderLayer::Content,
-        ),
-        PathCmd::new(
-            vec![
-                PathVerb::MoveTo { to: [500.0, 320.0] },
-                PathVerb::LineTo { to: [720.0, 365.0] },
-                PathVerb::LineTo { to: [565.0, 520.0] },
-                PathVerb::Close,
-            ],
-            Some([0.2, 0.4, 0.8, 0.5]),
-            Some(StrokeStyle::new(
-                [0.96, 0.97, 0.99, 1.0],
-                1.0,
-                LineCap::Round,
-                LineJoin::Bevel,
-            )),
-            RenderLayer::Content,
-        ),
-    ]
-}
-
-fn build_demo_images(image: Arc<ImageData>) -> Vec<ImageCmd> {
-    vec![
-        ImageCmd::new(
-            [160.0, 335.0],
-            [128.0, 128.0],
-            image.clone(),
-            RenderLayer::Content,
-        ),
-        ImageCmd::new([310.0, 360.0], [96.0, 96.0], image, RenderLayer::Content),
-    ]
-}
-
-fn build_demo_image() -> Arc<ImageData> {
-    let width = 64u32;
-    let height = 64u32;
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-
-    for y in 0..height {
-        for x in 0..width {
-            let border = x < 4 || y < 4 || x >= width - 4 || y >= height - 4;
-            let checker = ((x / 8) + (y / 8)) % 2 == 0;
-            let color = if border {
-                [255, 255, 255, 255]
-            } else if checker {
-                [52, 171, 220, 255]
-            } else {
-                [246, 143, 84, 255]
-            };
-            rgba.extend_from_slice(&color);
+impl LayoutDemo {
+    fn new(rasterizer: &FreeTypeRasterizer, viewport: [f32; 2]) -> Self {
+        let document = build_demo_document(rasterizer.default_font_id(), viewport);
+        let prepared_blocks = prepare_document(&document, rasterizer);
+        Self {
+            document,
+            prepared_blocks,
         }
     }
 
-    Arc::new(ImageData::new(rgba, width, height))
+    fn resize(&mut self, viewport: [f32; 2]) {
+        apply_demo_block_rects(&mut self.document, viewport);
+    }
+
+    fn apply(&self, renderer: &mut Renderer<'static>) {
+        let layout_blocks = layout_document(&self.document, &self.prepared_blocks);
+        renderer.apply_ops(bridge_layout(&layout_blocks));
+    }
+}
+
+fn build_demo_document(font_id: u32, viewport: [f32; 2]) -> Document {
+    let mut title = TextStyle::new(font_id, 26.0, TEXT_PRIMARY);
+    title.bold = true;
+
+    let mut badge = TextStyle::new(font_id, 14.0, TEXT_ACCENT);
+    badge.underline = true;
+    badge.letter_spacing = 0.8;
+    badge.background_color = Some(INLINE_BG);
+
+    let body = TextStyle::new(font_id, 15.0, TEXT_MUTED);
+
+    let mut overlay_title = TextStyle::new(font_id, 18.0, TEXT_PRIMARY);
+    overlay_title.italic = true;
+
+    let mut overlay_body = TextStyle::new(font_id, 14.0, TEXT_PRIMARY);
+    overlay_body.strikethrough = true;
+    overlay_body.background_color = Some([0.24, 0.30, 0.38, 0.92]);
+
+    let mut document = Document::new(vec![
+        Block::new(
+            BlockRect::new(0.0, 0.0, 1.0, 1.0),
+            28.0,
+            Some(PAGE_BG),
+            vec![
+                Span::new("Stele Layout Engine", title),
+                Span::new(
+                    "\n多 Block stacking、自动换行、baseline 对齐，以及 block clip 已经接入 renderer。\n",
+                    body,
+                ),
+                Span::new("inline decoration sample", badge),
+                Span::new(
+                    " with mixed ASCII/CJK content. The quick brown fox jumps over the lazy dog, 你好世界ABC测试，长单词Supercalifragilisticexpialidocious也会按字符强制换行。",
+                    body,
+                ),
+            ],
+            0,
+        ),
+        Block::new(
+            BlockRect::new(0.0, 0.0, 1.0, 1.0),
+            18.0,
+            Some(PANEL_ACCENT_BG),
+            vec![
+                Span::new("Overlay Block", overlay_title),
+                Span::new(
+                    "\nThis block has its own clip rect and z-order. Resize the window to reflow text without rerunning prepare.",
+                    overlay_body,
+                ),
+            ],
+            1,
+        ),
+    ]);
+    apply_demo_block_rects(&mut document, viewport);
+    document
+}
+
+fn apply_demo_block_rects(document: &mut Document, viewport: [f32; 2]) {
+    let width = viewport[0].max(320.0);
+    let height = viewport[1].max(240.0);
+
+    if let Some(root) = document.blocks.get_mut(0) {
+        root.rect = BlockRect::new(0.0, 0.0, width, height);
+        root.background_color = Some(PAGE_BG);
+    }
+
+    if let Some(overlay) = document.blocks.get_mut(1) {
+        let overlay_width = width.min(360.0).max(220.0);
+        let overlay_height = height.min(180.0).max(120.0);
+        let overlay_x = (width - overlay_width - 32.0).max(24.0);
+        let overlay_y = (height * 0.42)
+            .min(height - overlay_height - 24.0)
+            .max(24.0);
+        overlay.rect = BlockRect::new(overlay_x, overlay_y, overlay_width, overlay_height);
+        overlay.background_color = Some(PANEL_ACCENT_BG);
+    }
+}
+
+fn logical_viewport(size: PhysicalSize<u32>, scale_factor: f32) -> [f32; 2] {
+    [
+        size.width as f32 / scale_factor.max(1.0),
+        size.height as f32 / scale_factor.max(1.0),
+    ]
 }

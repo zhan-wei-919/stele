@@ -1,11 +1,12 @@
-//! Per-frame surface acquisition and render-pass recording.
+//! Per-frame surface acquisition and block-aware render-pass recording.
 
 use std::time::Instant;
 
 use log::{trace, warn};
 
 use super::Renderer;
-use crate::renderer::draw_list::RenderLayer;
+use crate::renderer::draw_list::{ClipRect, RenderLayer};
+use crate::renderer::runtime::state::{ImageBatch, PrimitiveRange};
 
 impl<'window> Renderer<'window> {
     /// Renders the current draw list into the swapchain surface.
@@ -81,27 +82,34 @@ impl<'window> Renderer<'window> {
             let draw_calls = self.record_passes(&mut pass);
             drop(pass);
             self.queue.submit(Some(encoder.finish()));
-            return draw_calls;
+            draw_calls
         }
     }
 
     fn record_passes<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) -> u32 {
         let mut draw_calls = 0;
-        for layer in RenderLayer::ALL {
-            draw_calls += self.draw_rects_in_layer(pass, layer);
-            draw_calls += self.draw_paths_in_layer(pass, layer);
-            draw_calls += self.draw_images_in_layer(pass, layer);
-            draw_calls += self.draw_glyphs_in_layer(pass, layer);
+        for block in &self.block_batches {
+            let Some((x, y, width, height)) = self.physical_clip_rect(block.clip_rect) else {
+                continue;
+            };
+            pass.set_scissor_rect(x, y, width, height);
+
+            for layer in RenderLayer::ALL {
+                draw_calls += self.draw_rect_range(pass, block.rect_ranges_by_layer[layer.index()]);
+                draw_calls += self.draw_path_range(pass, block.path_ranges_by_layer[layer.index()]);
+                draw_calls += self.draw_images(pass, &block.image_batches_by_layer[layer.index()]);
+                draw_calls +=
+                    self.draw_glyph_range(pass, block.glyph_ranges_by_layer[layer.index()]);
+            }
         }
         draw_calls
     }
 
-    fn draw_rects_in_layer<'pass>(
+    fn draw_rect_range<'pass>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
-        layer: RenderLayer,
+        range: PrimitiveRange,
     ) -> u32 {
-        let range = self.rect_ranges_by_layer[layer.index()];
         if range.count == 0 {
             return 0;
         }
@@ -117,12 +125,11 @@ impl<'window> Renderer<'window> {
         1
     }
 
-    fn draw_paths_in_layer<'pass>(
+    fn draw_path_range<'pass>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
-        layer: RenderLayer,
+        range: PrimitiveRange,
     ) -> u32 {
-        let range = self.path_ranges_by_layer[layer.index()];
         if range.count == 0 {
             return 0;
         }
@@ -143,17 +150,17 @@ impl<'window> Renderer<'window> {
         1
     }
 
-    fn draw_images_in_layer<'pass>(
+    fn draw_images<'pass>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
-        layer: RenderLayer,
+        batches: &[ImageBatch],
     ) -> u32 {
         if self.image_instance_count == 0 {
             return 0;
         }
 
         let mut draw_calls = 0;
-        for batch in &self.image_batches_by_layer[layer.index()] {
+        for batch in batches {
             let Some(image) = self.image_cache.get(batch.content_hash) else {
                 debug_assert!(false, "image batch referenced a missing cached texture");
                 continue;
@@ -172,12 +179,11 @@ impl<'window> Renderer<'window> {
         draw_calls
     }
 
-    fn draw_glyphs_in_layer<'pass>(
+    fn draw_glyph_range<'pass>(
         &'pass self,
         pass: &mut wgpu::RenderPass<'pass>,
-        layer: RenderLayer,
+        range: PrimitiveRange,
     ) -> u32 {
-        let range = self.glyph_ranges_by_layer[layer.index()];
         if range.count == 0 {
             return 0;
         }
@@ -192,4 +198,47 @@ impl<'window> Renderer<'window> {
         pass.draw(0..6, range.start..range.end());
         1
     }
+
+    fn physical_clip_rect(&self, clip_rect: Option<ClipRect>) -> Option<(u32, u32, u32, u32)> {
+        let scale_factor = self.scale_factor.max(1.0);
+        let surface_width = self.surface_config.width as f32;
+        let surface_height = self.surface_config.height as f32;
+        let (left, top, right, bottom) = match clip_rect {
+            Some(clip_rect) => {
+                logical_clip_bounds(clip_rect, scale_factor, surface_width, surface_height)
+            }
+            None => (0, 0, self.surface_config.width, self.surface_config.height),
+        };
+
+        let width = right.saturating_sub(left);
+        let height = bottom.saturating_sub(top);
+        if width == 0 || height == 0 {
+            None
+        } else {
+            Some((left, top, width, height))
+        }
+    }
+}
+
+fn logical_clip_bounds(
+    clip_rect: ClipRect,
+    scale_factor: f32,
+    surface_width: f32,
+    surface_height: f32,
+) -> (u32, u32, u32, u32) {
+    let [origin_x, origin_y] = clip_rect.origin();
+    let [width, height] = clip_rect.size();
+    let left = (origin_x.max(0.0) * scale_factor)
+        .floor()
+        .clamp(0.0, surface_width) as u32;
+    let top = (origin_y.max(0.0) * scale_factor)
+        .floor()
+        .clamp(0.0, surface_height) as u32;
+    let right = ((origin_x + width).max(0.0) * scale_factor)
+        .ceil()
+        .clamp(0.0, surface_width) as u32;
+    let bottom = ((origin_y + height).max(0.0) * scale_factor)
+        .ceil()
+        .clamp(0.0, surface_height) as u32;
+    (left, top, right, bottom)
 }

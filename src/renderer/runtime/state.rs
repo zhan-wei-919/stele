@@ -8,7 +8,7 @@ use winit::dpi::PhysicalSize;
 use crate::font::FreeTypeRasterizer;
 
 use super::super::atlas::GlyphAtlas;
-use super::super::draw_list::{DrawList, DrawListOp, RenderLayer};
+use super::super::draw_list::{ClipRect, DrawList, DrawListOp, RenderLayer};
 use super::super::image_cache::ImageCache;
 use super::super::instance::{GlyphInstance, ImageInstance, PathVertex, RectInstance};
 use super::super::pipeline::{
@@ -49,6 +49,29 @@ pub(super) struct ImageBatch {
     pub range: PrimitiveRange,
 }
 
+/// GPU ranges and image batches belonging to one block submission unit.
+#[derive(Clone, Debug)]
+pub(super) struct BlockGpuBatch {
+    pub clip_rect: Option<ClipRect>,
+    pub rect_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
+    pub path_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
+    pub glyph_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
+    pub image_batches_by_layer: [Vec<ImageBatch>; LAYER_COUNT],
+}
+
+impl BlockGpuBatch {
+    /// Creates an empty GPU batch placeholder for one block.
+    pub fn empty(clip_rect: Option<ClipRect>) -> Self {
+        Self {
+            clip_rect,
+            rect_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
+            path_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
+            glyph_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
+            image_batches_by_layer: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+}
+
 /// GPU-backed renderer that turns draw-list updates into wgpu command buffers.
 pub struct Renderer<'window> {
     pub(super) device: wgpu::Device,
@@ -87,10 +110,7 @@ pub struct Renderer<'window> {
     pub(super) path_vertex_count: u32,
     pub(super) path_index_count: u32,
     pub(super) image_instance_count: u32,
-    pub(super) rect_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
-    pub(super) path_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
-    pub(super) glyph_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
-    pub(super) image_batches_by_layer: [Vec<ImageBatch>; LAYER_COUNT],
+    pub(super) block_batches: Vec<BlockGpuBatch>,
 }
 
 impl<'window> Renderer<'window> {
@@ -178,10 +198,7 @@ impl<'window> Renderer<'window> {
             path_vertex_count: 0,
             path_index_count: 0,
             image_instance_count: 0,
-            rect_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
-            path_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
-            glyph_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
-            image_batches_by_layer: std::array::from_fn(|_| Vec::new()),
+            block_batches: Vec::new(),
         }
     }
 
@@ -244,5 +261,14 @@ impl<'window> Renderer<'window> {
 
     pub(super) fn image_slice_end(&self, count: u32) -> wgpu::BufferAddress {
         count as wgpu::BufferAddress * size_of::<ImageInstance>() as wgpu::BufferAddress
+    }
+
+    pub(super) fn viewport_clip_rect(&self) -> ClipRect {
+        ClipRect::new(
+            0.0,
+            0.0,
+            self.surface_config.width as f32 / self.scale_factor.max(1.0),
+            self.surface_config.height as f32 / self.scale_factor.max(1.0),
+        )
     }
 }

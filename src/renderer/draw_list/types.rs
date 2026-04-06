@@ -59,6 +59,140 @@ impl RenderLayer {
     }
 }
 
+/// Block-local layer ordering used during block-aware renderer submission.
+pub type BlockSubLayer = RenderLayer;
+
+/// Logical clip rectangle applied to one block during rendering.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl ClipRect {
+    /// Creates a clip rectangle whose geometry is validated once at construction time.
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        debug_assert!(
+            x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite(),
+            "ClipRect values must stay finite"
+        );
+        debug_assert!(
+            width > 0.0 && height > 0.0,
+            "ClipRect size must stay positive"
+        );
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Returns the clip rectangle origin in logical pixels.
+    pub fn origin(&self) -> [f32; 2] {
+        [self.x, self.y]
+    }
+
+    /// Returns the clip rectangle size in logical pixels.
+    pub fn size(&self) -> [f32; 2] {
+        [self.width, self.height]
+    }
+}
+
+/// Primitives that belong to one block-local layer.
+#[derive(Clone, Debug, Default)]
+pub struct BlockLayer {
+    glyphs: Vec<PositionedGlyph>,
+    rects: Vec<RectCmd>,
+    paths: Vec<PathCmd>,
+    images: Vec<ImageCmd>,
+}
+
+impl BlockLayer {
+    /// Returns the glyphs assigned to this block-local layer.
+    pub fn glyphs(&self) -> &[PositionedGlyph] {
+        &self.glyphs
+    }
+
+    /// Returns the rectangles assigned to this block-local layer.
+    pub fn rects(&self) -> &[RectCmd] {
+        &self.rects
+    }
+
+    /// Returns the paths assigned to this block-local layer.
+    pub fn paths(&self) -> &[PathCmd] {
+        &self.paths
+    }
+
+    /// Returns the images assigned to this block-local layer.
+    pub fn images(&self) -> &[ImageCmd] {
+        &self.images
+    }
+}
+
+/// Renderer-facing draw primitives grouped by stacking block and clip lifetime.
+#[derive(Clone, Debug)]
+pub struct BlockDrawGroup {
+    block_index: usize,
+    z_order: u32,
+    clip_rect: Option<ClipRect>,
+    sub_layers: [BlockLayer; RenderLayer::ALL.len()],
+}
+
+impl BlockDrawGroup {
+    /// Creates an empty draw group for one block submission unit.
+    pub fn new(block_index: usize, z_order: u32, clip_rect: Option<ClipRect>) -> Self {
+        Self {
+            block_index,
+            z_order,
+            clip_rect,
+            sub_layers: std::array::from_fn(|_| BlockLayer::default()),
+        }
+    }
+
+    /// Returns the document-order block index used to break z-order ties.
+    pub fn block_index(&self) -> usize {
+        self.block_index
+    }
+
+    /// Returns the stacking order where larger values are visually on top.
+    pub fn z_order(&self) -> u32 {
+        self.z_order
+    }
+
+    /// Returns the clip rectangle applied while drawing this group.
+    pub fn clip_rect(&self) -> Option<ClipRect> {
+        self.clip_rect
+    }
+
+    /// Returns the primitive collections assigned to the requested block-local layer.
+    pub fn layer(&self, layer: BlockSubLayer) -> &BlockLayer {
+        &self.sub_layers[layer.index()]
+    }
+
+    /// Appends glyphs to the requested block-local layer.
+    pub fn extend_glyphs(&mut self, layer: BlockSubLayer, glyphs: Vec<PositionedGlyph>) {
+        self.sub_layers[layer.index()].glyphs.extend(glyphs);
+    }
+
+    /// Appends one rectangle to the layer encoded on the command itself.
+    pub fn push_rect(&mut self, rect: RectCmd) {
+        self.sub_layers[rect.layer().index()].rects.push(rect);
+    }
+
+    /// Appends one path to the layer encoded on the command itself.
+    pub fn push_path(&mut self, path: PathCmd) {
+        self.sub_layers[path.layer().index()].paths.push(path);
+    }
+
+    /// Appends one image to the layer encoded on the command itself.
+    pub fn push_image(&mut self, image: ImageCmd) {
+        self.sub_layers[image.layer().index()].images.push(image);
+    }
+}
+
 /// Solid rectangle command used for backgrounds, underlines, and overlay blocks.
 #[derive(Clone, Copy, Debug)]
 pub struct RectCmd {

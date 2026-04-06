@@ -7,4 +7,5 @@ mod rasterizer;
 
 pub(crate) use discovery::FontDiscovery;
 pub(crate) use glyph::{GlyphKey, SubpixelBin};
+pub(crate) use layout::{FontSelection, LineMetrics, MeasuredGlyph};
 pub(crate) use rasterizer::{FreeTypeRasterizer, RasterizedGlyph, SubpixelLayout};
