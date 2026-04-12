@@ -7,23 +7,25 @@ use std::time::Duration;
 use log::{info, warn};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use winit::event_loop::EventLoopProxy;
 
-use super::{Action, SceneDiff, WakeEvent};
+use super::{Action, ViewUpdate, WakeEvent};
 
 /// Owns the async runtime and the winit-side ends of the bridge channels.
 pub(crate) struct IoRuntime {
     runtime: Runtime,
-    scene_diff_rx: Option<UnboundedReceiver<SceneDiff>>,
+    view_update_rx: Option<UnboundedReceiver<ViewUpdate>>,
     action_tx: UnboundedSender<Action>,
     proxy: EventLoopProxy<WakeEvent>,
 }
 
 /// Async-side handle used by the store task.
 pub(crate) struct IoHandle {
-    scene_diff_tx: UnboundedSender<SceneDiff>,
+    view_update_tx: UnboundedSender<ViewUpdate>,
     action_rx: UnboundedReceiver<Action>,
+    pending_action: Option<Action>,
     proxy: EventLoopProxy<WakeEvent>,
 }
 
@@ -31,7 +33,7 @@ impl IoRuntime {
     /// Creates the runtime and splits the bridge into winit-side and async-side halves.
     pub(crate) fn new(proxy: EventLoopProxy<WakeEvent>) -> io::Result<(Self, IoHandle)> {
         let runtime = Runtime::new()?;
-        let (scene_diff_tx, scene_diff_rx) = mpsc::unbounded_channel();
+        let (view_update_tx, view_update_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
 
         info!("io.runtime.start runtime=tokio");
@@ -39,13 +41,14 @@ impl IoRuntime {
         Ok((
             Self {
                 runtime,
-                scene_diff_rx: Some(scene_diff_rx),
+                view_update_rx: Some(view_update_rx),
                 action_tx,
                 proxy: proxy.clone(),
             },
             IoHandle {
-                scene_diff_tx,
+                view_update_tx,
                 action_rx,
+                pending_action: None,
                 proxy,
             },
         ))
@@ -56,11 +59,11 @@ impl IoRuntime {
         self.action_tx.clone()
     }
 
-    /// Moves the winit-side SceneDiff receiver into the shared driver.
-    pub(crate) fn take_scene_diff_rx(&mut self) -> UnboundedReceiver<SceneDiff> {
-        self.scene_diff_rx
+    /// Moves the winit-side view-update receiver into the shared driver.
+    pub(crate) fn take_view_update_rx(&mut self) -> UnboundedReceiver<ViewUpdate> {
+        self.view_update_rx
             .take()
-            .expect("scene diff receiver must only be taken once")
+            .expect("view update receiver must only be taken once")
     }
 
     /// Spawns one async task on the owned runtime.
@@ -88,7 +91,27 @@ impl IoRuntime {
 impl IoHandle {
     /// Waits for the next action from the winit thread.
     pub(crate) async fn next_action(&mut self) -> Option<Action> {
+        if let Some(action) = self.pending_action.take() {
+            return Some(action);
+        }
         self.action_rx.recv().await
+    }
+
+    /// Tries to receive the next action without waiting.
+    pub(crate) fn try_next_action(&mut self) -> Result<Action, TryRecvError> {
+        if let Some(action) = self.pending_action.take() {
+            return Ok(action);
+        }
+        self.action_rx.try_recv()
+    }
+
+    /// Pushes one action back so the store can preserve queue order after lookahead.
+    pub(crate) fn push_front_action(&mut self, action: Action) {
+        debug_assert!(
+            self.pending_action.is_none(),
+            "pending action slot must stay empty before push_front"
+        );
+        self.pending_action = Some(action);
     }
 
     /// Wakes the winit event loop through the shared proxy.
@@ -101,10 +124,10 @@ impl IoHandle {
         true
     }
 
-    /// Sends one SceneDiff toward the view and wakes winit for delivery.
-    pub(crate) fn dispatch_scene_diff(&self, diff: SceneDiff) -> bool {
-        if self.scene_diff_tx.send(diff).is_err() {
-            warn!("io.runtime.send_failed payload=scene_diff");
+    /// Sends one view update toward the view and wakes winit for delivery.
+    pub(crate) fn dispatch_view_update(&self, update: ViewUpdate) -> bool {
+        if self.view_update_tx.send(update).is_err() {
+            warn!("io.runtime.send_failed payload=view_update");
             return false;
         }
 

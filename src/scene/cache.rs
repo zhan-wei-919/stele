@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 
 use crate::draw_list::{ClipRect, PathCmd};
+use crate::io::SceneFrame;
 use crate::renderer::instance::{GlyphInstance, ImageInstance, RectInstance};
 
-/// Stable block identifier used across snapshots and SceneDiffs.
+/// Stable block identifier used across snapshots and scene frames.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct BlockId(u64);
 
@@ -86,13 +87,15 @@ impl BlockSceneBatch {
     }
 }
 
-/// View-owned block scene cache updated only through SceneDiff apply.
+/// View-owned block scene cache updated only through applied scene frames.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ViewState {
     block_order: Vec<BlockId>,
     blocks: HashMap<BlockId, BlockSceneBatch>,
     requested_viewport_revision: u64,
     applied_viewport_revision: u64,
+    ready_atlas_generation: Option<u64>,
+    pending_scene_frame: Option<SceneFrame>,
 }
 
 impl ViewState {
@@ -140,6 +143,7 @@ impl ViewState {
     /// Records the latest viewport revision requested by window events.
     pub(crate) fn set_requested_viewport_revision(&mut self, viewport_revision: u64) {
         self.requested_viewport_revision = self.requested_viewport_revision.max(viewport_revision);
+        self.drop_stale_pending_scene_frame();
     }
 
     /// Returns the latest viewport revision whose scene diff was actually applied.
@@ -151,5 +155,62 @@ impl ViewState {
     pub(crate) fn set_applied_viewport_revision(&mut self, viewport_revision: u64) {
         self.applied_viewport_revision = self.applied_viewport_revision.max(viewport_revision);
         self.requested_viewport_revision = self.requested_viewport_revision.max(viewport_revision);
+        self.drop_stale_pending_scene_frame();
+    }
+
+    /// Returns the latest logical atlas generation known to the view thread.
+    pub(crate) fn ready_atlas_generation(&self) -> Option<u64> {
+        self.ready_atlas_generation
+    }
+
+    /// Records the latest logical atlas generation applied on the renderer side.
+    pub(crate) fn set_ready_atlas_generation(&mut self, generation: u64) {
+        self.ready_atlas_generation = Some(
+            self.ready_atlas_generation
+                .map(|ready| ready.max(generation))
+                .unwrap_or(generation),
+        );
+    }
+
+    /// Returns the newest scene frame waiting for its required atlas generation.
+    pub(crate) fn pending_scene_frame(&self) -> Option<&SceneFrame> {
+        self.pending_scene_frame.as_ref()
+    }
+
+    /// Stores the newest pending scene frame that is still relevant to the requested viewport.
+    pub(crate) fn set_pending_scene_frame(&mut self, scene_frame: SceneFrame) {
+        if scene_frame.viewport_revision < self.requested_viewport_revision {
+            return;
+        }
+
+        let replace_existing = self
+            .pending_scene_frame
+            .as_ref()
+            .map(|pending| pending.viewport_revision <= scene_frame.viewport_revision)
+            .unwrap_or(true);
+        if replace_existing {
+            self.pending_scene_frame = Some(scene_frame);
+        }
+    }
+
+    /// Takes the pending scene frame, if any.
+    pub(crate) fn take_pending_scene_frame(&mut self) -> Option<SceneFrame> {
+        self.pending_scene_frame.take()
+    }
+
+    /// Clears any pending scene frame that can no longer be applied.
+    pub(crate) fn clear_pending_scene_frame(&mut self) {
+        self.pending_scene_frame = None;
+    }
+
+    fn drop_stale_pending_scene_frame(&mut self) {
+        let should_drop = self
+            .pending_scene_frame
+            .as_ref()
+            .map(|scene_frame| scene_frame.viewport_revision < self.requested_viewport_revision)
+            .unwrap_or(false);
+        if should_drop {
+            self.pending_scene_frame = None;
+        }
     }
 }

@@ -42,11 +42,16 @@ impl Composer {
             .collect::<Vec<_>>();
 
         sort_entries_by_z_order(&mut entries);
+        let required_atlas_generation = entries
+            .iter()
+            .any(|(_, batch)| !batch.glyphs().is_empty())
+            .then_some(logical_atlas.generation);
         let order = entries.iter().map(|(block_id, _)| *block_id).collect();
         let blocks = entries.into_iter().collect::<HashMap<_, _>>();
 
         SceneSnapshot {
             viewport_revision: viewport.viewport_revision,
+            required_atlas_generation,
             order,
             blocks,
         }

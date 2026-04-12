@@ -6,7 +6,6 @@ mod logical_atlas;
 mod model;
 mod reducer;
 mod runtime;
-mod throttle;
 mod types;
 
 pub(crate) use runtime::{run_store, Store};

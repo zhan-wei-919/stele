@@ -1,72 +1,72 @@
-//! Testable SceneDiff drain state machine shared by the app and integration tests.
+//! Testable view-update drain state machine shared by the app and integration tests.
 
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::SceneDiff;
+use super::ViewUpdate;
 
-/// Result of draining pending SceneDiffs on one wake.
+/// Result of draining pending view updates on one wake.
 #[derive(Debug, Clone)]
 pub(crate) struct WakeOutcome {
     pub(crate) drained: usize,
-    pub(crate) diffs: Vec<SceneDiff>,
+    pub(crate) updates: Vec<ViewUpdate>,
     pub(crate) wake_again: bool,
     pub(crate) disconnected: bool,
 }
 
-/// Owns winit-side drain state for queued SceneDiff payloads.
-pub(crate) struct SceneDiffDriver {
-    scene_diff_rx: UnboundedReceiver<SceneDiff>,
-    overflow_scene_diff: Option<SceneDiff>,
+/// Owns winit-side drain state for queued view-update payloads.
+pub(crate) struct ViewUpdateDriver {
+    view_update_rx: UnboundedReceiver<ViewUpdate>,
+    overflow_view_update: Option<ViewUpdate>,
 }
 
-impl SceneDiffDriver {
-    /// Creates a new driver around the winit-side SceneDiff receiver.
-    pub(crate) fn new(scene_diff_rx: UnboundedReceiver<SceneDiff>) -> Self {
+impl ViewUpdateDriver {
+    /// Creates a new driver around the winit-side view-update receiver.
+    pub(crate) fn new(view_update_rx: UnboundedReceiver<ViewUpdate>) -> Self {
         Self {
-            scene_diff_rx,
-            overflow_scene_diff: None,
+            view_update_rx,
+            overflow_view_update: None,
         }
     }
 
-    /// Drains pending SceneDiffs and reports what the app should do next.
+    /// Drains pending view updates and reports what the app should do next.
     pub(crate) fn on_wake(&mut self, limit: usize) -> WakeOutcome {
-        let (diffs, wake_again, disconnected) = self.drain_diffs(limit);
-        let drained = diffs.len();
+        let (updates, wake_again, disconnected) = self.drain_updates(limit);
+        let drained = updates.len();
 
         WakeOutcome {
             drained,
-            diffs,
+            updates,
             wake_again,
             disconnected,
         }
     }
 
-    fn drain_diffs(&mut self, limit: usize) -> (Vec<SceneDiff>, bool, bool) {
+    fn drain_updates(&mut self, limit: usize) -> (Vec<ViewUpdate>, bool, bool) {
         debug_assert!(limit > 0, "drain limit must stay positive");
 
-        let mut diffs = Vec::new();
+        let mut updates = Vec::new();
         let mut disconnected = false;
-        if let Some(diff) = self.overflow_scene_diff.take() {
-            diffs.push(diff);
+        if let Some(update) = self.overflow_view_update.take() {
+            updates.push(update);
         }
 
-        while diffs.len() < limit {
-            match self.scene_diff_rx.try_recv() {
-                Ok(diff) => diffs.push(diff),
+        while updates.len() < limit {
+            match self.view_update_rx.try_recv() {
+                Ok(update) => updates.push(update),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     disconnected = true;
-                    return (diffs, false, disconnected);
+                    return (updates, false, disconnected);
                 }
             }
         }
 
         let mut wake_again = false;
-        if diffs.len() == limit {
-            match self.scene_diff_rx.try_recv() {
-                Ok(diff) => {
-                    self.overflow_scene_diff = Some(diff);
+        if updates.len() == limit {
+            match self.view_update_rx.try_recv() {
+                Ok(update) => {
+                    self.overflow_view_update = Some(update);
                     wake_again = true;
                 }
                 Err(TryRecvError::Empty) => {}
@@ -74,6 +74,6 @@ impl SceneDiffDriver {
             }
         }
 
-        (diffs, wake_again, disconnected)
+        (updates, wake_again, disconnected)
     }
 }

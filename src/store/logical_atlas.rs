@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use log::info;
 
 use crate::font::{FreeTypeRasterizer, GlyphKey, RasterizedGlyph};
-use crate::io::AtlasPatch;
+use crate::io::{AtlasPatch, AtlasUpdate};
 use crate::renderer::atlas::packer::ShelfPacker;
 use crate::renderer::atlas::upload::AtlasUpload;
 use crate::renderer::atlas::AtlasRegion;
@@ -67,29 +67,18 @@ impl LogicalAtlas {
         );
     }
 
-    /// Drains the accumulated atlas patch queue.
-    pub(crate) fn take_pending_patches(&mut self) -> Vec<AtlasPatch> {
-        std::mem::take(&mut self.pending_patches)
-    }
+    /// Drains one pending atlas update if the logical atlas changed since the last send.
+    pub(crate) fn take_pending_update(&mut self) -> Option<AtlasUpdate> {
+        let requested_atlas_size = self.pending_requested_atlas_size.take();
+        let patches = std::mem::take(&mut self.pending_patches);
+        if requested_atlas_size.is_none() && patches.is_empty() {
+            return None;
+        }
 
-    /// Drains the pending physical atlas rebuild request.
-    pub(crate) fn take_pending_requested_atlas_size(&mut self) -> Option<u32> {
-        self.pending_requested_atlas_size.take()
-    }
-
-    /// Builds a self-contained atlas payload that can recreate the full physical texture.
-    pub(crate) fn take_full_snapshot_payload(
-        &mut self,
-        rasterizer: &FreeTypeRasterizer,
-    ) -> (Option<u32>, Vec<AtlasPatch>) {
-        let patches = self
-            .regions
-            .iter()
-            .filter_map(|(key, region)| full_patch_for_region(*key, *region, rasterizer))
-            .collect::<Vec<_>>();
-        self.pending_patches.clear();
-        self.pending_requested_atlas_size = None;
-        (Some(self.current_size), patches)
+        let mut update = AtlasUpdate::new(self.generation);
+        update.requested_atlas_size = requested_atlas_size;
+        update.patches = patches;
+        Some(update)
     }
 
     fn insert_rasterized(
@@ -206,22 +195,4 @@ fn empty_region(rasterized: &RasterizedGlyph) -> AtlasRegion {
         size: [0.0, 0.0],
         bearing: [rasterized.bearing_x as f32, rasterized.bearing_y as f32],
     }
-}
-
-fn full_patch_for_region(
-    key: GlyphKey,
-    region: AtlasRegion,
-    rasterizer: &FreeTypeRasterizer,
-) -> Option<AtlasPatch> {
-    if region.size[0] <= 0.0 || region.size[1] <= 0.0 {
-        return None;
-    }
-
-    let rasterized = rasterizer.rasterize_lcd(key);
-    let upload = AtlasUpload::from_rasterized(&rasterized, rasterizer.subpixel_layout());
-    if upload.width == 0 || upload.height == 0 {
-        return None;
-    }
-
-    Some(AtlasPatch::new(region, upload.rgba))
 }

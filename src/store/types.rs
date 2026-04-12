@@ -37,13 +37,13 @@ pub(crate) enum StorePhase {
     Laying,
     ComposingSnapshot,
     DiffingSnapshot,
-    Throttled,
 }
 
 /// Full render-ready scene snapshot owned by the async store.
 #[derive(Clone, Debug)]
 pub(crate) struct SceneSnapshot {
     pub(crate) viewport_revision: u64,
+    pub(crate) required_atlas_generation: Option<u64>,
     pub(crate) order: Vec<BlockId>,
     pub(crate) blocks: HashMap<BlockId, BlockSceneBatch>,
 }
@@ -53,6 +53,7 @@ impl SceneSnapshot {
     pub(crate) fn empty(viewport_revision: u64) -> Self {
         Self {
             viewport_revision,
+            required_atlas_generation: None,
             order: Vec::new(),
             blocks: HashMap::new(),
         }

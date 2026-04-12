@@ -1,4 +1,4 @@
-//! Shared action and scene-diff payloads crossing the winit/async boundary.
+//! Shared action and view-update payloads crossing the winit/async boundary.
 
 use crate::renderer::atlas::AtlasRegion;
 use crate::scene::{BlockId, BlockSceneBatch};
@@ -86,36 +86,85 @@ pub(crate) enum BlockOp {
     },
 }
 
-/// Incremental scene update emitted by the async store toward the view.
+/// Incremental scene payload emitted by the async store toward the view.
 #[derive(Clone, Debug)]
-pub(crate) struct SceneDiff {
-    pub(crate) viewport_revision: u64,
-    pub(crate) requested_atlas_size: Option<u32>,
-    pub(crate) atlas_patches: Vec<AtlasPatch>,
-    pub(crate) clear_tessellation_cache: bool,
-    pub(crate) block_order: Option<Vec<BlockId>>,
-    pub(crate) block_ops: Vec<BlockOp>,
+pub(crate) enum ScenePayload {
+    ReplaceAll {
+        block_order: Vec<BlockId>,
+        block_batches: Vec<(BlockId, BlockSceneBatch)>,
+    },
+    Diff {
+        block_order: Option<Vec<BlockId>>,
+        block_ops: Vec<BlockOp>,
+    },
 }
 
-impl SceneDiff {
-    /// Creates an empty diff associated with one viewport revision.
-    pub(crate) fn new(viewport_revision: u64) -> Self {
+impl ScenePayload {
+    /// Returns whether the payload carries no externally visible scene change.
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::ReplaceAll { .. } => false,
+            Self::Diff {
+                block_order,
+                block_ops,
+            } => block_order.is_none() && block_ops.is_empty(),
+        }
+    }
+}
+
+/// Scene frame emitted by the async store toward the view.
+#[derive(Clone, Debug)]
+pub(crate) struct SceneFrame {
+    pub(crate) viewport_revision: u64,
+    pub(crate) required_atlas_generation: Option<u64>,
+    pub(crate) clear_tessellation_cache: bool,
+    pub(crate) payload: ScenePayload,
+}
+
+impl SceneFrame {
+    /// Creates one scene frame associated with one viewport revision.
+    pub(crate) fn new(
+        viewport_revision: u64,
+        required_atlas_generation: Option<u64>,
+        payload: ScenePayload,
+    ) -> Self {
         Self {
             viewport_revision,
-            requested_atlas_size: None,
-            atlas_patches: Vec::new(),
+            required_atlas_generation,
             clear_tessellation_cache: false,
-            block_order: None,
-            block_ops: Vec::new(),
+            payload,
         }
     }
 
-    /// Returns whether the diff carries no externally visible scene change.
+    /// Returns whether the frame carries no externally visible scene change.
     pub(crate) fn is_empty(&self) -> bool {
-        self.requested_atlas_size.is_none()
-            && self.atlas_patches.is_empty()
-            && !self.clear_tessellation_cache
-            && self.block_order.is_none()
-            && self.block_ops.is_empty()
+        !self.clear_tessellation_cache && self.payload.is_empty()
     }
+}
+
+/// One atlas update emitted by the async store toward the view.
+#[derive(Clone, Debug)]
+pub(crate) struct AtlasUpdate {
+    pub(crate) generation: u64,
+    pub(crate) requested_atlas_size: Option<u32>,
+    pub(crate) patches: Vec<AtlasPatch>,
+}
+
+impl AtlasUpdate {
+    /// Creates an empty atlas update for one logical atlas generation.
+    pub(crate) fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            requested_atlas_size: None,
+            patches: Vec::new(),
+        }
+    }
+
+}
+
+/// Unified async-to-view payload. Atlas and scene lifecycles are independent.
+#[derive(Clone, Debug)]
+pub(crate) enum ViewUpdate {
+    Atlas(AtlasUpdate),
+    Scene(SceneFrame),
 }

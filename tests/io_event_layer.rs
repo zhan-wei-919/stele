@@ -18,7 +18,8 @@ mod scene;
 use event::handlers::KeyboardInput;
 use event::{EventRouter, RouteAction, ViewportSnapshot};
 use io::{
-    Action, ButtonState, MouseButtonKind, MouseScroll, SceneDiff, SceneDiffDriver, WakeEvent,
+    Action, ButtonState, MouseButtonKind, MouseScroll, SceneFrame, ScenePayload, ViewUpdate,
+    ViewUpdateDriver, WakeEvent,
 };
 use tokio::sync::mpsc;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -39,31 +40,41 @@ fn async_side_exports_remain_available_for_future_mounts() {
     let _ = std::mem::size_of::<Option<font::MeasuredGlyph>>();
     let _ = std::mem::size_of::<Option<renderer::Renderer<'static>>>();
     let _ = std::mem::size_of::<Option<io::AtlasPatch>>();
+    let _ = std::mem::size_of::<Option<io::AtlasUpdate>>();
     let _ = std::mem::size_of::<Option<io::BlockOp>>();
     let _ = std::mem::size_of::<Option<io::IoHandle>>();
     let _ = std::mem::size_of::<Option<io::IoRuntime>>();
-    let _ = std::mem::size_of::<Option<SceneDiffDriver>>();
+    let _ = std::mem::size_of::<Option<io::SceneFrame>>();
+    let _ = std::mem::size_of::<Option<io::ViewUpdate>>();
+    let _ = std::mem::size_of::<Option<ViewUpdateDriver>>();
     let _ = std::mem::size_of::<Option<WakeEvent>>();
 }
 
 #[test]
 fn drain_limit_preserves_overflow_for_the_next_wake() {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mut driver = SceneDiffDriver::new(rx);
+    let mut driver = ViewUpdateDriver::new(rx);
     for revision in [1, 2, 3] {
-        tx.send(SceneDiff::new(revision))
-            .expect("scene diff send must succeed");
+        tx.send(ViewUpdate::Scene(SceneFrame::new(
+            revision,
+            None,
+            ScenePayload::ReplaceAll {
+                block_order: Vec::new(),
+                block_batches: Vec::new(),
+            },
+        )))
+        .expect("view update send must succeed");
     }
 
     let first = driver.on_wake(2);
     assert_eq!(first.drained, 2);
     assert!(first.wake_again);
-    assert_eq!(first.diffs[0].viewport_revision, 1);
-    assert_eq!(first.diffs[1].viewport_revision, 2);
+    assert_eq!(scene_revision(&first.updates[0]), 1);
+    assert_eq!(scene_revision(&first.updates[1]), 2);
 
     let second = driver.on_wake(2);
     assert_eq!(second.drained, 1);
-    assert_eq!(second.diffs[0].viewport_revision, 3);
+    assert_eq!(scene_revision(&second.updates[0]), 3);
 }
 
 #[test]
@@ -203,4 +214,11 @@ fn close_requested_routes_shutdown_action() {
             .expect("shutdown action must be forwarded"),
         Action::Shutdown
     );
+}
+
+fn scene_revision(update: &ViewUpdate) -> u64 {
+    match update {
+        ViewUpdate::Scene(scene_frame) => scene_frame.viewport_revision,
+        ViewUpdate::Atlas(_) => panic!("expected scene update in driver test"),
+    }
 }

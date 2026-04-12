@@ -16,7 +16,7 @@ use std::sync::Arc;
 use self::app::DesktopApp;
 use self::event::EventRouter;
 use self::font::{FontDiscovery, FreeTypeRasterizer};
-use self::io::{IoRuntime, SceneDiffDriver, WakeEvent};
+use self::io::{IoRuntime, ViewUpdateDriver, WakeEvent};
 use self::renderer::Renderer;
 use self::store::{run_store, Store, ViewportState};
 use pollster::block_on;
@@ -35,10 +35,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<WakeEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let (mut io_runtime, io_handle) = IoRuntime::new(proxy)?;
-    let scene_diff_driver = SceneDiffDriver::new(io_runtime.take_scene_diff_rx());
+    let view_update_driver = ViewUpdateDriver::new(io_runtime.take_view_update_rx());
     let router = EventRouter::new(io_runtime.action_tx());
 
-    let mut app = DesktopApp::new(io_runtime, scene_diff_driver, router);
+    let mut app = DesktopApp::new(io_runtime, view_update_driver, router);
     app.install_store_bootstrap(Box::new(move |runtime: &IoRuntime, size, scale_factor| {
         let rasterizer = build_rasterizer();
         let store = Store::new(

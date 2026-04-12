@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use winit::dpi::PhysicalSize;
@@ -8,7 +8,9 @@ use winit::window::WindowId;
 use super::*;
 use crate::draw_list::ClipRect;
 use crate::event::handlers::ViewportUpdate;
-use crate::io::{Action, AtlasPatch, BlockOp, SceneDiff, SceneDiffDriver};
+use crate::io::{
+    Action, AtlasPatch, AtlasUpdate, SceneFrame, ScenePayload, ViewUpdate, ViewUpdateDriver,
+};
 use crate::renderer::atlas::AtlasRegion;
 use crate::scene::{BlockId, BlockSceneBatch, ViewState};
 
@@ -156,7 +158,7 @@ struct Harness {
     runtime_log: Arc<Mutex<RuntimeLog>>,
     window_log: Arc<Mutex<WindowLog>>,
     renderer_log: Arc<Mutex<RendererLog>>,
-    scene_diff_tx: mpsc::UnboundedSender<SceneDiff>,
+    view_update_tx: mpsc::UnboundedSender<ViewUpdate>,
 }
 
 fn build_app() -> Harness {
@@ -164,9 +166,9 @@ fn build_app() -> Harness {
     let runtime_log = runtime.log.clone();
     let (action_tx, _action_rx) = mpsc::unbounded_channel::<Action>();
     let router = EventRouter::new(action_tx);
-    let (scene_diff_tx, scene_diff_rx) = mpsc::unbounded_channel();
-    let scene_diff_driver = SceneDiffDriver::new(scene_diff_rx);
-    let mut app = SteleApp::new(runtime, scene_diff_driver, router);
+    let (view_update_tx, view_update_rx) = mpsc::unbounded_channel();
+    let view_update_driver = ViewUpdateDriver::new(view_update_rx);
+    let mut app = SteleApp::new(runtime, view_update_driver, router);
 
     let (window, window_log) = FakeWindow::new();
     let renderer = FakeRenderer::default();
@@ -178,7 +180,7 @@ fn build_app() -> Harness {
         runtime_log,
         window_log,
         renderer_log,
-        scene_diff_tx,
+        view_update_tx,
     }
 }
 
@@ -263,7 +265,7 @@ fn close_action_clears_state_and_shuts_down_runtime() {
 }
 
 #[test]
-fn wake_applies_scene_diff_and_rebuilds_once() {
+fn wake_applies_atlas_update_and_scene_frame_and_rebuilds_once() {
     let mut harness = build_app();
     let patch = AtlasPatch::new(
         AtlasRegion {
@@ -274,19 +276,30 @@ fn wake_applies_scene_diff_and_rebuilds_once() {
         },
         vec![255; 8 * 8 * 4],
     );
-    let mut diff = SceneDiff::new(1);
-    diff.requested_atlas_size = Some(4096);
-    diff.clear_tessellation_cache = true;
-    diff.atlas_patches.push(patch);
-    diff.block_order = Some(vec![BlockId::new(7)]);
-    diff.block_ops.push(BlockOp::Replace {
-        block_id: BlockId::new(7),
-        batch: sample_batch(99),
-    });
     harness
-        .scene_diff_tx
-        .send(diff)
-        .expect("scene diff send must succeed");
+        .view_update_tx
+        .send(ViewUpdate::Atlas({
+            let mut atlas_update = AtlasUpdate::new(0);
+            atlas_update.requested_atlas_size = Some(4096);
+            atlas_update.patches.push(patch);
+            atlas_update
+        }))
+        .expect("atlas update send must succeed");
+    harness
+        .view_update_tx
+        .send(ViewUpdate::Scene({
+            let mut scene_frame = SceneFrame::new(
+                1,
+                Some(0),
+                ScenePayload::ReplaceAll {
+                    block_order: vec![BlockId::new(7)],
+                    block_batches: vec![(BlockId::new(7), sample_batch(99))],
+                },
+            );
+            scene_frame.clear_tessellation_cache = true;
+            scene_frame
+        }))
+        .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
@@ -294,6 +307,7 @@ fn wake_applies_scene_diff_and_rebuilds_once() {
     assert_eq!(harness.app.view_state.blocks().len(), 1);
     assert_eq!(harness.app.view_state.block_order(), &[BlockId::new(7)]);
     assert_eq!(harness.app.view_state.applied_viewport_revision(), 1);
+    assert_eq!(harness.app.view_state.ready_atlas_generation(), Some(0));
     let renderer_log = harness.renderer_log.lock().expect("renderer log must lock");
     assert_eq!(renderer_log.recreate_atlas_sizes, vec![4096]);
     assert_eq!(renderer_log.clear_tessellation_calls, 1);
@@ -311,13 +325,20 @@ fn wake_applies_scene_diff_and_rebuilds_once() {
 }
 
 #[test]
-fn stale_scene_diff_is_dropped_before_apply() {
+fn stale_scene_frame_is_dropped_before_apply() {
     let mut harness = build_app();
     harness.app.view_state.set_requested_viewport_revision(2);
     harness
-        .scene_diff_tx
-        .send(SceneDiff::new(1))
-        .expect("scene diff send must succeed");
+        .view_update_tx
+        .send(ViewUpdate::Scene(SceneFrame::new(
+            1,
+            None,
+            ScenePayload::ReplaceAll {
+                block_order: vec![BlockId::new(7)],
+                block_batches: vec![(BlockId::new(7), sample_batch(99))],
+            },
+        )))
+        .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
@@ -332,7 +353,7 @@ fn stale_scene_diff_is_dropped_before_apply() {
 }
 
 #[test]
-fn stale_scene_diff_is_dropped_after_newer_resize_arrives() {
+fn stale_scene_frame_is_dropped_after_newer_resize_arrives() {
     let mut harness = build_app();
     harness
         .app
@@ -342,16 +363,17 @@ fn stale_scene_diff_is_dropped_after_newer_resize_arrives() {
             viewport_revision: 2,
         }));
 
-    let mut stale_diff = SceneDiff::new(1);
-    stale_diff.block_order = Some(vec![BlockId::new(7)]);
-    stale_diff.block_ops.push(BlockOp::Replace {
-        block_id: BlockId::new(7),
-        batch: sample_batch(99),
-    });
     harness
-        .scene_diff_tx
-        .send(stale_diff)
-        .expect("scene diff send must succeed");
+        .view_update_tx
+        .send(ViewUpdate::Scene(SceneFrame::new(
+            1,
+            None,
+            ScenePayload::ReplaceAll {
+                block_order: vec![BlockId::new(7)],
+                block_batches: vec![(BlockId::new(7), sample_batch(99))],
+            },
+        )))
+        .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
@@ -368,7 +390,7 @@ fn stale_scene_diff_is_dropped_after_newer_resize_arrives() {
 }
 
 #[test]
-fn newer_viewport_revision_clears_old_scene_before_applying_full_diff() {
+fn newer_viewport_revision_replace_all_clears_old_scene_before_apply() {
     let mut harness = build_app();
     harness.app.view_state.set_block_order(vec![BlockId::new(7)]);
     harness
@@ -378,12 +400,17 @@ fn newer_viewport_revision_clears_old_scene_before_applying_full_diff() {
     harness.app.view_state.set_applied_viewport_revision(1);
     harness.app.view_state.set_requested_viewport_revision(2);
 
-    let mut diff = SceneDiff::new(2);
-    diff.block_order = Some(Vec::new());
     harness
-        .scene_diff_tx
-        .send(diff)
-        .expect("scene diff send must succeed");
+        .view_update_tx
+        .send(ViewUpdate::Scene(SceneFrame::new(
+            2,
+            None,
+            ScenePayload::ReplaceAll {
+                block_order: Vec::new(),
+                block_batches: Vec::new(),
+            },
+        )))
+        .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
@@ -403,7 +430,7 @@ fn newer_viewport_revision_clears_old_scene_before_applying_full_diff() {
 }
 
 #[test]
-fn stale_bootstrap_diff_can_be_skipped_before_newer_full_diff_is_applied() {
+fn scene_frame_waits_for_required_atlas_generation_before_apply() {
     let mut harness = build_app();
     harness
         .app
@@ -413,27 +440,38 @@ fn stale_bootstrap_diff_can_be_skipped_before_newer_full_diff_is_applied() {
             viewport_revision: 1,
         }));
 
-    let mut stale_diff = SceneDiff::new(0);
-    stale_diff.block_order = Some(vec![BlockId::new(3)]);
-    stale_diff.block_ops.push(BlockOp::Replace {
-        block_id: BlockId::new(3),
-        batch: sample_batch(30),
-    });
     harness
-        .scene_diff_tx
-        .send(stale_diff)
-        .expect("stale scene diff send must succeed");
+        .view_update_tx
+        .send(ViewUpdate::Scene(SceneFrame::new(
+            1,
+            Some(1),
+            ScenePayload::ReplaceAll {
+                block_order: vec![BlockId::new(9)],
+                block_batches: vec![(BlockId::new(9), sample_batch(90))],
+            },
+        )))
+        .expect("scene frame send must succeed");
 
-    let mut full_diff = SceneDiff::new(1);
-    full_diff.block_order = Some(vec![BlockId::new(9)]);
-    full_diff.block_ops.push(BlockOp::Replace {
-        block_id: BlockId::new(9),
-        batch: sample_batch(90),
-    });
+    let should_exit = harness.app.on_wake();
+
+    assert!(!should_exit);
+    assert!(harness.app.view_state.blocks().is_empty());
+    assert!(harness.app.view_state.pending_scene_frame().is_some());
+    assert!(harness
+        .renderer_log
+        .lock()
+        .expect("renderer log must lock")
+        .rebuild_block_counts
+        .is_empty());
+
     harness
-        .scene_diff_tx
-        .send(full_diff)
-        .expect("full scene diff send must succeed");
+        .view_update_tx
+        .send(ViewUpdate::Atlas({
+            let mut atlas_update = AtlasUpdate::new(1);
+            atlas_update.patches.push(sample_patch());
+            atlas_update
+        }))
+        .expect("atlas update send must succeed");
 
     let should_exit = harness.app.on_wake();
 
@@ -443,6 +481,7 @@ fn stale_bootstrap_diff_can_be_skipped_before_newer_full_diff_is_applied() {
     assert!(harness.app.view_state.blocks().contains_key(&BlockId::new(9)));
     assert_eq!(harness.app.view_state.requested_viewport_revision(), 1);
     assert_eq!(harness.app.view_state.applied_viewport_revision(), 1);
+    assert!(harness.app.view_state.pending_scene_frame().is_none());
     assert_eq!(
         harness
             .renderer_log
@@ -450,6 +489,39 @@ fn stale_bootstrap_diff_can_be_skipped_before_newer_full_diff_is_applied() {
             .expect("renderer log must lock")
             .rebuild_block_counts,
         vec![1]
+    );
+}
+
+#[test]
+#[ignore = "manual perf smoke test"]
+fn reports_view_dispatch_to_render_perf() {
+    let mut harness = build_app();
+    let scene_frame = SceneFrame::new(
+        1,
+        None,
+        ScenePayload::ReplaceAll {
+            block_order: vec![BlockId::new(7)],
+            block_batches: vec![(BlockId::new(7), sample_batch(99))],
+        },
+    );
+
+    let dispatch_started = Instant::now();
+    harness
+        .view_update_tx
+        .send(ViewUpdate::Scene(scene_frame))
+        .expect("scene frame send must succeed");
+
+    assert!(!harness.app.on_wake());
+    let applied_at = Instant::now();
+
+    assert!(!harness.app.apply_route_action(RouteAction::RedrawRequested));
+    let frame_finished = Instant::now();
+
+    println!(
+        "perf.view dispatch_to_apply_us={} apply_to_frame_us={} dispatch_to_frame_us={}",
+        applied_at.duration_since(dispatch_started).as_micros(),
+        frame_finished.duration_since(applied_at).as_micros(),
+        frame_finished.duration_since(dispatch_started).as_micros(),
     );
 }
 
@@ -462,5 +534,17 @@ fn sample_batch(fingerprint: u64) -> BlockSceneBatch {
         Vec::new(),
         Vec::new(),
         fingerprint,
+    )
+}
+
+fn sample_patch() -> AtlasPatch {
+    AtlasPatch::new(
+        AtlasRegion {
+            uv_min: [0.0, 0.0],
+            uv_max: [0.25, 0.25],
+            size: [8.0, 8.0],
+            bearing: [0.0, 0.0],
+        },
+        vec![255; 8 * 8 * 4],
     )
 }
