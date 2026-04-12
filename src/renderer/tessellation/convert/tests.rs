@@ -3,10 +3,8 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use super::fringe::{
-    boundary_edges_hashmap_for_test, boundary_edges_sorted_for_test, build_boundary_fringe,
-    build_boundary_fringe_hashmap, build_boundary_fringe_sorted,
-};
+use super::fringe::boundary_edges_for_test;
+use super::fringe::build_boundary_fringe;
 use super::tessellate::tessellate_path;
 use crate::draw_list::{LineCap, LineJoin, PathCmd, PathVerb, RenderLayer, StrokeStyle};
 use crate::renderer::instance::PathVertex;
@@ -64,67 +62,54 @@ fn tessellate_path_adds_fringe_vertices_for_fill_and_stroke_geometry() {
 }
 
 #[test]
-fn boundary_edge_collectors_match_on_triangle() {
+fn boundary_edge_collection_matches_expected_triangle_edges() {
     let (vertices, indices) = single_triangle_mesh();
+    let edges = boundary_edges_for_test(&vertices, &indices);
 
     assert_eq!(
-        boundary_edges_hashmap_for_test(&vertices, &indices),
-        boundary_edges_sorted_for_test(&vertices, &indices)
+        edges.into_iter().map(|edge| (edge.from, edge.to)).collect::<Vec<_>>(),
+        vec![(0, 1), (1, 2), (2, 0)]
     );
 }
 
 #[test]
-fn boundary_edge_collectors_match_on_grid_mesh() {
+fn boundary_edge_collection_returns_grid_perimeter_edges() {
     let (vertices, indices) = grid_mesh(16, 16);
+    let edges = boundary_edges_for_test(&vertices, &indices);
 
-    assert_eq!(
-        boundary_edges_hashmap_for_test(&vertices, &indices),
-        boundary_edges_sorted_for_test(&vertices, &indices)
-    );
+    assert_eq!(edges.len(), 64);
 }
 
 #[test]
-fn boundary_edge_collectors_match_on_triangle_fan() {
+fn boundary_edge_collection_returns_outer_ring_for_triangle_fan() {
     let (vertices, indices) = fan_mesh(256);
+    let edges = boundary_edges_for_test(&vertices, &indices);
 
-    assert_eq!(
-        boundary_edges_hashmap_for_test(&vertices, &indices),
-        boundary_edges_sorted_for_test(&vertices, &indices)
-    );
+    assert_eq!(edges.len(), 256);
 }
 
 #[test]
-fn boundary_edge_collectors_match_on_disconnected_triangles() {
+fn boundary_edge_collection_keeps_all_edges_for_disconnected_triangles() {
     let (vertices, indices) = disconnected_triangles_mesh(512);
+    let edges = boundary_edges_for_test(&vertices, &indices);
 
-    assert_eq!(
-        boundary_edges_hashmap_for_test(&vertices, &indices),
-        boundary_edges_sorted_for_test(&vertices, &indices)
-    );
+    assert_eq!(edges.len(), 512 * 3);
 }
 
 #[test]
 #[ignore = "manual perf smoke test"]
 fn reports_boundary_fringe_perf_profiles() {
     for case in benchmark_cases() {
-        let hash_elapsed = measure_case(case.iterations, &case.vertices, &case.indices, |v, i| {
-            build_boundary_fringe_hashmap(v, i)
-        });
-        let sorted_elapsed = measure_case(case.iterations, &case.vertices, &case.indices, |v, i| {
-            build_boundary_fringe_sorted(v, i)
-        });
+        let elapsed = measure_case(case.iterations, &case.vertices, &case.indices);
 
         println!(
-            "perf.fringe case={} vertices={} indices={} iterations={} hashmap_total_us={} hashmap_avg_ns={} sorted_total_us={} sorted_avg_ns={} speedup={:.2}",
+            "perf.fringe case={} vertices={} indices={} iterations={} total_us={} avg_ns={}",
             case.name,
             case.vertices.len(),
             case.indices.len(),
             case.iterations,
-            hash_elapsed.as_micros(),
-            hash_elapsed.as_nanos() / case.iterations as u128,
-            sorted_elapsed.as_micros(),
-            sorted_elapsed.as_nanos() / case.iterations as u128,
-            hash_elapsed.as_secs_f64() / sorted_elapsed.as_secs_f64(),
+            elapsed.as_micros(),
+            elapsed.as_nanos() / case.iterations as u128,
         );
     }
 }
@@ -177,22 +162,18 @@ fn benchmark_cases() -> Vec<BenchmarkCase> {
     ]
 }
 
-fn measure_case<F>(
+fn measure_case(
     iterations: usize,
     vertices: &[PathVertex],
     indices: &[u32],
-    build: F,
-) -> std::time::Duration
-where
-    F: Fn(&[PathVertex], &[u32]) -> crate::renderer::tessellation::CachedMesh,
-{
+) -> std::time::Duration {
     for _ in 0..10 {
-        black_box(build(vertices, indices));
+        black_box(build_boundary_fringe(vertices, indices));
     }
 
     let started = Instant::now();
     for _ in 0..iterations {
-        black_box(build(vertices, indices));
+        black_box(build_boundary_fringe(vertices, indices));
     }
     started.elapsed()
 }

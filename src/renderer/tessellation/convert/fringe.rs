@@ -1,15 +1,12 @@
 //! Boundary-edge analysis and fringe geometry generation for path vertex AA.
 
-#[cfg(test)]
-use std::collections::HashMap;
-
 use crate::renderer::instance::PathVertex;
 use crate::renderer::tessellation::CachedMesh;
 
 const AA_FRINGE_WIDTH: f32 = 1.0;
 
 pub(super) fn build_boundary_fringe(vertices: &[PathVertex], indices: &[u32]) -> CachedMesh {
-    let boundary_edges = collect_boundary_edges_sorted(vertices, indices);
+    let boundary_edges = collect_boundary_edges(vertices, indices);
     build_boundary_fringe_from_edges(vertices, boundary_edges)
 }
 
@@ -29,16 +26,6 @@ fn build_boundary_fringe_from_edges(
         indices: build_fringe_indices(&boundary_edges, &outer_indices),
         last_used: 0,
     }
-}
-
-#[cfg(test)]
-pub(super) fn build_boundary_fringe_hashmap(vertices: &[PathVertex], indices: &[u32]) -> CachedMesh {
-    build_boundary_fringe_from_edges(vertices, collect_boundary_edges_hashmap(vertices, indices))
-}
-
-#[cfg(test)]
-pub(super) fn build_boundary_fringe_sorted(vertices: &[PathVertex], indices: &[u32]) -> CachedMesh {
-    build_boundary_fringe_from_edges(vertices, collect_boundary_edges_sorted(vertices, indices))
 }
 
 fn accumulate_boundary_normals(
@@ -124,58 +111,29 @@ fn vertex_outward_normal(normals: &BoundaryNormals, index: usize) -> [f32; 2] {
         .unwrap_or([0.0, 0.0])
 }
 
-#[cfg(test)]
-fn collect_boundary_edges_hashmap(vertices: &[PathVertex], indices: &[u32]) -> Vec<BoundaryEdge> {
-    let mut edges = HashMap::<(u32, u32), DirectedEdge>::new();
-
-    for triangle in indices.chunks_exact(3) {
-        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
-        if !valid_triangle_indices(vertices, [a, b, c]) {
-            debug_assert!(
-                false,
-                "path fringe generation received an out-of-range index"
-            );
-            continue;
-        }
-
-        for &(from, to, third) in &[(a, b, c), (b, c, a), (c, a, b)] {
-            if from == to || from == third || to == third {
-                continue;
-            }
-
-            let key = edge_key(from, to);
-            edges
-                .entry(key)
-                .and_modify(|edge| edge.occurrences = edge.occurrences.saturating_add(1))
-                .or_insert(DirectedEdge {
-                    from,
-                    to,
-                    third,
-                    occurrences: 1,
-                });
-        }
-    }
-
-    let mut boundary_edges = Vec::new();
-    for edge in edges.into_values() {
-        if edge.occurrences != 1 {
-            continue;
-        }
-
-        let Some(normal) = outward_boundary_normal(vertices, edge.from, edge.to, edge.third) else {
-            continue;
-        };
-        boundary_edges.push(BoundaryEdge {
-            from: edge.from,
-            to: edge.to,
-            normal,
-        });
-    }
-
-    boundary_edges
+fn collect_boundary_edges(vertices: &[PathVertex], indices: &[u32]) -> Vec<BoundaryEdge> {
+    let mut edge_records = collect_edge_records(vertices, indices);
+    // We intentionally prefer a sorted Vec over the theoretically better O(T) hash path here.
+    // Fringe extraction is a one-shot batch during tessellation cache misses, not an online
+    // lookup-heavy workload, so contiguous records plus sort/scan win on cache locality and
+    // avoid repeated hash/probe overhead in our measured release benchmarks.
+    edge_records.sort_unstable_by_key(|record| record.key);
+    boundary_edges_from_sorted_records(vertices, &edge_records)
 }
 
-fn collect_boundary_edges_sorted(vertices: &[PathVertex], indices: &[u32]) -> Vec<BoundaryEdge> {
+fn valid_triangle_indices(vertices: &[PathVertex], triangle: [u32; 3]) -> bool {
+    triangle
+        .into_iter()
+        .all(|index| (index as usize) < vertices.len())
+}
+
+fn packed_edge_key(a: u32, b: u32) -> u64 {
+    let min = a.min(b);
+    let max = a.max(b);
+    ((min as u64) << 32) | max as u64
+}
+
+fn collect_edge_records(vertices: &[PathVertex], indices: &[u32]) -> Vec<EdgeRecord> {
     let mut edge_records = Vec::with_capacity(indices.len());
 
     for triangle in indices.chunks_exact(3) {
@@ -187,23 +145,30 @@ fn collect_boundary_edges_sorted(vertices: &[PathVertex], indices: &[u32]) -> Ve
             );
             continue;
         }
-
-        for &(from, to, third) in &[(a, b, c), (b, c, a), (c, a, b)] {
-            if from == to || from == third || to == third {
-                continue;
-            }
-
-            edge_records.push(EdgeRecord {
-                key: packed_edge_key(from, to),
-                from,
-                to,
-                third,
-            });
-        }
+        append_triangle_edges(&mut edge_records, a, b, c);
     }
 
-    edge_records.sort_unstable_by_key(|record| record.key);
+    edge_records
+}
 
+fn append_triangle_edges(edge_records: &mut Vec<EdgeRecord>, a: u32, b: u32, c: u32) {
+    for &(from, to, third) in &[(a, b, c), (b, c, a), (c, a, b)] {
+        if from == to || from == third || to == third {
+            continue;
+        }
+        edge_records.push(EdgeRecord {
+            key: packed_edge_key(from, to),
+            from,
+            to,
+            third,
+        });
+    }
+}
+
+fn boundary_edges_from_sorted_records(
+    vertices: &[PathVertex],
+    edge_records: &[EdgeRecord],
+) -> Vec<BoundaryEdge> {
     let mut boundary_edges = Vec::new();
     let mut cursor = 0usize;
     while cursor < edge_records.len() {
@@ -233,38 +198,11 @@ fn collect_boundary_edges_sorted(vertices: &[PathVertex], indices: &[u32]) -> Ve
 }
 
 #[cfg(test)]
-pub(super) fn boundary_edges_hashmap_for_test(
+pub(super) fn boundary_edges_for_test(
     vertices: &[PathVertex],
     indices: &[u32],
 ) -> Vec<BoundaryEdgeSnapshot> {
-    snapshots_from_edges(collect_boundary_edges_hashmap(vertices, indices))
-}
-
-#[cfg(test)]
-pub(super) fn boundary_edges_sorted_for_test(
-    vertices: &[PathVertex],
-    indices: &[u32],
-) -> Vec<BoundaryEdgeSnapshot> {
-    snapshots_from_edges(collect_boundary_edges_sorted(vertices, indices))
-}
-
-fn valid_triangle_indices(vertices: &[PathVertex], triangle: [u32; 3]) -> bool {
-    triangle
-        .into_iter()
-        .all(|index| (index as usize) < vertices.len())
-}
-
-fn edge_key(a: u32, b: u32) -> (u32, u32) {
-    if a < b {
-        (a, b)
-    } else {
-        (b, a)
-    }
-}
-
-fn packed_edge_key(a: u32, b: u32) -> u64 {
-    let (min, max) = edge_key(a, b);
-    ((min as u64) << 32) | max as u64
+    snapshots_from_edges(collect_boundary_edges(vertices, indices))
 }
 
 fn outward_boundary_normal(
@@ -337,15 +275,6 @@ impl BoundaryNormals {
         self.fallback_normals[index] = add(self.fallback_normals[index], fallback_normal);
         self.boundary_vertex_mask[index] = true;
     }
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug)]
-struct DirectedEdge {
-    from: u32,
-    to: u32,
-    third: u32,
-    occurrences: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
