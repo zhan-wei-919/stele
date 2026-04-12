@@ -10,22 +10,22 @@ use winit::window::{Window, WindowId};
 
 #[path = "app_support.rs"]
 mod support;
+#[path = "app_updates.rs"]
+mod updates;
 
 use crate::event::{EventRouter, RouteAction, ViewportSnapshot};
-use crate::io::{
-    AtlasUpdate, BlockOp, IoRuntime, SceneFrame, ScenePayload, ViewUpdate, ViewUpdateDriver,
-};
+use crate::io::{IoRuntime, ViewUpdate, ViewUpdateDriver};
 use crate::renderer::Renderer;
 use crate::scene::ViewState;
 pub(crate) use support::{AppRenderer, AppRuntime, AppWindow};
 
-const MAX_SCENE_DIFF_DRAIN: usize = 4096;
+const MAX_VIEW_UPDATE_DRAIN: usize = 4096;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub(crate) type DesktopApp = SteleApp<IoRuntime, Arc<Window>, Renderer<'static>>;
 type StoreBootstrap<Rt> = Box<dyn FnOnce(&Rt, PhysicalSize<u32>, f32)>;
 
-/// Owns desktop app state and applies routed window or scene-diff actions.
+/// Owns desktop app state and applies routed window or view-update actions.
 pub(crate) struct SteleApp<Rt, Win, Rend>
 where
     Rt: AppRuntime,
@@ -49,7 +49,7 @@ where
     Win: AppWindow,
     Rend: AppRenderer,
 {
-    /// Creates an app shell around the store runtime, diff driver, and router.
+    /// Creates an app shell around the store runtime, view-update driver, and router.
     pub(crate) fn new(
         io_runtime: Rt,
         view_update_driver: ViewUpdateDriver,
@@ -137,7 +137,7 @@ where
 
     /// Handles one async-to-winit wake and reports whether shutdown began.
     pub(crate) fn on_wake(&mut self) -> bool {
-        let outcome = self.view_update_driver.on_wake(MAX_SCENE_DIFF_DRAIN);
+        let outcome = self.view_update_driver.on_wake(MAX_VIEW_UPDATE_DRAIN);
         info!("view.wake drained={}", outcome.drained);
 
         if outcome.disconnected {
@@ -164,7 +164,7 @@ where
         if outcome.wake_again {
             warn!(
                 "view.drain_overflow count={} limit={}",
-                outcome.drained, MAX_SCENE_DIFF_DRAIN
+                outcome.drained, MAX_VIEW_UPDATE_DRAIN
             );
             if let Some(io_runtime) = self.io_runtime.as_ref() {
                 io_runtime.wake_loop();
@@ -224,138 +224,6 @@ where
                 window.request_redraw();
             }
         }
-    }
-
-    fn apply_atlas_update(&mut self, update: AtlasUpdate) {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
-        if self
-            .view_state
-            .ready_atlas_generation()
-            .map(|ready| update.generation < ready)
-            .unwrap_or(false)
-        {
-            return;
-        }
-
-        if let Some(new_size) = update.requested_atlas_size {
-            renderer.recreate_atlas(new_size);
-        }
-        for patch in &update.patches {
-            renderer.write_atlas_patch(patch);
-        }
-        self.view_state.set_ready_atlas_generation(update.generation);
-    }
-
-    fn handle_scene_frame(&mut self, scene_frame: SceneFrame) -> bool {
-        if scene_frame.viewport_revision < self.view_state.requested_viewport_revision() {
-            return false;
-        }
-
-        if !self.scene_frame_atlas_ready(&scene_frame) {
-            self.view_state.set_pending_scene_frame(scene_frame);
-            return false;
-        }
-
-        self.apply_scene_frame(scene_frame)
-    }
-
-    fn apply_pending_scene_frame_if_ready(&mut self) -> bool {
-        let should_apply = self
-            .view_state
-            .pending_scene_frame()
-            .map(|scene_frame| self.scene_frame_atlas_ready(scene_frame))
-            .unwrap_or(false);
-        if !should_apply {
-            return false;
-        }
-
-        let scene_frame = self
-            .view_state
-            .take_pending_scene_frame()
-            .expect("pending scene frame must exist after readiness check");
-        self.apply_scene_frame(scene_frame)
-    }
-
-    fn scene_frame_atlas_ready(&self, scene_frame: &SceneFrame) -> bool {
-        match scene_frame.required_atlas_generation {
-            None => true,
-            Some(required_generation) => self
-                .view_state
-                .ready_atlas_generation()
-                .map(|ready_generation| ready_generation >= required_generation)
-                .unwrap_or(false),
-        }
-    }
-
-    fn apply_scene_frame(&mut self, scene_frame: SceneFrame) -> bool {
-        if scene_frame.viewport_revision < self.view_state.requested_viewport_revision() {
-            return false;
-        }
-
-        let Some(renderer) = self.renderer.as_mut() else {
-            return false;
-        };
-        if scene_frame.clear_tessellation_cache {
-            renderer.clear_tessellation_cache();
-        }
-
-        let mut replaced_blocks = 0usize;
-        let mut removed_blocks = 0usize;
-        match scene_frame.payload {
-            ScenePayload::ReplaceAll {
-                block_order,
-                block_batches,
-            } => {
-                self.view_state.clear_scene();
-                self.view_state.set_block_order(block_order);
-                for (block_id, batch) in block_batches {
-                    self.view_state.replace_block(block_id, batch);
-                    replaced_blocks += 1;
-                }
-            }
-            ScenePayload::Diff {
-                block_order,
-                block_ops,
-            } => {
-                if scene_frame.viewport_revision > self.view_state.applied_viewport_revision() {
-                    warn!(
-                        "view.drop_non_self_contained_scene_frame viewport_revision={} applied_viewport_revision={}",
-                        scene_frame.viewport_revision,
-                        self.view_state.applied_viewport_revision()
-                    );
-                    return false;
-                }
-
-                if let Some(block_order) = block_order {
-                    self.view_state.set_block_order(block_order);
-                }
-                for op in block_ops {
-                    match op {
-                        BlockOp::Replace { block_id, batch } => {
-                            self.view_state.replace_block(block_id, batch);
-                            replaced_blocks += 1;
-                        }
-                        BlockOp::Remove { block_id } => {
-                            self.view_state.remove_block(block_id);
-                            removed_blocks += 1;
-                        }
-                    }
-                }
-            }
-        }
-        self.view_state
-            .set_applied_viewport_revision(scene_frame.viewport_revision);
-        self.view_state.clear_pending_scene_frame();
-        info!(
-            "view.apply viewport_revision={} replaced_blocks={} removed_blocks={} required_atlas_generation={:?}",
-            scene_frame.viewport_revision,
-            replaced_blocks,
-            removed_blocks,
-            scene_frame.required_atlas_generation
-        );
-        true
     }
 
     fn rebuild_view_state(&mut self) {

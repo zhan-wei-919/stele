@@ -178,6 +178,10 @@ impl ViewState {
     }
 
     /// Stores the newest pending scene frame that is still relevant to the requested viewport.
+    ///
+    /// A newer frame subsumes any older frame that is still waiting on atlas uploads, because
+    /// the view only ever wants to apply the latest requested viewport revision once its glyphs
+    /// are ready. Older pending frames would only waste work and can never become more correct.
     pub(crate) fn set_pending_scene_frame(&mut self, scene_frame: SceneFrame) {
         if scene_frame.viewport_revision < self.requested_viewport_revision {
             return;
@@ -203,6 +207,7 @@ impl ViewState {
         self.pending_scene_frame = None;
     }
 
+    /// Drops any queued frame that has already fallen behind the latest requested viewport.
     fn drop_stale_pending_scene_frame(&mut self) {
         let should_drop = self
             .pending_scene_frame
