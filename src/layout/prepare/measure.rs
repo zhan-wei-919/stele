@@ -3,6 +3,7 @@
 use log::{info, warn};
 
 use crate::font::{FontSelection, FreeTypeRasterizer, LineMetrics};
+use crate::scene::BlockId;
 
 use super::super::document::Document;
 use super::super::line_break::collect_breaks;
@@ -21,11 +22,11 @@ pub(crate) fn prepare_document(
         .blocks()
         .iter()
         .enumerate()
-        .map(|(block_index, block)| {
-            let prepared = prepare_block(block_index, block.spans(), rasterizer);
+        .map(|(document_index, block)| {
+            let prepared = prepare_block(block.id(), document_index, block.spans(), rasterizer);
             info!(
                 "layout.prepare block_index={} item_count={}",
-                block_index,
+                document_index,
                 prepared.items.len()
             );
             prepared
@@ -34,7 +35,8 @@ pub(crate) fn prepare_document(
 }
 
 fn prepare_block(
-    block_index: usize,
+    block_id: BlockId,
+    document_index: usize,
     spans: &[super::super::document::Span],
     rasterizer: &FreeTypeRasterizer,
 ) -> PreparedBlock {
@@ -79,7 +81,8 @@ fn prepare_block(
         .collect();
 
     PreparedBlock {
-        block_index,
+        block_id,
+        document_index,
         items,
         default_ascent,
         default_line_height,

@@ -3,13 +3,31 @@ use std::sync::Arc;
 use crate::font::SubpixelBin;
 
 use super::{
-    BlockDrawGroup, ClipRect, ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb,
-    PositionedGlyph, RenderLayer, StrokeStyle,
+    ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, PositionedGlyph, RenderLayer,
+    StrokeStyle,
 };
 
 #[test]
-fn block_draw_group_routes_paths_and_images_by_layer() {
-    let mut group = BlockDrawGroup::new(2, 1, Some(ClipRect::new(0.0, 0.0, 20.0, 20.0)));
+fn positioned_glyph_builds_scale_sensitive_glyph_key() {
+    let glyph = PositionedGlyph {
+        font_id: 3,
+        glyph_id: 42,
+        font_size: 14.0,
+        pos: [1.25, 2.5],
+        color: [1.0, 1.0, 1.0, 1.0],
+        subpixel_offset: SubpixelBin::new(1, 2),
+    };
+
+    let key = glyph.glyph_key(2.0);
+    assert_eq!(key.font_id, 3);
+    assert_eq!(key.glyph_id, 42);
+    assert_eq!(key.font_size(), 14.0);
+    assert_eq!(key.scale_factor(), 2.0);
+    assert_eq!(key.subpixel_offset, SubpixelBin::new(1, 2));
+}
+
+#[test]
+fn path_hash_changes_with_geometry_and_style() {
     let curved_path = PathCmd::new(
         vec![
             PathVerb::MoveTo { to: [0.0, 0.0] },
@@ -47,6 +65,12 @@ fn block_draw_group_routes_paths_and_images_by_layer() {
         )),
         RenderLayer::Overlay,
     );
+
+    assert_ne!(curved_path.content_hash(), cubic_path.content_hash());
+}
+
+#[test]
+fn image_cmd_preserves_validated_payload_and_layer() {
     let image_data = Arc::new(ImageData::new(vec![255, 0, 0, 255], 1, 1));
     let image = ImageCmd::new(
         [2.0, 3.0],
@@ -56,32 +80,7 @@ fn block_draw_group_routes_paths_and_images_by_layer() {
     );
 
     assert!(image_data.is_valid());
-    assert_ne!(curved_path.content_hash(), cubic_path.content_hash());
-
-    group.push_path(curved_path);
-    group.push_path(cubic_path);
-    group.push_image(image.clone());
-
     assert_eq!(image.layer(), RenderLayer::Overlay);
     assert_eq!(image.data().width(), 1);
     assert_eq!(image.data().height(), 1);
-    assert_eq!(group.layer(RenderLayer::Foreground).paths().len(), 1);
-    assert_eq!(group.layer(RenderLayer::Overlay).paths().len(), 1);
-    assert_eq!(group.layer(RenderLayer::Overlay).images().len(), 1);
-}
-
-#[test]
-fn block_draw_group_keeps_glyphs_in_requested_layer() {
-    let mut group = BlockDrawGroup::new(0, 0, Some(ClipRect::new(0.0, 0.0, 10.0, 10.0)));
-    let glyph = PositionedGlyph {
-        font_id: 0,
-        glyph_id: 7,
-        font_size: 14.0,
-        pos: [1.0, 2.0],
-        color: [1.0, 1.0, 1.0, 1.0],
-        subpixel_offset: SubpixelBin::new(0, 0),
-    };
-
-    group.extend_glyphs(RenderLayer::Content, vec![glyph]);
-    assert_eq!(group.layer(RenderLayer::Content).glyphs()[0].glyph_id, 7);
 }

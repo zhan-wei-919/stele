@@ -7,7 +7,7 @@ use winit::event::WindowEvent;
 use super::handlers::{
     KeyboardHandler, KeyboardInput, MouseHandler, ViewportHandler, ViewportSnapshot, ViewportUpdate,
 };
-use crate::io::AppCommand;
+use crate::io::Action;
 
 /// Semantic actions returned to `SteleApp` after routing.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -20,7 +20,7 @@ pub(crate) enum RouteAction {
 
 /// Routes raw winit window events to focused handlers.
 pub(crate) struct EventRouter {
-    app_command_tx: UnboundedSender<AppCommand>,
+    action_tx: UnboundedSender<Action>,
     keyboard_handler: KeyboardHandler,
     mouse_handler: MouseHandler,
     viewport_handler: ViewportHandler,
@@ -28,17 +28,21 @@ pub(crate) struct EventRouter {
 
 impl EventRouter {
     /// Creates the router and all event-specific handlers.
-    pub(crate) fn new(app_command_tx: UnboundedSender<AppCommand>) -> Self {
+    pub(crate) fn new(action_tx: UnboundedSender<Action>) -> Self {
         Self {
-            keyboard_handler: KeyboardHandler::new(app_command_tx.clone()),
-            mouse_handler: MouseHandler::new(app_command_tx.clone()),
-            viewport_handler: ViewportHandler::new(app_command_tx.clone()),
-            app_command_tx,
+            keyboard_handler: KeyboardHandler::new(action_tx.clone()),
+            mouse_handler: MouseHandler::new(action_tx.clone()),
+            viewport_handler: ViewportHandler::new(action_tx.clone()),
+            action_tx,
         }
     }
 
     /// Dispatches one winit window event.
-    pub(crate) fn dispatch(&self, event: &WindowEvent, viewport: ViewportSnapshot) -> RouteAction {
+    pub(crate) fn dispatch(
+        &mut self,
+        event: &WindowEvent,
+        viewport: ViewportSnapshot,
+    ) -> RouteAction {
         info!(
             "event.router.dispatch event_type={}",
             Self::event_type(event)
@@ -72,8 +76,8 @@ impl EventRouter {
             ),
             WindowEvent::RedrawRequested => RouteAction::RedrawRequested,
             WindowEvent::CloseRequested => {
-                if self.app_command_tx.send(AppCommand::Shutdown).is_err() {
-                    warn!("event.router.send_failed command=shutdown");
+                if self.action_tx.send(Action::Shutdown).is_err() {
+                    warn!("event.router.send_failed action=shutdown");
                 }
                 RouteAction::CloseRequested
             }

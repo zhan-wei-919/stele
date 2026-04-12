@@ -1,6 +1,7 @@
 //! Prepared inline measurements shared by prepare and layout stages.
 
 use crate::font::{FontSelection, LineMetrics, MeasuredGlyph};
+use crate::scene::BlockId;
 
 use super::super::document::TextStyle;
 use super::super::line_break::BreakOpportunity;
@@ -8,7 +9,8 @@ use super::super::line_break::BreakOpportunity;
 /// A block's prepared inline content plus cached metrics for later layout.
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedBlock {
-    pub(crate) block_index: usize,
+    pub(crate) block_id: BlockId,
+    pub(crate) document_index: usize,
     pub(crate) items: Vec<PreparedItem>,
     pub(crate) default_ascent: f32,
     pub(crate) default_line_height: f32,

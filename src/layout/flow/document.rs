@@ -2,7 +2,7 @@
 
 use log::{info, warn};
 
-use crate::renderer::{RectCmd, RenderLayer};
+use crate::draw_list::{RectCmd, RenderLayer};
 
 use super::break_lines::greedy_line_break;
 use super::place_lines::{content_rect, place_lines};
@@ -22,10 +22,10 @@ pub(crate) fn layout_document(
 }
 
 fn layout_block(document: &Document, prepared: &PreparedBlock) -> Option<LayoutBlock> {
-    let Some(block) = document.block(prepared.block_index) else {
+    let Some(block) = document.block(prepared.document_index) else {
         warn!(
             "layout.warn.skip_block block_index={} reason=missing_document_block",
-            prepared.block_index
+            prepared.document_index
         );
         return None;
     };
@@ -41,11 +41,11 @@ fn layout_block(document: &Document, prepared: &PreparedBlock) -> Option<LayoutB
 
     info!(
         "layout.layout block_index={} line_count={}",
-        prepared.block_index,
+        prepared.document_index,
         lines.len()
     );
     Some(LayoutBlock {
-        block_index: prepared.block_index,
+        block_id: prepared.block_id,
         z_order: block.z_order(),
         lines,
         background_rect: block_background_rect(block),
@@ -70,4 +70,37 @@ fn block_background_rect(block: &crate::layout::document::Block) -> Option<RectC
             RenderLayer::Background,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::layout_document;
+    use crate::layout::{Block, BlockRect, Document, PreparedBlock, Span, TextStyle};
+    use crate::scene::BlockId;
+
+    #[test]
+    fn layout_preserves_stable_block_id_from_prepare_stage() {
+        let style = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let block = Block::new(
+            BlockRect::new(0.0, 0.0, 100.0, 50.0).expect("rect must be valid"),
+            4.0,
+            None,
+            vec![Span::new("text", style)],
+            0,
+        )
+        .expect("block must be valid");
+        let document = Document::new(vec![block]);
+        let prepared_blocks = vec![PreparedBlock {
+            block_id: BlockId::new(42),
+            document_index: 0,
+            items: Vec::new(),
+            default_ascent: 10.0,
+            default_line_height: 20.0,
+        }];
+
+        let layout_blocks = layout_document(&document, &prepared_blocks);
+
+        assert_eq!(layout_blocks.len(), 1);
+        assert_eq!(layout_blocks[0].block_id, BlockId::new(42));
+    }
 }

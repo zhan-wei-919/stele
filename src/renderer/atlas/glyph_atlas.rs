@@ -1,31 +1,6 @@
-//! Glyph atlas allocation, upload, and cache management.
-
-use std::collections::HashMap;
-use std::fmt;
-
-use log::info;
-
-use crate::font::{FreeTypeRasterizer, GlyphKey, RasterizedGlyph};
-
-/// The atlas texture has reached its maximum size and cannot fit more glyphs.
-#[derive(Debug)]
-pub struct AtlasFullError {
-    pub max_size: u32,
-}
-
-impl fmt::Display for AtlasFullError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "glyph atlas exceeded maximum size {}", self.max_size)
-    }
-}
-
-impl std::error::Error for AtlasFullError {}
-
-use super::packer::ShelfPacker;
-use super::upload::AtlasUpload;
+//! GPU texture atlas owned by the renderer.
 
 const DEFAULT_ATLAS_SIZE: u32 = 2048;
-const MAX_ATLAS_SIZE: u32 = 8192;
 
 /// UVs, pixel size, and bearing for a glyph cached in the atlas.
 #[derive(Clone, Copy, Debug, Default)]
@@ -38,13 +13,9 @@ pub struct AtlasRegion {
 
 /// GPU texture atlas that caches rasterized glyph bitmaps.
 pub struct GlyphAtlas {
-    device: wgpu::Device,
-    format: wgpu::TextureFormat,
     pub(crate) texture: wgpu::Texture,
     pub(crate) view: wgpu::TextureView,
     pub(crate) sampler: wgpu::Sampler,
-    pub(crate) packer: ShelfPacker,
-    pub(crate) cache: HashMap<GlyphKey, AtlasRegion>,
     pub(crate) current_size: u32,
 }
 
@@ -54,133 +25,10 @@ impl GlyphAtlas {
         let current_size = initial_size.max(DEFAULT_ATLAS_SIZE).next_power_of_two();
         let (texture, view, sampler) = Self::create_gpu_resources(device, current_size, format);
         Self {
-            device: device.clone(),
-            format,
             texture,
             view,
             sampler,
-            packer: ShelfPacker::new(current_size, current_size),
-            cache: HashMap::new(),
             current_size,
-        }
-    }
-
-    /// Returns the cached atlas region for a glyph, rasterizing and uploading it on demand.
-    pub fn get_or_insert(
-        &mut self,
-        key: GlyphKey,
-        queue: &wgpu::Queue,
-        rasterizer: &FreeTypeRasterizer,
-    ) -> Result<AtlasRegion, AtlasFullError> {
-        if let Some(region) = self.cache.get(&key).copied() {
-            return Ok(region);
-        }
-
-        let rasterized = rasterizer.rasterize_lcd(key);
-        self.insert_rasterized(key, &rasterized, queue, rasterizer)
-    }
-
-    /// Doubles the atlas size and repacks every cached glyph into the new texture.
-    pub fn grow_and_repack(
-        &mut self,
-        queue: &wgpu::Queue,
-        rasterizer: &FreeTypeRasterizer,
-    ) -> Result<(), AtlasFullError> {
-        let keys = self.cache.keys().copied().collect::<Vec<_>>();
-        let mut new_size = self.current_size.saturating_mul(2);
-
-        loop {
-            if new_size > MAX_ATLAS_SIZE {
-                return Err(AtlasFullError {
-                    max_size: MAX_ATLAS_SIZE,
-                });
-            }
-
-            let (texture, view, sampler) =
-                Self::create_gpu_resources(&self.device, new_size, self.format);
-            let mut packer = ShelfPacker::new(new_size, new_size);
-            let mut cache = HashMap::with_capacity(keys.len());
-            let mut failed = false;
-
-            for key in &keys {
-                let rasterized = rasterizer.rasterize_lcd(*key);
-                let upload =
-                    AtlasUpload::from_rasterized(&rasterized, rasterizer.subpixel_layout());
-                let region = if upload.width == 0 || upload.height == 0 {
-                    Self::empty_region(&rasterized)
-                } else if let Some(origin) = packer.allocate(upload.width, upload.height) {
-                    Self::write_texture(&texture, queue, origin, &upload);
-                    Self::region_for(origin, &upload, new_size)
-                } else {
-                    failed = true;
-                    break;
-                };
-                cache.insert(*key, region);
-            }
-
-            if !failed {
-                info!(
-                    "atlas.repack old_size={} new_size={new_size}",
-                    self.current_size
-                );
-                self.texture = texture;
-                self.view = view;
-                self.sampler = sampler;
-                self.packer = packer;
-                self.cache = cache;
-                self.current_size = new_size;
-                return Ok(());
-            }
-
-            new_size = new_size.saturating_mul(2);
-        }
-    }
-
-    fn insert_rasterized(
-        &mut self,
-        key: GlyphKey,
-        rasterized: &RasterizedGlyph,
-        queue: &wgpu::Queue,
-        rasterizer: &FreeTypeRasterizer,
-    ) -> Result<AtlasRegion, AtlasFullError> {
-        let upload = AtlasUpload::from_rasterized(rasterized, rasterizer.subpixel_layout());
-        if upload.width == 0 || upload.height == 0 {
-            let region = Self::empty_region(rasterized);
-            self.cache.insert(key, region);
-            return Ok(region);
-        }
-
-        loop {
-            if let Some(origin) = self.packer.allocate(upload.width, upload.height) {
-                Self::write_texture(&self.texture, queue, origin, &upload);
-                let region = Self::region_for(origin, &upload, self.current_size);
-                self.cache.insert(key, region);
-                return Ok(region);
-            }
-
-            self.grow_and_repack(queue, rasterizer)?;
-        }
-    }
-
-    fn region_for(origin: (u32, u32), upload: &AtlasUpload, atlas_size: u32) -> AtlasRegion {
-        let inv_size = 1.0 / atlas_size as f32;
-        AtlasRegion {
-            uv_min: [origin.0 as f32 * inv_size, origin.1 as f32 * inv_size],
-            uv_max: [
-                (origin.0 + upload.width) as f32 * inv_size,
-                (origin.1 + upload.height) as f32 * inv_size,
-            ],
-            size: [upload.width as f32, upload.height as f32],
-            bearing: upload.bearing,
-        }
-    }
-
-    fn empty_region(rasterized: &RasterizedGlyph) -> AtlasRegion {
-        AtlasRegion {
-            uv_min: [0.0, 0.0],
-            uv_max: [0.0, 0.0],
-            size: [0.0, 0.0],
-            bearing: [rasterized.bearing_x as f32, rasterized.bearing_y as f32],
         }
     }
 
@@ -217,15 +65,26 @@ impl GlyphAtlas {
         (texture, view, sampler)
     }
 
-    fn write_texture(
-        texture: &wgpu::Texture,
-        queue: &wgpu::Queue,
-        origin: (u32, u32),
-        upload: &AtlasUpload,
-    ) {
+    /// Writes one RGBA patch into the existing atlas texture.
+    pub(crate) fn write_region(&self, queue: &wgpu::Queue, region: AtlasRegion, rgba: &[u8]) {
+        let width = region.size[0] as u32;
+        let height = region.size[1] as u32;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        debug_assert_eq!(
+            rgba.len(),
+            width as usize * height as usize * 4,
+            "atlas patch pixels must match the target region size"
+        );
+        let origin = (
+            (region.uv_min[0] * self.current_size as f32).round() as u32,
+            (region.uv_min[1] * self.current_size as f32).round() as u32,
+        );
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture,
+                texture: &self.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: origin.0,
@@ -234,15 +93,15 @@ impl GlyphAtlas {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &upload.rgba,
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(upload.width * 4),
-                rows_per_image: Some(upload.height),
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
             },
             wgpu::Extent3d {
-                width: upload.width,
-                height: upload.height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );

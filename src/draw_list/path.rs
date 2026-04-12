@@ -7,6 +7,10 @@ use super::layer::RenderLayer;
 use super::validation::color_is_valid;
 
 /// High-level path verbs that are later lowered into lyon path events.
+///
+/// The current demo scene only emits rectangles, but the shared scene schema already
+/// needs the full verb set so future vector producers do not fork the draw-list API.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(crate) enum PathVerb {
     MoveTo {
@@ -28,6 +32,9 @@ pub(crate) enum PathVerb {
 }
 
 /// Stroke line-cap style forwarded to lyon.
+///
+/// These variants are kept in the schema even before a path-producing store bridge exists.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum LineCap {
     Butt,
@@ -36,6 +43,9 @@ pub(crate) enum LineCap {
 }
 
 /// Stroke line-join style forwarded to lyon.
+///
+/// These variants are kept in the schema even before a path-producing store bridge exists.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum LineJoin {
     Miter,
@@ -54,6 +64,10 @@ pub(crate) struct StrokeStyle {
 
 impl StrokeStyle {
     /// Creates a stroke style whose width and color are validated at construction time.
+    ///
+    /// The constructor is currently exercised by tests while the scene bridge still emits
+    /// rectangles only, so keep it available without forcing downstream ad hoc builders.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(color: [f32; 4], width: f32, line_cap: LineCap, line_join: LineJoin) -> Self {
         debug_assert!(width > 0.0, "StrokeStyle width must stay positive");
         debug_assert!(
@@ -108,6 +122,10 @@ pub(crate) struct PathCmd {
 
 impl PathCmd {
     /// Creates a path command whose fill and stroke invariants are checked once.
+    ///
+    /// The constructor is part of the shared draw-list surface even before runtime scene
+    /// production starts emitting paths outside unit tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         verbs: Vec<PathVerb>,
         fill: Option<[f32; 4]>,

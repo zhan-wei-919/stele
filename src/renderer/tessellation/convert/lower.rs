@@ -4,7 +4,7 @@ use lyon::math::point;
 use lyon::path::Path;
 use lyon::tessellation::{LineCap as LyonLineCap, LineJoin as LyonLineJoin, StrokeOptions};
 
-use crate::renderer::draw_list::{LineCap, LineJoin, PathVerb, StrokeStyle};
+use crate::draw_list::{LineCap, LineJoin, PathVerb, StrokeStyle};
 
 pub(super) const PATH_TESSELLATION_TOLERANCE: f32 = 0.02;
 

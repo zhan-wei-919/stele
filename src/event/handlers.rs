@@ -1,11 +1,11 @@
-//! Event-specific handlers used by the router.
+//! Event-specific handlers used by the winit router.
 
 use log::warn;
 use tokio::sync::mpsc::UnboundedSender;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 
-use crate::io::{AppCommand, ButtonState, MockMouseEvent, MouseButtonKind, MouseScroll};
+use crate::io::{Action, ButtonState, MouseButtonKind, MouseScroll};
 
 /// Keyboard input normalized at the winit boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,7 +16,7 @@ pub(crate) struct KeyboardInput {
 }
 
 impl KeyboardInput {
-    /// Builds a normalized keyboard input from a winit event.
+    /// Builds normalized keyboard input from one winit key event.
     pub(crate) fn from_winit(event: &KeyEvent, is_synthetic: bool) -> Self {
         Self {
             text: event.text.as_deref().map(str::to_owned),
@@ -25,7 +25,7 @@ impl KeyboardInput {
         }
     }
 
-    /// Builds a normalized keyboard input for tests and internal callers.
+    /// Builds normalized keyboard input for tests and internal callers.
     #[cfg(test)]
     pub(crate) fn new(
         text: Option<&str>,
@@ -39,12 +39,12 @@ impl KeyboardInput {
         }
     }
 
-    fn into_command(self) -> Option<AppCommand> {
+    fn into_action(self) -> Option<Action> {
         if self.is_synthetic {
             return None;
         }
 
-        Some(AppCommand::MockKeyInput {
+        Some(Action::KeyInput {
             text: self.text.unwrap_or(self.logical_key),
         })
     }
@@ -64,52 +64,53 @@ impl ViewportSnapshot {
     }
 }
 
-/// Renderer-facing viewport updates derived from window events.
+/// View-facing viewport updates derived from window events.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ViewportUpdate {
     pub(crate) size: PhysicalSize<u32>,
     pub(crate) scale_factor: f32,
+    pub(crate) viewport_revision: u64,
 }
 
-/// Handles keyboard input and forwards it as mock semantic commands.
+/// Handles keyboard input and forwards it through the shared action channel.
 pub(crate) struct KeyboardHandler {
-    command_tx: UnboundedSender<AppCommand>,
+    action_tx: UnboundedSender<Action>,
 }
 
 impl KeyboardHandler {
-    /// Creates a keyboard handler backed by the shared app-command channel.
-    pub(crate) fn new(command_tx: UnboundedSender<AppCommand>) -> Self {
-        Self { command_tx }
+    /// Creates a keyboard handler backed by the shared action channel.
+    pub(crate) fn new(action_tx: UnboundedSender<Action>) -> Self {
+        Self { action_tx }
     }
 
-    /// Forwards keyboard input to the async side.
+    /// Forwards keyboard input to the async store.
     pub(crate) fn handle(&self, input: KeyboardInput) {
-        if let Some(command) = input.into_command() {
-            self.send_command(command);
+        if let Some(action) = input.into_action() {
+            self.send_action(action);
         }
     }
 
-    fn send_command(&self, command: AppCommand) {
-        if self.command_tx.send(command).is_err() {
+    fn send_action(&self, action: Action) {
+        if self.action_tx.send(action).is_err() {
             warn!("event.handler.send_failed handler=keyboard");
         }
     }
 }
 
-/// Handles mouse input and forwards it through the shared mock command path.
+/// Handles mouse input and forwards it through the shared action channel.
 pub(crate) struct MouseHandler {
-    command_tx: UnboundedSender<AppCommand>,
+    action_tx: UnboundedSender<Action>,
 }
 
 impl MouseHandler {
-    /// Creates a mouse handler backed by the shared app-command channel.
-    pub(crate) fn new(command_tx: UnboundedSender<AppCommand>) -> Self {
-        Self { command_tx }
+    /// Creates a mouse handler backed by the shared action channel.
+    pub(crate) fn new(action_tx: UnboundedSender<Action>) -> Self {
+        Self { action_tx }
     }
 
     /// Forwards mouse button activity.
     pub(crate) fn handle_button(&self, state: ElementState, button: MouseButton) {
-        self.send_command(MockMouseEvent::Button {
+        let action = Action::MouseButton {
             state: match state {
                 ElementState::Pressed => ButtonState::Pressed,
                 ElementState::Released => ButtonState::Released,
@@ -122,12 +123,13 @@ impl MouseHandler {
                 MouseButton::Forward => MouseButtonKind::Forward,
                 MouseButton::Other(value) => MouseButtonKind::Other(value),
             },
-        });
+        };
+        self.send_action(action);
     }
 
     /// Forwards cursor movement.
     pub(crate) fn handle_move(&self, position: PhysicalPosition<f64>) {
-        self.send_command(MockMouseEvent::Move {
+        self.send_action(Action::MouseMove {
             x: position.x,
             y: position.y,
         });
@@ -142,75 +144,81 @@ impl MouseHandler {
                 y: position.y,
             },
         };
-        self.send_command(MockMouseEvent::Scroll { delta });
+        self.send_action(Action::MouseScroll { delta });
     }
 
-    fn send_command(&self, event: MockMouseEvent) {
-        if self
-            .command_tx
-            .send(AppCommand::MockMouseInput { event })
-            .is_err()
-        {
+    fn send_action(&self, action: Action) {
+        if self.action_tx.send(action).is_err() {
             warn!("event.handler.send_failed handler=mouse");
         }
     }
 }
 
-/// Handles window-size changes and exposes viewport updates to the app layer.
+/// Handles viewport changes and emits monotonic viewport revisions.
 pub(crate) struct ViewportHandler {
-    command_tx: UnboundedSender<AppCommand>,
+    action_tx: UnboundedSender<Action>,
+    next_viewport_revision: u64,
 }
 
 impl ViewportHandler {
-    /// Creates a viewport handler backed by the shared app-command channel.
-    pub(crate) fn new(command_tx: UnboundedSender<AppCommand>) -> Self {
-        Self { command_tx }
+    /// Creates a viewport handler backed by the shared action channel.
+    pub(crate) fn new(action_tx: UnboundedSender<Action>) -> Self {
+        Self {
+            action_tx,
+            next_viewport_revision: 0,
+        }
     }
 
     /// Processes a resize event.
     pub(crate) fn handle_resize(
-        &self,
+        &mut self,
         size: PhysicalSize<u32>,
         scale_factor: f32,
     ) -> ViewportUpdate {
-        self.send_resize_command(size);
-        ViewportUpdate { size, scale_factor }
+        self.send_resize_action(size, scale_factor)
     }
 
     /// Processes a scale-factor change.
     pub(crate) fn handle_scale(
-        &self,
+        &mut self,
         size: PhysicalSize<u32>,
         scale_factor: f32,
     ) -> ViewportUpdate {
-        self.send_resize_command(size);
-        ViewportUpdate { size, scale_factor }
+        self.send_resize_action(size, scale_factor)
     }
 
-    fn send_resize_command(&self, size: PhysicalSize<u32>) {
-        let command = AppCommand::MockResize {
+    fn send_resize_action(&mut self, size: PhysicalSize<u32>, scale_factor: f32) -> ViewportUpdate {
+        self.next_viewport_revision += 1;
+        let update = ViewportUpdate {
+            size,
+            scale_factor,
+            viewport_revision: self.next_viewport_revision,
+        };
+        let action = Action::Resize {
             width: size.width,
             height: size.height,
+            scale_factor,
+            viewport_revision: update.viewport_revision,
         };
-
-        if self.command_tx.send(command).is_err() {
+        if self.action_tx.send(action).is_err() {
             warn!("event.handler.send_failed handler=viewport");
         }
+        update
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::KeyboardInput;
-    use crate::io::AppCommand;
+    use crate::io::Action;
 
     #[test]
     fn keyboard_input_prefers_text_payload() {
         let input = KeyboardInput::new(Some("a"), "KeyA", false);
 
         assert_eq!(
-            input.into_command(),
-            Some(AppCommand::MockKeyInput {
+            input.into_action(),
+            Some(Action::KeyInput {
                 text: String::from("a"),
             })
         );
@@ -220,7 +228,7 @@ mod tests {
     fn synthetic_keyboard_input_is_filtered_at_source() {
         let input = KeyboardInput::new(Some("a"), "KeyA", true);
 
-        assert_eq!(input.into_command(), None);
+        assert_eq!(input.into_action(), None);
     }
 
     #[test]
@@ -228,8 +236,8 @@ mod tests {
         let input = KeyboardInput::new(None, "Named(Enter)", false);
 
         assert_eq!(
-            input.into_command(),
-            Some(AppCommand::MockKeyInput {
+            input.into_action(),
+            Some(Action::KeyInput {
                 text: String::from("Named(Enter)"),
             })
         );

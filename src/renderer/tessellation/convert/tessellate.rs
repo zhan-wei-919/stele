@@ -11,7 +11,7 @@ use lyon::tessellation::{
 
 use super::fringe::build_boundary_fringe;
 use super::lower::{build_path, stroke_options, PATH_TESSELLATION_TOLERANCE};
-use crate::renderer::draw_list::PathCmd;
+use crate::draw_list::PathCmd;
 use crate::renderer::instance::PathVertex;
 use crate::renderer::tessellation::CachedMesh;
 

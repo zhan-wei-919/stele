@@ -5,11 +5,11 @@ use std::time::Instant;
 use log::{trace, warn};
 
 use super::Renderer;
-use crate::renderer::draw_list::{ClipRect, RenderLayer};
+use crate::draw_list::ClipRect;
 use crate::renderer::runtime::state::{ImageBatch, PrimitiveRange};
 
 impl<'window> Renderer<'window> {
-    /// Renders the current draw list into the swapchain surface.
+    /// Renders the current GPU scene into the swapchain surface.
     pub fn frame(&mut self) {
         if self.surface_config.width == 0 || self.surface_config.height == 0 {
             return;
@@ -18,9 +18,6 @@ impl<'window> Renderer<'window> {
         let frame_start = Instant::now();
         self.tessellation_cache.begin_frame();
         self.image_cache.begin_frame();
-        if self.dirty {
-            self.rebuild_gpu_data();
-        }
 
         let Some((surface_texture, suboptimal)) = self.acquire_surface_texture() else {
             return;
@@ -93,14 +90,10 @@ impl<'window> Renderer<'window> {
                 continue;
             };
             pass.set_scissor_rect(x, y, width, height);
-
-            for layer in RenderLayer::ALL {
-                draw_calls += self.draw_rect_range(pass, block.rect_ranges_by_layer[layer.index()]);
-                draw_calls += self.draw_path_range(pass, block.path_ranges_by_layer[layer.index()]);
-                draw_calls += self.draw_images(pass, &block.image_batches_by_layer[layer.index()]);
-                draw_calls +=
-                    self.draw_glyph_range(pass, block.glyph_ranges_by_layer[layer.index()]);
-            }
+            draw_calls += self.draw_rect_range(pass, block.rect_range);
+            draw_calls += self.draw_path_range(pass, block.path_range);
+            draw_calls += self.draw_images(pass, &block.image_batches);
+            draw_calls += self.draw_glyph_range(pass, block.glyph_range);
         }
         draw_calls
     }
@@ -199,16 +192,11 @@ impl<'window> Renderer<'window> {
         1
     }
 
-    fn physical_clip_rect(&self, clip_rect: Option<ClipRect>) -> Option<(u32, u32, u32, u32)> {
-        let scale_factor = self.scale_factor.max(1.0);
+    fn physical_clip_rect(&self, clip_rect: ClipRect) -> Option<(u32, u32, u32, u32)> {
         let surface_width = self.surface_config.width as f32;
         let surface_height = self.surface_config.height as f32;
-        let (left, top, right, bottom) = match clip_rect {
-            Some(clip_rect) => {
-                logical_clip_bounds(clip_rect, scale_factor, surface_width, surface_height)
-            }
-            None => (0, 0, self.surface_config.width, self.surface_config.height),
-        };
+        let (left, top, right, bottom) =
+            logical_clip_bounds(clip_rect, self.scale_factor, surface_width, surface_height);
 
         let width = right.saturating_sub(left);
         let height = bottom.saturating_sub(top);

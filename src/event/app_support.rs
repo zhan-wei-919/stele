@@ -1,31 +1,17 @@
 //! Support traits and concrete adapters for the desktop app shell.
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use winit::dpi::PhysicalSize;
 use winit::window::{Window, WindowId};
 
-use crate::demo::LayoutDemo;
-use crate::io::IoRuntime;
+use crate::io::{AtlasPatch, IoRuntime};
 use crate::renderer::Renderer;
-
-pub(crate) const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
-
-/// Converts a physical size plus scale factor into logical viewport dimensions.
-pub(crate) fn logical_viewport(size: PhysicalSize<u32>, scale_factor: f32) -> [f32; 2] {
-    [
-        size.width as f32 / scale_factor.max(1.0),
-        size.height as f32 / scale_factor.max(1.0),
-    ]
-}
+use crate::scene::ViewState;
 
 /// Operations `SteleApp` needs from the async runtime owner.
 pub(crate) trait AppRuntime {
-    /// Schedules a deferred deadline wake.
-    fn schedule_deadline(&self, delay: Duration);
-
-    /// Re-wakes the winit loop after a bounded IO drain.
+    /// Re-wakes the winit loop after a bounded diff drain.
     fn wake_loop(&self);
 
     /// Shuts the runtime down with a bounded wait.
@@ -33,10 +19,6 @@ pub(crate) trait AppRuntime {
 }
 
 impl AppRuntime for IoRuntime {
-    fn schedule_deadline(&self, delay: Duration) {
-        IoRuntime::schedule_deadline(self, delay);
-    }
-
     fn wake_loop(&self) {
         IoRuntime::wake_loop(self);
     }
@@ -91,8 +73,20 @@ pub(crate) trait AppRenderer {
     /// Draws one frame.
     fn frame(&mut self);
 
-    /// Applies the latest viewport size and scale factor.
-    fn resize(&mut self, size: PhysicalSize<u32>, scale_factor: f32);
+    /// Updates the surface and viewport scale without semantic recompute.
+    fn resize_surface(&mut self, size: PhysicalSize<u32>, scale_factor: f32);
+
+    /// Recreates the physical atlas texture.
+    fn recreate_atlas(&mut self, size: u32);
+
+    /// Clears the path tessellation cache.
+    fn clear_tessellation_cache(&mut self);
+
+    /// Writes one atlas patch into the physical atlas texture.
+    fn write_atlas_patch(&mut self, patch: &AtlasPatch);
+
+    /// Rebuilds GPU buffers from the latest view-owned scene cache.
+    fn rebuild_from_view_state(&mut self, view_state: &ViewState);
 }
 
 impl AppRenderer for Renderer<'static> {
@@ -100,26 +94,23 @@ impl AppRenderer for Renderer<'static> {
         Renderer::frame(self);
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
-        Renderer::resize(self, size, scale_factor);
-    }
-}
-
-/// Demo-scene operations that must stay wired into resize handling.
-pub(crate) trait AppDemo<R: AppRenderer> {
-    /// Reflows the demo content for a new logical viewport.
-    fn resize(&mut self, viewport: [f32; 2]);
-
-    /// Applies the current demo content to the renderer.
-    fn apply(&self, renderer: &mut R);
-}
-
-impl AppDemo<Renderer<'static>> for LayoutDemo {
-    fn resize(&mut self, viewport: [f32; 2]) {
-        LayoutDemo::resize(self, viewport);
+    fn resize_surface(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
+        Renderer::resize_surface(self, size, scale_factor);
     }
 
-    fn apply(&self, renderer: &mut Renderer<'static>) {
-        LayoutDemo::apply(self, renderer);
+    fn recreate_atlas(&mut self, size: u32) {
+        Renderer::recreate_atlas(self, size);
+    }
+
+    fn clear_tessellation_cache(&mut self) {
+        Renderer::clear_tessellation_cache(self);
+    }
+
+    fn write_atlas_patch(&mut self, patch: &AtlasPatch) {
+        Renderer::write_atlas_patch(self, patch.region, &patch.pixels);
+    }
+
+    fn rebuild_from_view_state(&mut self, view_state: &ViewState) {
+        Renderer::rebuild_from_view_state(self, view_state);
     }
 }

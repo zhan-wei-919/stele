@@ -1,4 +1,4 @@
-//! Tokio runtime ownership and helper operations for the IO event layer.
+//! Tokio runtime ownership and helper operations for the store/view bridge.
 
 use std::future::Future;
 use std::io;
@@ -10,57 +10,57 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use winit::event_loop::EventLoopProxy;
 
-use super::{AppCommand, IoEvent, WakeEvent};
+use super::{Action, SceneDiff, WakeEvent};
 
-/// Owns the async runtime and the winit-side ends of the IO channels.
+/// Owns the async runtime and the winit-side ends of the bridge channels.
 pub(crate) struct IoRuntime {
     runtime: Runtime,
-    io_event_rx: Option<UnboundedReceiver<IoEvent>>,
-    app_command_tx: UnboundedSender<AppCommand>,
+    scene_diff_rx: Option<UnboundedReceiver<SceneDiff>>,
+    action_tx: UnboundedSender<Action>,
     proxy: EventLoopProxy<WakeEvent>,
 }
 
-/// Async-side handle used by background tasks such as mock producers or future PTY/VT adapters.
+/// Async-side handle used by the store task.
 pub(crate) struct IoHandle {
-    io_event_tx: UnboundedSender<IoEvent>,
-    app_command_rx: UnboundedReceiver<AppCommand>,
+    scene_diff_tx: UnboundedSender<SceneDiff>,
+    action_rx: UnboundedReceiver<Action>,
     proxy: EventLoopProxy<WakeEvent>,
 }
 
 impl IoRuntime {
-    /// Creates the runtime and splits the IO layer into winit-side and async-side halves.
+    /// Creates the runtime and splits the bridge into winit-side and async-side halves.
     pub(crate) fn new(proxy: EventLoopProxy<WakeEvent>) -> io::Result<(Self, IoHandle)> {
         let runtime = Runtime::new()?;
-        let (io_event_tx, io_event_rx) = mpsc::unbounded_channel();
-        let (app_command_tx, app_command_rx) = mpsc::unbounded_channel();
+        let (scene_diff_tx, scene_diff_rx) = mpsc::unbounded_channel();
+        let (action_tx, action_rx) = mpsc::unbounded_channel();
 
         info!("io.runtime.start runtime=tokio");
 
         Ok((
             Self {
                 runtime,
-                io_event_rx: Some(io_event_rx),
-                app_command_tx,
+                scene_diff_rx: Some(scene_diff_rx),
+                action_tx,
                 proxy: proxy.clone(),
             },
             IoHandle {
-                io_event_tx,
-                app_command_rx,
+                scene_diff_tx,
+                action_rx,
                 proxy,
             },
         ))
     }
 
-    /// Returns a sender for semantic commands produced by the winit thread.
-    pub(crate) fn app_command_tx(&self) -> UnboundedSender<AppCommand> {
-        self.app_command_tx.clone()
+    /// Returns a sender for actions produced by the winit thread.
+    pub(crate) fn action_tx(&self) -> UnboundedSender<Action> {
+        self.action_tx.clone()
     }
 
-    /// Moves the winit-side IO receiver into the shared event driver.
-    pub(crate) fn take_io_event_rx(&mut self) -> UnboundedReceiver<IoEvent> {
-        self.io_event_rx
+    /// Moves the winit-side SceneDiff receiver into the shared driver.
+    pub(crate) fn take_scene_diff_rx(&mut self) -> UnboundedReceiver<SceneDiff> {
+        self.scene_diff_rx
             .take()
-            .expect("io event receiver must only be taken once")
+            .expect("scene diff receiver must only be taken once")
     }
 
     /// Spawns one async task on the owned runtime.
@@ -69,17 +69,6 @@ impl IoRuntime {
         F: Future<Output = ()> + Send + 'static,
     {
         self.runtime.handle().spawn(task);
-    }
-
-    /// Schedules a deadline wake-up on the async runtime.
-    pub(crate) fn schedule_deadline(&self, delay: Duration) {
-        let proxy = self.proxy.clone();
-        self.runtime.handle().spawn(async move {
-            tokio::time::sleep(delay).await;
-            if proxy.send_event(WakeEvent::DeadlineExpired).is_err() {
-                warn!("io.runtime.wake_failed event=deadline_expired");
-            }
-        });
     }
 
     /// Wakes the winit loop through the shared proxy.
@@ -97,14 +86,9 @@ impl IoRuntime {
 }
 
 impl IoHandle {
-    /// Sends one IO event toward the winit side.
-    pub(crate) fn send_io_event(&self, event: IoEvent) -> bool {
-        if self.io_event_tx.send(event).is_err() {
-            warn!("io.runtime.send_failed event=io_event");
-            return false;
-        }
-
-        true
+    /// Waits for the next action from the winit thread.
+    pub(crate) async fn next_action(&mut self) -> Option<Action> {
+        self.action_rx.recv().await
     }
 
     /// Wakes the winit event loop through the shared proxy.
@@ -117,13 +101,13 @@ impl IoHandle {
         true
     }
 
-    /// Sends one IO event and wakes the winit loop for delivery.
-    pub(crate) fn dispatch_io_event(&self, event: IoEvent) -> bool {
-        self.send_io_event(event) && self.wake_loop()
-    }
+    /// Sends one SceneDiff toward the view and wakes winit for delivery.
+    pub(crate) fn dispatch_scene_diff(&self, diff: SceneDiff) -> bool {
+        if self.scene_diff_tx.send(diff).is_err() {
+            warn!("io.runtime.send_failed payload=scene_diff");
+            return false;
+        }
 
-    /// Waits for the next semantic app command from the winit side.
-    pub(crate) async fn next_app_command(&mut self) -> Option<AppCommand> {
-        self.app_command_rx.recv().await
+        self.wake_loop()
     }
 }

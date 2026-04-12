@@ -2,8 +2,8 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::draw_list::PositionedGlyph;
 use crate::renderer::atlas::AtlasRegion;
-use crate::renderer::draw_list::PositionedGlyph;
 
 /// Per-instance data for a glyph quad in the atlas-backed text pipeline.
 #[repr(C)]

@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::renderer::draw_list::RectCmd;
+use crate::draw_list::RectCmd;
 
 /// Per-instance data for a solid rectangle quad.
 #[repr(C)]

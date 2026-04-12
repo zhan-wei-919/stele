@@ -1,22 +1,24 @@
-// The integration test pulls the real `src/event` and `src/io` module trees in
-// via `#[path]` so it exercises the production routing and IO bridge code.
-// That also compiles helper items which this harness does not reference
-// directly, so the test target needs a local dead-code allowance here.
+// The integration test pulls selected production modules in via `#[path]` so
+// it exercises the real event-routing and bridge code.
 #![allow(dead_code)]
 
+#[path = "../src/draw_list/mod.rs"]
+mod draw_list;
 #[path = "../src/event/mod.rs"]
 mod event;
+#[path = "../src/font/mod.rs"]
+mod font;
 #[path = "../src/io/mod.rs"]
 mod io;
+#[path = "../src/renderer/mod.rs"]
+mod renderer;
+#[path = "../src/scene/mod.rs"]
+mod scene;
 
-use std::thread;
-use std::time::Duration;
-
-use event::handlers::{KeyboardInput, ViewportUpdate};
-use event::{EventRouter, RedrawThrottle, RouteAction, ViewportSnapshot};
+use event::handlers::KeyboardInput;
+use event::{EventRouter, RouteAction, ViewportSnapshot};
 use io::{
-    run_mock_io_task, AppCommand, ButtonState, IoEvent, IoEventDriver, IoHandle, IoRuntime,
-    MockMouseEvent, MouseButtonKind, MouseScroll,
+    Action, ButtonState, MouseButtonKind, MouseScroll, SceneDiff, SceneDiffDriver, WakeEvent,
 };
 use tokio::sync::mpsc;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -24,207 +26,66 @@ use winit::event::{
     DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 
-const MIN_INTERVAL: Duration = Duration::from_millis(16);
-
-fn build_router() -> (EventRouter, mpsc::UnboundedReceiver<AppCommand>) {
-    let (command_tx, command_rx) = mpsc::unbounded_channel();
-    (EventRouter::new(command_tx), command_rx)
+fn build_router() -> (EventRouter, mpsc::UnboundedReceiver<Action>) {
+    let (action_tx, action_rx) = mpsc::unbounded_channel();
+    (EventRouter::new(action_tx), action_rx)
 }
 
 #[test]
 fn async_side_exports_remain_available_for_future_mounts() {
-    let _ = std::mem::size_of::<Option<IoHandle>>();
-    let _ = std::mem::size_of::<Option<IoRuntime>>();
-    let _ = run_mock_io_task;
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct WakeEffects {
-    drained: usize,
-    events: Vec<IoEvent>,
-    request_redraw: bool,
-    redraw_interval: Option<Duration>,
-    schedule_deadline: Option<Duration>,
-    wake_again: bool,
-    disconnected: bool,
-}
-
-fn apply_wake(
-    driver: &mut IoEventDriver,
-    throttle: &mut RedrawThrottle,
-    limit: usize,
-) -> WakeEffects {
-    let outcome = driver.on_wake(limit);
-    let mut effects = WakeEffects {
-        drained: outcome.drained,
-        events: outcome.events,
-        request_redraw: false,
-        redraw_interval: None,
-        schedule_deadline: None,
-        wake_again: outcome.wake_again,
-        disconnected: outcome.disconnected,
-    };
-
-    if effects.disconnected || effects.drained == 0 {
-        return effects;
-    }
-
-    if throttle.should_redraw_now() {
-        effects.request_redraw = true;
-        effects.redraw_interval = Some(record_redraw(throttle));
-        return effects;
-    }
-
-    throttle.mark_dirty();
-    if !throttle.pending_deadline() {
-        throttle.start_deadline();
-        effects.schedule_deadline = Some(throttle.deadline_delay());
-    }
-
-    effects
-}
-
-fn apply_deadline(throttle: &mut RedrawThrottle) -> Option<Duration> {
-    throttle.finish_deadline();
-    if throttle.is_dirty() {
-        return Some(record_redraw(throttle));
-    }
-
-    None
-}
-
-fn record_redraw(throttle: &mut RedrawThrottle) -> Duration {
-    let interval = throttle.elapsed_since_last_redraw().unwrap_or_default();
-    throttle.record_redraw();
-    throttle.clear_dirty();
-    interval
-}
-
-#[test]
-fn single_wake_drains_io_and_requests_immediate_redraw() {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let mut driver = IoEventDriver::new(rx);
-    let mut throttle = RedrawThrottle::new(MIN_INTERVAL);
-    tx.send(IoEvent::MockTick {
-        payload: String::from("alpha"),
-    })
-    .expect("send must succeed");
-
-    let outcome = apply_wake(&mut driver, &mut throttle, 4096);
-
-    assert_eq!(outcome.drained, 1);
-    assert_eq!(
-        outcome.events,
-        vec![IoEvent::MockTick {
-            payload: String::from("alpha"),
-        }]
-    );
-    assert!(outcome.request_redraw);
-    assert_eq!(outcome.redraw_interval, Some(Duration::ZERO));
-    assert_eq!(outcome.schedule_deadline, None);
-    assert!(!outcome.wake_again);
-    assert!(!outcome.disconnected);
-}
-
-#[test]
-fn second_wake_inside_interval_is_deferred_until_deadline() {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let mut driver = IoEventDriver::new(rx);
-    let mut throttle = RedrawThrottle::new(MIN_INTERVAL);
-    tx.send(IoEvent::MockTick {
-        payload: String::from("first"),
-    })
-    .expect("first send must succeed");
-
-    let first = apply_wake(&mut driver, &mut throttle, 4096);
-    assert!(first.request_redraw);
-
-    tx.send(IoEvent::MockTick {
-        payload: String::from("second"),
-    })
-    .expect("second send must succeed");
-    let second = apply_wake(&mut driver, &mut throttle, 4096);
-
-    assert_eq!(second.drained, 1);
-    assert!(!second.request_redraw);
-    let delay = second
-        .schedule_deadline
-        .expect("second wake should schedule a deadline");
-    assert!(delay <= MIN_INTERVAL);
-
-    thread::sleep(delay.saturating_add(Duration::from_millis(1)));
-    assert!(apply_deadline(&mut throttle).is_some());
-}
-
-#[test]
-fn disconnected_channel_requests_shutdown() {
-    let (tx, rx) = mpsc::unbounded_channel::<IoEvent>();
-    let mut driver = IoEventDriver::new(rx);
-    drop(tx);
-
-    let outcome = driver.on_wake(4096);
-
-    assert_eq!(outcome.drained, 0);
-    assert!(outcome.disconnected);
-    assert!(outcome.events.is_empty());
+    let _ = std::mem::size_of::<Option<font::FontDiscovery>>();
+    let _ = std::mem::size_of::<Option<font::FontSelection>>();
+    let _ = std::mem::size_of::<Option<font::LineMetrics>>();
+    let _ = std::mem::size_of::<Option<font::MeasuredGlyph>>();
+    let _ = std::mem::size_of::<Option<renderer::Renderer<'static>>>();
+    let _ = std::mem::size_of::<Option<io::AtlasPatch>>();
+    let _ = std::mem::size_of::<Option<io::BlockOp>>();
+    let _ = std::mem::size_of::<Option<io::IoHandle>>();
+    let _ = std::mem::size_of::<Option<io::IoRuntime>>();
+    let _ = std::mem::size_of::<Option<SceneDiffDriver>>();
+    let _ = std::mem::size_of::<Option<WakeEvent>>();
 }
 
 #[test]
 fn drain_limit_preserves_overflow_for_the_next_wake() {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mut driver = IoEventDriver::new(rx);
-    for payload in ["one", "two", "three"] {
-        tx.send(IoEvent::MockTick {
-            payload: payload.to_string(),
-        })
-        .expect("send must succeed");
+    let mut driver = SceneDiffDriver::new(rx);
+    for revision in [1, 2, 3] {
+        tx.send(SceneDiff::new(revision))
+            .expect("scene diff send must succeed");
     }
 
     let first = driver.on_wake(2);
     assert_eq!(first.drained, 2);
     assert!(first.wake_again);
-    assert_eq!(
-        first.events,
-        vec![
-            IoEvent::MockTick {
-                payload: String::from("one"),
-            },
-            IoEvent::MockTick {
-                payload: String::from("two"),
-            },
-        ]
-    );
+    assert_eq!(first.diffs[0].viewport_revision, 1);
+    assert_eq!(first.diffs[1].viewport_revision, 2);
 
     let second = driver.on_wake(2);
     assert_eq!(second.drained, 1);
-    assert_eq!(
-        second.events,
-        vec![IoEvent::MockTick {
-            payload: String::from("three"),
-        }]
-    );
+    assert_eq!(second.diffs[0].viewport_revision, 3);
 }
 
 #[test]
-fn keyboard_input_is_routed_to_async_commands() {
-    let (router, mut command_rx) = build_router();
+fn keyboard_input_is_routed_to_actions() {
+    let (router, mut action_rx) = build_router();
 
     let action = router.dispatch_keyboard_input(KeyboardInput::new(Some("a"), "KeyA", false));
 
     assert_eq!(action, RouteAction::None);
     assert_eq!(
-        command_rx
+        action_rx
             .try_recv()
-            .expect("keyboard command must be forwarded"),
-        AppCommand::MockKeyInput {
+            .expect("keyboard action must be forwarded"),
+        Action::KeyInput {
             text: String::from("a"),
         }
     );
 }
 
 #[test]
-fn mouse_events_are_routed_as_semantic_mouse_commands() {
-    let (router, mut command_rx) = build_router();
+fn mouse_events_are_routed_as_semantic_actions() {
+    let (mut router, mut action_rx) = build_router();
     let viewport = ViewportSnapshot::new(PhysicalSize::new(1280, 720), 2.0);
 
     let button_action = router.dispatch(
@@ -237,14 +98,12 @@ fn mouse_events_are_routed_as_semantic_mouse_commands() {
     );
     assert_eq!(button_action, RouteAction::None);
     assert_eq!(
-        command_rx
+        action_rx
             .try_recv()
-            .expect("mouse button command must be forwarded"),
-        AppCommand::MockMouseInput {
-            event: MockMouseEvent::Button {
-                state: ButtonState::Pressed,
-                button: MouseButtonKind::Left,
-            },
+            .expect("mouse button action must be forwarded"),
+        Action::MouseButton {
+            state: ButtonState::Pressed,
+            button: MouseButtonKind::Left,
         }
     );
 
@@ -257,76 +116,91 @@ fn mouse_events_are_routed_as_semantic_mouse_commands() {
     );
     assert_eq!(move_action, RouteAction::None);
     assert_eq!(
-        command_rx
+        action_rx
             .try_recv()
-            .expect("mouse move command must be forwarded"),
-        AppCommand::MockMouseInput {
-            event: MockMouseEvent::Move { x: 42.0, y: 84.0 },
-        }
+            .expect("mouse move action must be forwarded"),
+        Action::MouseMove { x: 42.0, y: 84.0 }
     );
 
     let scroll_action = router.dispatch(
         &WindowEvent::MouseWheel {
             device_id: DeviceId::dummy(),
-            delta: MouseScrollDelta::LineDelta(1.5, -2.5),
+            delta: MouseScrollDelta::LineDelta(1.5, -2.0),
             phase: TouchPhase::Moved,
         },
         viewport,
     );
     assert_eq!(scroll_action, RouteAction::None);
     assert_eq!(
-        command_rx
+        action_rx
             .try_recv()
-            .expect("mouse scroll command must be forwarded"),
-        AppCommand::MockMouseInput {
-            event: MockMouseEvent::Scroll {
-                delta: MouseScroll::LineDelta { x: 1.5, y: -2.5 },
-            },
+            .expect("mouse wheel action must be forwarded"),
+        Action::MouseScroll {
+            delta: MouseScroll::LineDelta { x: 1.5, y: -2.0 },
         }
     );
 }
 
 #[test]
-fn resize_event_routes_and_emits_resize_command() {
-    let (router, mut command_rx) = build_router();
+fn resize_events_send_monotonic_viewport_revisions() {
+    let (mut router, mut action_rx) = build_router();
+    let viewport = ViewportSnapshot::new(PhysicalSize::new(1280, 720), 2.0);
 
-    let action = router.dispatch(
-        &WindowEvent::Resized(PhysicalSize::new(800, 600)),
-        ViewportSnapshot::new(PhysicalSize::new(1280, 720), 2.0),
-    );
-
+    let first = router.dispatch(&WindowEvent::Resized(PhysicalSize::new(800, 600)), viewport);
     assert_eq!(
-        action,
-        RouteAction::Resize(ViewportUpdate {
+        first,
+        RouteAction::Resize(event::handlers::ViewportUpdate {
             size: PhysicalSize::new(800, 600),
             scale_factor: 2.0,
+            viewport_revision: 1,
         })
     );
     assert_eq!(
-        command_rx
+        action_rx
             .try_recv()
-            .expect("resize command must be forwarded"),
-        AppCommand::MockResize {
+            .expect("resize action must be forwarded"),
+        Action::Resize {
             width: 800,
             height: 600,
+            scale_factor: 2.0,
+            viewport_revision: 1,
+        }
+    );
+
+    let second = router.dispatch(&WindowEvent::Resized(PhysicalSize::new(900, 700)), viewport);
+    assert_eq!(
+        second,
+        RouteAction::Resize(event::handlers::ViewportUpdate {
+            size: PhysicalSize::new(900, 700),
+            scale_factor: 2.0,
+            viewport_revision: 2,
+        })
+    );
+    assert_eq!(
+        action_rx
+            .try_recv()
+            .expect("second resize action must be forwarded"),
+        Action::Resize {
+            width: 900,
+            height: 700,
+            scale_factor: 2.0,
+            viewport_revision: 2,
         }
     );
 }
 
 #[test]
-fn close_requested_routes_shutdown_command() {
-    let (router, mut command_rx) = build_router();
+fn close_requested_routes_shutdown_action() {
+    let (mut router, mut action_rx) = build_router();
+    let viewport = ViewportSnapshot::new(PhysicalSize::new(1280, 720), 2.0);
 
-    let action = router.dispatch(
-        &WindowEvent::CloseRequested,
-        ViewportSnapshot::new(PhysicalSize::new(1280, 720), 2.0),
-    );
+    let action = router.dispatch(&WindowEvent::CloseRequested, viewport);
 
     assert_eq!(action, RouteAction::CloseRequested);
     assert_eq!(
-        command_rx
+        action_rx
             .try_recv()
-            .expect("shutdown command must be forwarded"),
-        AppCommand::Shutdown
+            .expect("shutdown action must be forwarded"),
+        Action::Shutdown
     );
 }

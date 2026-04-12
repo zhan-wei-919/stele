@@ -9,6 +9,8 @@ pub(crate) struct RectCmd {
     pos: [f32; 2],
     size: [f32; 2],
     color: [f32; 4],
+    // Stored now so block-level scene data keeps layer intent once the renderer starts batching by layer.
+    #[allow(dead_code)]
     layer: RenderLayer,
 }
 
@@ -47,6 +49,9 @@ impl RectCmd {
     }
 
     /// Returns the layer bucket that should contain this rectangle.
+    ///
+    /// This stays on the API surface even though the current renderer only consumes rectangle geometry.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn layer(&self) -> RenderLayer {
         self.layer
     }

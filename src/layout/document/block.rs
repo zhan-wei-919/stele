@@ -2,17 +2,23 @@
 
 use super::validation::validate_optional_color;
 use super::{DocumentError, TextStyle};
+use crate::scene::BlockId;
 
 /// A document made of stacking blocks laid out independently.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Document {
     blocks: Vec<Block>,
+    next_block_id: u64,
 }
 
 impl Document {
     /// Creates a document from validated blocks.
     pub(crate) fn new(blocks: Vec<Block>) -> Self {
-        Self { blocks }
+        let mut document = Self::default();
+        for block in blocks {
+            document.push_block(block);
+        }
+        document
     }
 
     /// Returns the document blocks in document order.
@@ -52,6 +58,12 @@ impl Document {
         validate_optional_color(background_color)?;
         block.background_color = background_color;
         Ok(())
+    }
+
+    fn push_block(&mut self, mut block: Block) {
+        block.id = BlockId::new(self.next_block_id);
+        self.next_block_id += 1;
+        self.blocks.push(block);
     }
 }
 
@@ -106,6 +118,7 @@ impl BlockRect {
 /// A stacking and clipping unit in the document tree.
 #[derive(Clone, Debug)]
 pub(crate) struct Block {
+    id: BlockId,
     rect: BlockRect,
     padding: f32,
     background_color: Option<[f32; 4]>,
@@ -128,12 +141,18 @@ impl Block {
         validate_optional_color(background_color)?;
 
         Ok(Self {
+            id: BlockId::new(0),
             rect,
             padding,
             background_color,
             spans,
             z_order,
         })
+    }
+
+    /// Returns the stable block identity.
+    pub(crate) fn id(&self) -> BlockId {
+        self.id
     }
 
     /// Returns the validated block rectangle.
@@ -192,6 +211,7 @@ impl Span {
 #[cfg(test)]
 mod tests {
     use super::{Block, BlockRect, Document, DocumentError, Span, TextStyle};
+    use crate::scene::BlockId;
 
     #[test]
     fn block_rect_rejects_invalid_geometry() {
@@ -227,5 +247,34 @@ mod tests {
             document.set_block_background_color(1, None),
             Err(DocumentError::MissingBlock { block_index: 1 })
         );
+    }
+
+    #[test]
+    fn document_assigns_stable_block_ids_when_built() {
+        let style = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let first = Block::new(
+            BlockRect::new(0.0, 0.0, 10.0, 10.0).expect("rect must be valid"),
+            4.0,
+            None,
+            vec![Span::new("first", style)],
+            0,
+        )
+        .expect("block must be valid");
+        let second = Block::new(
+            BlockRect::new(10.0, 0.0, 10.0, 10.0).expect("rect must be valid"),
+            4.0,
+            None,
+            vec![Span::new("second", style)],
+            1,
+        )
+        .expect("block must be valid");
+        let document = Document::new(vec![first, second]);
+
+        let first_id = document.block(0).expect("first block must exist").id();
+        let second_id = document.block(1).expect("second block must exist").id();
+
+        assert_eq!(first_id, BlockId::new(0));
+        assert_eq!(second_id, BlockId::new(1));
+        assert_ne!(first_id, second_id);
     }
 }

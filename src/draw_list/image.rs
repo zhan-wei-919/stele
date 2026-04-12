@@ -1,4 +1,9 @@
 //! Image draw commands and payload hashing.
+//
+// This module stays compiled even before the image scene pipeline lands end to end.
+// Keeping the value objects here lets the future image bridge integrate without
+// re-inventing payload validation and hashing semantics.
+#![allow(dead_code)]
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

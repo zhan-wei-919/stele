@@ -1,4 +1,4 @@
-//! Desktop app shell that coordinates routed events, IO drain, and redraw policy.
+//! Desktop app shell that coordinates routed window events and SceneDiff apply.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,63 +11,64 @@ use winit::window::{Window, WindowId};
 #[path = "app_support.rs"]
 mod support;
 
-use crate::demo::LayoutDemo;
-use crate::event::{EventRouter, RedrawThrottle, RouteAction, ViewportSnapshot};
-use crate::io::{IoEvent, IoEventDriver, IoRuntime};
+use crate::event::{EventRouter, RouteAction, ViewportSnapshot};
+use crate::io::{BlockOp, IoRuntime, SceneDiff, SceneDiffDriver};
 use crate::renderer::Renderer;
+use crate::scene::ViewState;
+pub(crate) use support::{AppRenderer, AppRuntime, AppWindow};
 
-const MAX_IO_DRAIN: usize = 4096;
+const MAX_SCENE_DIFF_DRAIN: usize = 4096;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
-pub(crate) use support::{
-    logical_viewport, AppDemo, AppRenderer, AppRuntime, AppWindow, REDRAW_MIN_INTERVAL,
-};
 
-pub(crate) type DesktopApp = SteleApp<IoRuntime, Arc<Window>, Renderer<'static>, LayoutDemo>;
+pub(crate) type DesktopApp = SteleApp<IoRuntime, Arc<Window>, Renderer<'static>>;
+type StoreBootstrap<Rt> = Box<dyn FnOnce(&Rt, PhysicalSize<u32>, f32)>;
 
-/// Owns desktop app state and applies routed window or IO actions.
-pub(crate) struct SteleApp<Rt, Win, Rend, Demo>
+/// Owns desktop app state and applies routed window or scene-diff actions.
+pub(crate) struct SteleApp<Rt, Win, Rend>
 where
     Rt: AppRuntime,
     Win: AppWindow,
     Rend: AppRenderer,
-    Demo: AppDemo<Rend>,
 {
     window: Option<Win>,
     window_id: Option<WindowId>,
     renderer: Option<Rend>,
-    demo: Option<Demo>,
     io_runtime: Option<Rt>,
-    io_driver: IoEventDriver,
+    scene_diff_driver: SceneDiffDriver,
     router: Option<EventRouter>,
-    throttle: RedrawThrottle,
+    view_state: ViewState,
+    store_bootstrap: Option<StoreBootstrap<Rt>>,
     shutting_down: bool,
 }
 
-impl<Rt, Win, Rend, Demo> SteleApp<Rt, Win, Rend, Demo>
+impl<Rt, Win, Rend> SteleApp<Rt, Win, Rend>
 where
     Rt: AppRuntime,
     Win: AppWindow,
     Rend: AppRenderer,
-    Demo: AppDemo<Rend>,
 {
-    /// Creates an app shell around the IO runtime, driver, router, and redraw throttle.
+    /// Creates an app shell around the store runtime, diff driver, and router.
     pub(crate) fn new(
         io_runtime: Rt,
-        io_driver: IoEventDriver,
+        scene_diff_driver: SceneDiffDriver,
         router: EventRouter,
-        min_redraw_interval: Duration,
     ) -> Self {
         Self {
             window: None,
             window_id: None,
             renderer: None,
-            demo: None,
             io_runtime: Some(io_runtime),
-            io_driver,
+            scene_diff_driver,
             router: Some(router),
-            throttle: RedrawThrottle::new(min_redraw_interval),
+            view_state: ViewState::new(),
+            store_bootstrap: None,
             shutting_down: false,
         }
+    }
+
+    /// Installs a one-shot store bootstrap that runs after the window exists.
+    pub(crate) fn install_store_bootstrap(&mut self, bootstrap: StoreBootstrap<Rt>) {
+        self.store_bootstrap = Some(bootstrap);
     }
 
     /// Returns whether the desktop shell should skip a resume attempt.
@@ -81,11 +82,21 @@ where
     }
 
     /// Attaches the window-backed rendering surface after startup.
-    pub(crate) fn attach_surface(&mut self, window: Win, renderer: Rend, demo: Demo) {
+    pub(crate) fn attach_surface(&mut self, window: Win, renderer: Rend) {
         self.window_id = Some(window.id());
         self.window = Some(window);
         self.renderer = Some(renderer);
-        self.demo = Some(demo);
+    }
+
+    /// Starts the async store once the real window metrics are known.
+    pub(crate) fn bootstrap_store(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
+        let Some(io_runtime) = self.io_runtime.as_ref() else {
+            return;
+        };
+        let Some(bootstrap) = self.store_bootstrap.take() else {
+            return;
+        };
+        bootstrap(io_runtime, size, scale_factor);
     }
 
     /// Routes and applies one window event, returning whether the event loop should exit.
@@ -97,7 +108,7 @@ where
         let Some(window) = self.window.as_ref() else {
             return false;
         };
-        let Some(router) = self.router.as_ref() else {
+        let Some(router) = self.router.as_mut() else {
             return false;
         };
 
@@ -111,7 +122,7 @@ where
         match action {
             RouteAction::None => false,
             RouteAction::Resize(update) => {
-                self.handle_resize(update.size, update.scale_factor);
+                self.handle_resize(update.size, update.scale_factor, update.viewport_revision);
                 false
             }
             RouteAction::RedrawRequested => {
@@ -124,25 +135,26 @@ where
 
     /// Handles one async-to-winit wake and reports whether shutdown began.
     pub(crate) fn on_wake(&mut self) -> bool {
-        let outcome = self.io_driver.on_wake(MAX_IO_DRAIN);
-        info!("io.event.wake drained={}", outcome.drained);
-
-        for event in outcome.events {
-            self.handle_io_event(event);
-        }
+        let outcome = self.scene_diff_driver.on_wake(MAX_SCENE_DIFF_DRAIN);
+        info!("view.wake drained={}", outcome.drained);
 
         if outcome.disconnected {
             return self.begin_shutdown();
         }
 
-        if outcome.drained > 0 {
-            self.handle_redraw_after_wake();
+        let mut applied_any = false;
+        for diff in outcome.diffs {
+            applied_any |= self.apply_scene_diff(diff);
+        }
+
+        if applied_any {
+            self.rebuild_view_state();
         }
 
         if outcome.wake_again {
             warn!(
-                "io.event.drain_overflow count={} limit={}",
-                outcome.drained, MAX_IO_DRAIN
+                "view.drain_overflow count={} limit={}",
+                outcome.drained, MAX_SCENE_DIFF_DRAIN
             );
             if let Some(io_runtime) = self.io_runtime.as_ref() {
                 io_runtime.wake_loop();
@@ -150,16 +162,6 @@ where
         }
 
         false
-    }
-
-    /// Applies one deferred redraw deadline.
-    pub(crate) fn on_deadline(&mut self) {
-        self.throttle.finish_deadline();
-
-        if self.throttle.is_dirty() {
-            let interval = self.record_redraw();
-            self.request_io_redraw(interval);
-        }
     }
 
     /// Shuts the runtime down during app exit.
@@ -174,7 +176,6 @@ where
         }
 
         self.shutting_down = true;
-        self.demo = None;
         self.renderer = None;
         self.window = None;
         self.window_id = None;
@@ -195,73 +196,87 @@ where
         renderer.frame();
     }
 
-    fn handle_resize(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
+    fn handle_resize(
+        &mut self,
+        size: PhysicalSize<u32>,
+        scale_factor: f32,
+        viewport_revision: u64,
+    ) {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        renderer.resize(size, scale_factor);
+        renderer.resize_surface(size, scale_factor);
+        self.view_state
+            .set_requested_viewport_revision(viewport_revision);
 
-        if let Some(demo) = self.demo.as_mut() {
-            demo.resize(logical_viewport(size, scale_factor));
-            demo.apply(renderer);
-        }
-
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
-    }
-
-    fn handle_io_event(&mut self, event: IoEvent) {
-        let event_type = event.kind();
-        match event {
-            IoEvent::MockTick { payload } => {
-                info!("io.event.recv type={} payload={:?}", event_type, payload);
+        if size.width > 0 && size.height > 0 {
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
             }
         }
     }
 
-    fn handle_redraw_after_wake(&mut self) {
-        if self.throttle.should_redraw_now() {
-            let interval = self.record_redraw();
-            self.request_io_redraw(interval);
-            return;
+    fn apply_scene_diff(&mut self, diff: SceneDiff) -> bool {
+        if diff.viewport_revision < self.view_state.requested_viewport_revision() {
+            return false;
         }
 
-        self.throttle.mark_dirty();
-        if self.throttle.pending_deadline() {
-            return;
+        let Some(renderer) = self.renderer.as_mut() else {
+            return false;
+        };
+        if diff.viewport_revision > self.view_state.applied_viewport_revision() {
+            self.view_state.clear_scene();
+        }
+        let patch_count = diff.atlas_patches.len();
+        if let Some(new_size) = diff.requested_atlas_size {
+            renderer.recreate_atlas(new_size);
+        }
+        if diff.clear_tessellation_cache {
+            renderer.clear_tessellation_cache();
+        }
+        for patch in &diff.atlas_patches {
+            renderer.write_atlas_patch(patch);
+        }
+        if let Some(block_order) = diff.block_order {
+            self.view_state.set_block_order(block_order);
         }
 
-        self.throttle.start_deadline();
-        self.schedule_deadline(self.throttle.deadline_delay());
-        info!("event.throttle.deferred");
+        let mut replaced_blocks = 0usize;
+        let mut removed_blocks = 0usize;
+        for op in diff.block_ops {
+            match op {
+                BlockOp::Replace { block_id, batch } => {
+                    self.view_state.replace_block(block_id, batch);
+                    replaced_blocks += 1;
+                }
+                BlockOp::Remove { block_id } => {
+                    self.view_state.remove_block(block_id);
+                    removed_blocks += 1;
+                }
+            }
+        }
+        self.view_state
+            .set_applied_viewport_revision(diff.viewport_revision);
+        info!(
+            "view.apply replaced_blocks={} removed_blocks={} atlas_patches={}",
+            replaced_blocks, removed_blocks, patch_count
+        );
+        true
     }
 
-    fn record_redraw(&mut self) -> Duration {
-        let interval = self
-            .throttle
-            .elapsed_since_last_redraw()
-            .unwrap_or_default();
-        self.throttle.record_redraw();
-        self.throttle.clear_dirty();
-        interval
-    }
+    fn rebuild_view_state(&mut self) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        renderer.rebuild_from_view_state(&self.view_state);
 
-    fn request_io_redraw(&mut self, interval: Duration) {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-
-        window.request_redraw();
-        info!("event.throttle.redraw interval_ms={}", interval.as_millis());
-    }
-
-    fn schedule_deadline(&mut self, delay: Duration) {
-        let Some(io_runtime) = self.io_runtime.as_ref() else {
-            return;
-        };
-
-        io_runtime.schedule_deadline(delay);
+        let size = window.inner_size();
+        if size.width > 0 && size.height > 0 {
+            window.request_redraw();
+        }
     }
 
     fn shutdown_runtime(&mut self) {

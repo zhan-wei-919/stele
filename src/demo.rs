@@ -1,11 +1,7 @@
-//! Demo document assembly used by the desktop entry point.
+//! Demo document assembly reused by the async store bootstrap.
 
 use crate::font::FreeTypeRasterizer;
-use crate::layout::{
-    bridge_layout, layout_document, prepare_document, Block, BlockRect, Document, PreparedBlock,
-    Span, TextStyle,
-};
-use crate::renderer::Renderer;
+use crate::layout::{prepare_document, Block, BlockRect, Document, PreparedBlock, Span, TextStyle};
 
 const PAGE_BG: [f32; 4] = [0.05, 0.08, 0.12, 1.0];
 const PANEL_ACCENT_BG: [f32; 4] = [0.16, 0.21, 0.28, 0.98];
@@ -15,33 +11,35 @@ const TEXT_ACCENT: [f32; 4] = [0.94, 0.69, 0.28, 1.0];
 const INLINE_BG: [f32; 4] = [0.19, 0.25, 0.33, 0.95];
 const OVERLAY_INLINE_BG: [f32; 4] = [0.24, 0.30, 0.38, 0.92];
 
-/// Prepared demo document reused across resize-driven relayouts.
-pub(crate) struct LayoutDemo {
+/// Prepared demo document reused by the async store.
+pub(crate) struct DemoState {
     document: Document,
     prepared_blocks: Vec<PreparedBlock>,
 }
 
-impl LayoutDemo {
-    /// Builds the demo document once and keeps prepared blocks for relayout.
-    pub(crate) fn new(rasterizer: &FreeTypeRasterizer, viewport: [f32; 2]) -> Self {
-        let document = build_demo_document(rasterizer.default_font_id(), viewport);
-        let prepared_blocks = prepare_document(&document, rasterizer);
-        Self {
-            document,
-            prepared_blocks,
-        }
+impl DemoState {
+    /// Splits the prepared demo state into document and prepare cache ownership.
+    pub(crate) fn into_parts(self) -> (Document, Vec<PreparedBlock>) {
+        (self.document, self.prepared_blocks)
     }
+}
 
-    /// Recomputes block rectangles without rerunning prepare.
-    pub(crate) fn resize(&mut self, viewport: [f32; 2]) {
-        apply_demo_block_rects(&mut self.document, viewport);
+/// Builds the demo model once and precomputes its prepare-stage cache.
+pub(crate) fn build_demo_state(
+    rasterizer: &FreeTypeRasterizer,
+    logical_viewport: [f32; 2],
+) -> DemoState {
+    let document = build_demo_document(rasterizer.default_font_id(), logical_viewport);
+    let prepared_blocks = prepare_document(&document, rasterizer);
+    DemoState {
+        document,
+        prepared_blocks,
     }
+}
 
-    /// Bridges the current document layout into renderer ops.
-    pub(crate) fn apply(&self, renderer: &mut Renderer<'static>) {
-        let layout_blocks = layout_document(&self.document, &self.prepared_blocks);
-        renderer.apply_ops(bridge_layout(&layout_blocks));
-    }
+/// Updates demo block geometry for a new logical viewport.
+pub(crate) fn resize_demo_document(document: &mut Document, logical_viewport: [f32; 2]) {
+    apply_demo_block_rects(document, logical_viewport);
 }
 
 #[derive(Clone, Copy)]

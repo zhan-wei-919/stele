@@ -7,4 +7,4 @@ mod place_lines;
 mod types;
 
 pub(crate) use document::layout_document;
-pub(crate) use types::{LayoutBlock, LayoutLine, LayoutRun};
+pub(crate) use types::LayoutBlock;

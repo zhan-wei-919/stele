@@ -3,7 +3,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use crate::renderer::draw_list::PathCmd;
+use crate::draw_list::PathCmd;
 
 use super::convert::tessellate_path;
 use crate::renderer::instance::PathVertex;

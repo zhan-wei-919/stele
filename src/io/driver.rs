@@ -1,73 +1,72 @@
-//! Testable IO drain state machine shared by the app and integration tests.
+//! Testable SceneDiff drain state machine shared by the app and integration tests.
 
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::IoEvent;
+use super::SceneDiff;
 
-/// Result of handling one IO wake-up on the winit thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of draining pending SceneDiffs on one wake.
+#[derive(Debug, Clone)]
 pub(crate) struct WakeOutcome {
-    pub drained: usize,
-    pub events: Vec<IoEvent>,
-    pub wake_again: bool,
-    pub disconnected: bool,
+    pub(crate) drained: usize,
+    pub(crate) diffs: Vec<SceneDiff>,
+    pub(crate) wake_again: bool,
+    pub(crate) disconnected: bool,
 }
 
-/// Owns IO drain state that can be driven from winit user events.
-pub(crate) struct IoEventDriver {
-    io_event_rx: UnboundedReceiver<IoEvent>,
-    overflow_io_event: Option<IoEvent>,
+/// Owns winit-side drain state for queued SceneDiff payloads.
+pub(crate) struct SceneDiffDriver {
+    scene_diff_rx: UnboundedReceiver<SceneDiff>,
+    overflow_scene_diff: Option<SceneDiff>,
 }
 
-impl IoEventDriver {
-    /// Creates a new driver around the winit-side IO receiver.
-    pub(crate) fn new(io_event_rx: UnboundedReceiver<IoEvent>) -> Self {
+impl SceneDiffDriver {
+    /// Creates a new driver around the winit-side SceneDiff receiver.
+    pub(crate) fn new(scene_diff_rx: UnboundedReceiver<SceneDiff>) -> Self {
         Self {
-            io_event_rx,
-            overflow_io_event: None,
+            scene_diff_rx,
+            overflow_scene_diff: None,
         }
     }
 
-    /// Drains pending IO and reports what the app should do next.
+    /// Drains pending SceneDiffs and reports what the app should do next.
     pub(crate) fn on_wake(&mut self, limit: usize) -> WakeOutcome {
-        let (events, wake_again, disconnected) = self.drain_events(limit);
-        let drained = events.len();
+        let (diffs, wake_again, disconnected) = self.drain_diffs(limit);
+        let drained = diffs.len();
 
         WakeOutcome {
             drained,
-            events,
+            diffs,
             wake_again,
             disconnected,
         }
     }
 
-    fn drain_events(&mut self, limit: usize) -> (Vec<IoEvent>, bool, bool) {
-        debug_assert!(limit > 0, "drain limit must be positive");
+    fn drain_diffs(&mut self, limit: usize) -> (Vec<SceneDiff>, bool, bool) {
+        debug_assert!(limit > 0, "drain limit must stay positive");
 
-        let mut events = Vec::new();
+        let mut diffs = Vec::new();
         let mut disconnected = false;
-
-        if let Some(event) = self.overflow_io_event.take() {
-            events.push(event);
+        if let Some(diff) = self.overflow_scene_diff.take() {
+            diffs.push(diff);
         }
 
-        while events.len() < limit {
-            match self.io_event_rx.try_recv() {
-                Ok(event) => events.push(event),
+        while diffs.len() < limit {
+            match self.scene_diff_rx.try_recv() {
+                Ok(diff) => diffs.push(diff),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     disconnected = true;
-                    return (events, false, disconnected);
+                    return (diffs, false, disconnected);
                 }
             }
         }
 
         let mut wake_again = false;
-        if events.len() == limit {
-            match self.io_event_rx.try_recv() {
-                Ok(event) => {
-                    self.overflow_io_event = Some(event);
+        if diffs.len() == limit {
+            match self.scene_diff_rx.try_recv() {
+                Ok(diff) => {
+                    self.overflow_scene_diff = Some(diff);
                     wake_again = true;
                 }
                 Err(TryRecvError::Empty) => {}
@@ -75,6 +74,6 @@ impl IoEventDriver {
             }
         }
 
-        (events, wake_again, disconnected)
+        (diffs, wake_again, disconnected)
     }
 }

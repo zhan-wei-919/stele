@@ -1,6 +1,6 @@
 //! Decoration emission for one laid-out text run.
 
-use crate::renderer::{PositionedGlyph, RectCmd, RenderLayer};
+use crate::draw_list::{PositionedGlyph, RectCmd, RenderLayer};
 
 use super::super::prepare::PreparedGlyph;
 use super::types::LayoutRun;
@@ -95,8 +95,8 @@ fn decoration_thickness(font_size: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::draw_list::{PositionedGlyph, RenderLayer};
     use crate::font::SubpixelBin;
-    use crate::renderer::{PositionedGlyph, RenderLayer};
 
     use super::super::super::line_break::BreakOpportunity;
     use super::super::super::prepare::PreparedGlyph;

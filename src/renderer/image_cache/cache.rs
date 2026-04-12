@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::renderer::draw_list::ImageData;
+use crate::draw_list::ImageData;
 use crate::renderer::pipeline::create_image_bind_group;
 
 /// A GPU image resource stored in the cache.
@@ -10,7 +10,9 @@ pub struct CachedImage {
     // The render loop only looks up the bind group directly, but the cache entry
     // must keep owning the texture and view so the GPU resources stay alive for
     // as long as the bind group can be referenced by a later frame.
+    #[allow(dead_code)]
     pub(crate) texture: wgpu::Texture,
+    #[allow(dead_code)]
     pub(crate) view: wgpu::TextureView,
     pub(crate) bind_group: wgpu::BindGroup,
     pub(crate) last_used: u64,
@@ -35,6 +37,10 @@ impl ImageCache {
     }
 
     /// Uploads an image on first use and refreshes its liveness every rebuild.
+    ///
+    /// The current scene bridge does not emit image payloads yet, but this cache
+    /// is kept in-tree because the renderer and tests already rely on its resource model.
+    #[allow(dead_code)]
     pub fn get_or_insert(
         &mut self,
         data: &ImageData,

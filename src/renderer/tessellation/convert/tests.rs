@@ -2,7 +2,7 @@
 
 use super::fringe::build_boundary_fringe;
 use super::tessellate::tessellate_path;
-use crate::renderer::draw_list::{LineCap, LineJoin, PathCmd, PathVerb, RenderLayer, StrokeStyle};
+use crate::draw_list::{LineCap, LineJoin, PathCmd, PathVerb, RenderLayer, StrokeStyle};
 use crate::renderer::instance::PathVertex;
 
 #[test]

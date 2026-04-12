@@ -1,15 +1,19 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use winit::dpi::PhysicalSize;
 use winit::window::WindowId;
 
 use super::*;
+use crate::draw_list::ClipRect;
 use crate::event::handlers::ViewportUpdate;
+use crate::io::{Action, AtlasPatch, BlockOp, SceneDiff, SceneDiffDriver};
+use crate::renderer::atlas::AtlasRegion;
+use crate::scene::{BlockId, BlockSceneBatch, ViewState};
 
 #[derive(Debug, Default)]
 struct RuntimeLog {
-    scheduled_deadlines: Vec<Duration>,
     wake_count: usize,
     shutdown_timeouts: Vec<Duration>,
 }
@@ -20,14 +24,6 @@ struct FakeRuntime {
 }
 
 impl AppRuntime for FakeRuntime {
-    fn schedule_deadline(&self, delay: Duration) {
-        self.log
-            .lock()
-            .expect("runtime log must lock")
-            .scheduled_deadlines
-            .push(delay);
-    }
-
     fn wake_loop(&self) {
         self.log.lock().expect("runtime log must lock").wake_count += 1;
     }
@@ -98,6 +94,10 @@ impl AppWindow for FakeWindow {
 struct RendererLog {
     frame_calls: usize,
     resize_calls: Vec<(PhysicalSize<u32>, f32)>,
+    recreate_atlas_sizes: Vec<u32>,
+    clear_tessellation_calls: usize,
+    atlas_patch_writes: usize,
+    rebuild_block_counts: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -110,79 +110,80 @@ impl AppRenderer for FakeRenderer {
         self.log.lock().expect("renderer log must lock").frame_calls += 1;
     }
 
-    fn resize(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
+    fn resize_surface(&mut self, size: PhysicalSize<u32>, scale_factor: f32) {
         self.log
             .lock()
             .expect("renderer log must lock")
             .resize_calls
             .push((size, scale_factor));
     }
-}
 
-#[derive(Debug, Default)]
-struct DemoLog {
-    resized_viewports: Vec<[f32; 2]>,
-    apply_calls: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-struct FakeDemo {
-    log: Arc<Mutex<DemoLog>>,
-}
-
-impl AppDemo<FakeRenderer> for FakeDemo {
-    fn resize(&mut self, viewport: [f32; 2]) {
+    fn recreate_atlas(&mut self, size: u32) {
         self.log
             .lock()
-            .expect("demo log must lock")
-            .resized_viewports
-            .push(viewport);
+            .expect("renderer log must lock")
+            .recreate_atlas_sizes
+            .push(size);
     }
 
-    fn apply(&self, _renderer: &mut FakeRenderer) {
-        self.log.lock().expect("demo log must lock").apply_calls += 1;
+    fn clear_tessellation_cache(&mut self) {
+        self.log
+            .lock()
+            .expect("renderer log must lock")
+            .clear_tessellation_calls += 1;
+    }
+
+    fn write_atlas_patch(&mut self, _patch: &AtlasPatch) {
+        self.log
+            .lock()
+            .expect("renderer log must lock")
+            .atlas_patch_writes += 1;
+    }
+
+    fn rebuild_from_view_state(&mut self, view_state: &ViewState) {
+        self.log
+            .lock()
+            .expect("renderer log must lock")
+            .rebuild_block_counts
+            .push(view_state.blocks().len());
     }
 }
 
-type TestApp = SteleApp<FakeRuntime, FakeWindow, FakeRenderer, FakeDemo>;
+type TestApp = SteleApp<FakeRuntime, FakeWindow, FakeRenderer>;
 
 struct Harness {
     app: TestApp,
     runtime_log: Arc<Mutex<RuntimeLog>>,
     window_log: Arc<Mutex<WindowLog>>,
     renderer_log: Arc<Mutex<RendererLog>>,
-    demo_log: Arc<Mutex<DemoLog>>,
-    io_event_tx: mpsc::UnboundedSender<IoEvent>,
+    scene_diff_tx: mpsc::UnboundedSender<SceneDiff>,
 }
 
 fn build_app() -> Harness {
     let runtime = FakeRuntime::default();
     let runtime_log = runtime.log.clone();
-    let (command_tx, _command_rx) = mpsc::unbounded_channel();
-    let router = EventRouter::new(command_tx);
-    let (io_event_tx, io_event_rx) = mpsc::unbounded_channel();
-    let io_driver = IoEventDriver::new(io_event_rx);
-    let mut app = SteleApp::new(runtime, io_driver, router, REDRAW_MIN_INTERVAL);
+    let (action_tx, _action_rx) = mpsc::unbounded_channel::<Action>();
+    let router = EventRouter::new(action_tx);
+    let (scene_diff_tx, scene_diff_rx) = mpsc::unbounded_channel();
+    let scene_diff_driver = SceneDiffDriver::new(scene_diff_rx);
+    let mut app = SteleApp::new(runtime, scene_diff_driver, router);
 
     let (window, window_log) = FakeWindow::new();
     let renderer = FakeRenderer::default();
     let renderer_log = renderer.log.clone();
-    let demo = FakeDemo::default();
-    let demo_log = demo.log.clone();
-    app.attach_surface(window, renderer, demo);
+    app.attach_surface(window, renderer);
 
     Harness {
         app,
         runtime_log,
         window_log,
         renderer_log,
-        demo_log,
-        io_event_tx,
+        scene_diff_tx,
     }
 }
 
 #[test]
-fn resize_action_updates_renderer_demo_and_redraw() {
+fn resize_action_updates_renderer_and_requests_redraw() {
     let mut harness = build_app();
 
     let should_exit = harness
@@ -190,6 +191,7 @@ fn resize_action_updates_renderer_demo_and_redraw() {
         .apply_route_action(RouteAction::Resize(ViewportUpdate {
             size: PhysicalSize::new(800, 600),
             scale_factor: 2.0,
+            viewport_revision: 1,
         }));
 
     assert!(!should_exit);
@@ -203,28 +205,14 @@ fn resize_action_updates_renderer_demo_and_redraw() {
     );
     assert_eq!(
         harness
-            .demo_log
-            .lock()
-            .expect("demo log must lock")
-            .resized_viewports,
-        vec![[400.0, 300.0]]
-    );
-    assert_eq!(
-        harness
-            .demo_log
-            .lock()
-            .expect("demo log must lock")
-            .apply_calls,
-        1
-    );
-    assert_eq!(
-        harness
             .window_log
             .lock()
             .expect("window log must lock")
             .redraw_requests,
         1
     );
+    assert_eq!(harness.app.view_state.requested_viewport_revision(), 1);
+    assert_eq!(harness.app.view_state.applied_viewport_revision(), 0);
 }
 
 #[test]
@@ -262,7 +250,6 @@ fn close_action_clears_state_and_shuts_down_runtime() {
     assert!(harness.app.shutting_down);
     assert!(harness.app.window.is_none());
     assert!(harness.app.renderer.is_none());
-    assert!(harness.app.demo.is_none());
     assert!(harness.app.router.is_none());
     assert!(harness.app.io_runtime.is_none());
     assert_eq!(
@@ -276,18 +263,43 @@ fn close_action_clears_state_and_shuts_down_runtime() {
 }
 
 #[test]
-fn first_wake_requests_immediate_redraw() {
+fn wake_applies_scene_diff_and_rebuilds_once() {
     let mut harness = build_app();
+    let patch = AtlasPatch::new(
+        AtlasRegion {
+            uv_min: [0.0, 0.0],
+            uv_max: [0.25, 0.25],
+            size: [8.0, 8.0],
+            bearing: [0.0, 0.0],
+        },
+        vec![255; 8 * 8 * 4],
+    );
+    let mut diff = SceneDiff::new(1);
+    diff.requested_atlas_size = Some(4096);
+    diff.clear_tessellation_cache = true;
+    diff.atlas_patches.push(patch);
+    diff.block_order = Some(vec![BlockId::new(7)]);
+    diff.block_ops.push(BlockOp::Replace {
+        block_id: BlockId::new(7),
+        batch: sample_batch(99),
+    });
     harness
-        .io_event_tx
-        .send(IoEvent::MockTick {
-            payload: String::from("alpha"),
-        })
-        .expect("send must succeed");
+        .scene_diff_tx
+        .send(diff)
+        .expect("scene diff send must succeed");
 
     let should_exit = harness.app.on_wake();
 
     assert!(!should_exit);
+    assert_eq!(harness.app.view_state.blocks().len(), 1);
+    assert_eq!(harness.app.view_state.block_order(), &[BlockId::new(7)]);
+    assert_eq!(harness.app.view_state.applied_viewport_revision(), 1);
+    let renderer_log = harness.renderer_log.lock().expect("renderer log must lock");
+    assert_eq!(renderer_log.recreate_atlas_sizes, vec![4096]);
+    assert_eq!(renderer_log.clear_tessellation_calls, 1);
+    assert_eq!(renderer_log.atlas_patch_writes, 1);
+    assert_eq!(renderer_log.rebuild_block_counts, vec![1]);
+    drop(renderer_log);
     assert_eq!(
         harness
             .window_log
@@ -296,49 +308,159 @@ fn first_wake_requests_immediate_redraw() {
             .redraw_requests,
         1
     );
+}
+
+#[test]
+fn stale_scene_diff_is_dropped_before_apply() {
+    let mut harness = build_app();
+    harness.app.view_state.set_requested_viewport_revision(2);
+    harness
+        .scene_diff_tx
+        .send(SceneDiff::new(1))
+        .expect("scene diff send must succeed");
+
+    let should_exit = harness.app.on_wake();
+
+    assert!(!should_exit);
+    assert!(harness.app.view_state.blocks().is_empty());
     assert!(harness
-        .runtime_log
+        .renderer_log
         .lock()
-        .expect("runtime log must lock")
-        .scheduled_deadlines
+        .expect("renderer log must lock")
+        .rebuild_block_counts
         .is_empty());
 }
 
 #[test]
-fn second_wake_inside_interval_defers_until_deadline() {
+fn stale_scene_diff_is_dropped_after_newer_resize_arrives() {
     let mut harness = build_app();
     harness
-        .io_event_tx
-        .send(IoEvent::MockTick {
-            payload: String::from("first"),
-        })
-        .expect("first send must succeed");
-    assert!(!harness.app.on_wake());
+        .app
+        .apply_route_action(RouteAction::Resize(ViewportUpdate {
+            size: PhysicalSize::new(1024, 768),
+            scale_factor: 2.0,
+            viewport_revision: 2,
+        }));
 
+    let mut stale_diff = SceneDiff::new(1);
+    stale_diff.block_order = Some(vec![BlockId::new(7)]);
+    stale_diff.block_ops.push(BlockOp::Replace {
+        block_id: BlockId::new(7),
+        batch: sample_batch(99),
+    });
     harness
-        .io_event_tx
-        .send(IoEvent::MockTick {
-            payload: String::from("second"),
-        })
-        .expect("second send must succeed");
-    assert!(!harness.app.on_wake());
+        .scene_diff_tx
+        .send(stale_diff)
+        .expect("scene diff send must succeed");
 
-    let scheduled = harness
-        .runtime_log
+    let should_exit = harness.app.on_wake();
+
+    assert!(!should_exit);
+    assert!(harness.app.view_state.blocks().is_empty());
+    assert_eq!(harness.app.view_state.applied_viewport_revision(), 0);
+    assert_eq!(harness.app.view_state.requested_viewport_revision(), 2);
+    assert!(harness
+        .renderer_log
         .lock()
-        .expect("runtime log must lock")
-        .scheduled_deadlines
-        .clone();
-    assert_eq!(scheduled.len(), 1);
-    assert!(scheduled[0] <= REDRAW_MIN_INTERVAL);
+        .expect("renderer log must lock")
+        .rebuild_block_counts
+        .is_empty());
+}
 
-    harness.app.on_deadline();
+#[test]
+fn newer_viewport_revision_clears_old_scene_before_applying_full_diff() {
+    let mut harness = build_app();
+    harness.app.view_state.set_block_order(vec![BlockId::new(7)]);
+    harness
+        .app
+        .view_state
+        .replace_block(BlockId::new(7), sample_batch(99));
+    harness.app.view_state.set_applied_viewport_revision(1);
+    harness.app.view_state.set_requested_viewport_revision(2);
+
+    let mut diff = SceneDiff::new(2);
+    diff.block_order = Some(Vec::new());
+    harness
+        .scene_diff_tx
+        .send(diff)
+        .expect("scene diff send must succeed");
+
+    let should_exit = harness.app.on_wake();
+
+    assert!(!should_exit);
+    assert!(harness.app.view_state.blocks().is_empty());
+    assert!(harness.app.view_state.block_order().is_empty());
+    assert_eq!(harness.app.view_state.applied_viewport_revision(), 2);
+    assert_eq!(harness.app.view_state.requested_viewport_revision(), 2);
     assert_eq!(
         harness
-            .window_log
+            .renderer_log
             .lock()
-            .expect("window log must lock")
-            .redraw_requests,
-        2
+            .expect("renderer log must lock")
+            .rebuild_block_counts,
+        vec![0]
     );
+}
+
+#[test]
+fn stale_bootstrap_diff_can_be_skipped_before_newer_full_diff_is_applied() {
+    let mut harness = build_app();
+    harness
+        .app
+        .apply_route_action(RouteAction::Resize(ViewportUpdate {
+            size: PhysicalSize::new(1024, 768),
+            scale_factor: 2.0,
+            viewport_revision: 1,
+        }));
+
+    let mut stale_diff = SceneDiff::new(0);
+    stale_diff.block_order = Some(vec![BlockId::new(3)]);
+    stale_diff.block_ops.push(BlockOp::Replace {
+        block_id: BlockId::new(3),
+        batch: sample_batch(30),
+    });
+    harness
+        .scene_diff_tx
+        .send(stale_diff)
+        .expect("stale scene diff send must succeed");
+
+    let mut full_diff = SceneDiff::new(1);
+    full_diff.block_order = Some(vec![BlockId::new(9)]);
+    full_diff.block_ops.push(BlockOp::Replace {
+        block_id: BlockId::new(9),
+        batch: sample_batch(90),
+    });
+    harness
+        .scene_diff_tx
+        .send(full_diff)
+        .expect("full scene diff send must succeed");
+
+    let should_exit = harness.app.on_wake();
+
+    assert!(!should_exit);
+    assert_eq!(harness.app.view_state.block_order(), &[BlockId::new(9)]);
+    assert_eq!(harness.app.view_state.blocks().len(), 1);
+    assert!(harness.app.view_state.blocks().contains_key(&BlockId::new(9)));
+    assert_eq!(harness.app.view_state.requested_viewport_revision(), 1);
+    assert_eq!(harness.app.view_state.applied_viewport_revision(), 1);
+    assert_eq!(
+        harness
+            .renderer_log
+            .lock()
+            .expect("renderer log must lock")
+            .rebuild_block_counts,
+        vec![1]
+    );
+}
+
+fn sample_batch(fingerprint: u64) -> BlockSceneBatch {
+    BlockSceneBatch::new(
+        ClipRect::new(0.0, 0.0, 100.0, 80.0),
+        0,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        fingerprint,
+    )
 }

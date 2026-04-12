@@ -1,21 +1,24 @@
 #[path = "event/app.rs"]
 mod app;
 mod demo;
+mod draw_list;
 mod event;
 mod font;
 mod io;
 mod layout;
 mod renderer;
+mod scene;
+mod store;
 
 use std::error::Error;
 use std::sync::Arc;
 
-use self::app::{logical_viewport, DesktopApp, REDRAW_MIN_INTERVAL};
-use self::demo::LayoutDemo;
+use self::app::DesktopApp;
 use self::event::EventRouter;
 use self::font::{FontDiscovery, FreeTypeRasterizer};
-use self::io::{run_mock_io_task, IoEventDriver, IoRuntime, WakeEvent};
+use self::io::{IoRuntime, SceneDiffDriver, WakeEvent};
 use self::renderer::Renderer;
+use self::store::{run_store, Store, ViewportState};
 use pollster::block_on;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -32,11 +35,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<WakeEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let (mut io_runtime, io_handle) = IoRuntime::new(proxy)?;
-    let io_driver = IoEventDriver::new(io_runtime.take_io_event_rx());
-    let router = EventRouter::new(io_runtime.app_command_tx());
-    io_runtime.spawn_task(run_mock_io_task(io_handle));
+    let scene_diff_driver = SceneDiffDriver::new(io_runtime.take_scene_diff_rx());
+    let router = EventRouter::new(io_runtime.action_tx());
 
-    let mut app = DesktopApp::new(io_runtime, io_driver, router, REDRAW_MIN_INTERVAL);
+    let mut app = DesktopApp::new(io_runtime, scene_diff_driver, router);
+    app.install_store_bootstrap(Box::new(move |runtime: &IoRuntime, size, scale_factor| {
+        let rasterizer = build_rasterizer();
+        let store = Store::new(
+            rasterizer,
+            ViewportState::new(size.width, size.height, scale_factor, 0),
+        );
+        runtime.spawn_task(run_store(store, io_handle));
+    }));
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -55,11 +65,10 @@ impl ApplicationHandler<WakeEvent> for DesktopApp {
                 .create_window(attributes)
                 .expect("failed to create window"),
         );
-        let viewport = logical_viewport(window.inner_size(), window.scale_factor() as f32);
-        let (renderer, demo) = block_on(init_renderer(window.clone(), viewport));
+        let renderer = block_on(init_renderer(window.clone()));
 
-        self.attach_surface(window.clone(), renderer, demo);
-        window.request_redraw();
+        self.attach_surface(window.clone(), renderer);
+        self.bootstrap_store(window.inner_size(), window.scale_factor() as f32);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
@@ -73,7 +82,6 @@ impl ApplicationHandler<WakeEvent> for DesktopApp {
                     event_loop.exit();
                 }
             }
-            WakeEvent::DeadlineExpired => self.on_deadline(),
         }
     }
 
@@ -97,7 +105,7 @@ impl ApplicationHandler<WakeEvent> for DesktopApp {
     }
 }
 
-async fn init_renderer(window: Arc<Window>, viewport: [f32; 2]) -> (Renderer<'static>, LayoutDemo) {
+async fn init_renderer(window: Arc<Window>) -> Renderer<'static> {
     let instance = wgpu::Instance::default();
     let surface = instance
         .create_surface(window.clone())
@@ -109,19 +117,13 @@ async fn init_renderer(window: Arc<Window>, viewport: [f32; 2]) -> (Renderer<'st
     let surface_config = surface
         .get_default_config(&adapter, size.width.max(1), size.height.max(1))
         .expect("surface is not supported by the selected adapter");
-    let rasterizer = build_rasterizer();
-    let demo = LayoutDemo::new(&rasterizer, viewport);
-
-    let mut renderer = Renderer::new(
+    Renderer::new(
         device,
         queue,
         surface,
         surface_config,
-        rasterizer,
         window.scale_factor() as f32,
-    );
-    demo.apply(&mut renderer);
-    (renderer, demo)
+    )
 }
 
 async fn request_adapter(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> wgpu::Adapter {

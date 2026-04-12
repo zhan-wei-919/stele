@@ -5,10 +5,7 @@ use std::mem::size_of;
 use bytemuck::cast_slice;
 use winit::dpi::PhysicalSize;
 
-use crate::font::FreeTypeRasterizer;
-
-use super::super::atlas::GlyphAtlas;
-use super::super::draw_list::{ClipRect, DrawList, DrawListOp, RenderLayer};
+use super::super::atlas::{AtlasRegion, GlyphAtlas};
 use super::super::image_cache::ImageCache;
 use super::super::instance::{GlyphInstance, ImageInstance, PathVertex, RectInstance};
 use super::super::pipeline::{
@@ -19,9 +16,10 @@ use super::super::pipeline::{
 use super::super::tessellation::TessellationCache;
 use super::bind_group::{create_glyph_bind_group, create_glyph_bind_group_layout};
 use super::buffer::{create_index_buffer, create_vertex_buffer};
+use crate::draw_list::ClipRect;
+use crate::scene::ViewState;
 
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const LAYER_COUNT: usize = RenderLayer::ALL.len();
 
 /// A contiguous slice inside one GPU buffer for a single primitive family.
 #[derive(Clone, Copy, Debug, Default)]
@@ -49,30 +47,30 @@ pub(super) struct ImageBatch {
     pub range: PrimitiveRange,
 }
 
-/// GPU ranges and image batches belonging to one block submission unit.
+/// GPU ranges belonging to one block submission unit.
 #[derive(Clone, Debug)]
 pub(super) struct BlockGpuBatch {
-    pub clip_rect: Option<ClipRect>,
-    pub rect_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
-    pub path_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
-    pub glyph_ranges_by_layer: [PrimitiveRange; LAYER_COUNT],
-    pub image_batches_by_layer: [Vec<ImageBatch>; LAYER_COUNT],
+    pub clip_rect: ClipRect,
+    pub rect_range: PrimitiveRange,
+    pub path_range: PrimitiveRange,
+    pub glyph_range: PrimitiveRange,
+    pub image_batches: Vec<ImageBatch>,
 }
 
 impl BlockGpuBatch {
     /// Creates an empty GPU batch placeholder for one block.
-    pub fn empty(clip_rect: Option<ClipRect>) -> Self {
+    pub fn empty(clip_rect: ClipRect) -> Self {
         Self {
             clip_rect,
-            rect_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
-            path_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
-            glyph_ranges_by_layer: [PrimitiveRange::default(); LAYER_COUNT],
-            image_batches_by_layer: std::array::from_fn(|_| Vec::new()),
+            rect_range: PrimitiveRange::default(),
+            path_range: PrimitiveRange::default(),
+            glyph_range: PrimitiveRange::default(),
+            image_batches: Vec::new(),
         }
     }
 }
 
-/// GPU-backed renderer that turns draw-list updates into wgpu command buffers.
+/// GPU-backed renderer that turns view-owned scene updates into wgpu command buffers.
 pub struct Renderer<'window> {
     pub(super) device: wgpu::Device,
     pub(super) queue: wgpu::Queue,
@@ -82,20 +80,21 @@ pub struct Renderer<'window> {
     pub(super) path_pipeline: wgpu::RenderPipeline,
     pub(super) image_pipeline: wgpu::RenderPipeline,
     pub(super) atlas: GlyphAtlas,
-    pub(super) draw_list: DrawList,
     pub(super) instance_buffer: wgpu::Buffer,
     pub(super) path_vertex_buffer: wgpu::Buffer,
     pub(super) path_index_buffer: wgpu::Buffer,
     pub(super) image_instance_buffer: wgpu::Buffer,
-    pub(super) dirty: bool,
     pub(super) surface_config: wgpu::SurfaceConfiguration,
-    pub(super) rasterizer: FreeTypeRasterizer,
     pub(super) scale_factor: f32,
     pub(super) screen_bind_group: wgpu::BindGroup,
     pub(super) screen_buffer: wgpu::Buffer,
     pub(super) glyph_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) glyph_bind_group: wgpu::BindGroup,
+    // Kept until SceneDiff images are plumbed through rebuild and upload.
+    #[allow(dead_code)]
     pub(super) image_bind_group_layout: wgpu::BindGroupLayout,
+    // Kept until SceneDiff images are plumbed through rebuild and upload.
+    #[allow(dead_code)]
     pub(super) image_sampler: wgpu::Sampler,
     pub(super) rect_buffer: wgpu::Buffer,
     pub(super) tessellation_cache: TessellationCache,
@@ -120,7 +119,6 @@ impl<'window> Renderer<'window> {
         queue: wgpu::Queue,
         surface: wgpu::Surface<'window>,
         mut surface_config: wgpu::SurfaceConfiguration,
-        rasterizer: FreeTypeRasterizer,
         scale_factor: f32,
     ) -> Self {
         surface_config.width = surface_config.width.max(1);
@@ -158,7 +156,6 @@ impl<'window> Renderer<'window> {
             path_pipeline,
             image_pipeline,
             atlas,
-            draw_list: DrawList::default(),
             instance_buffer: create_vertex_buffer::<GlyphInstance>(
                 &device,
                 1,
@@ -175,9 +172,7 @@ impl<'window> Renderer<'window> {
                 1,
                 "stele.image_instances",
             ),
-            dirty: false,
             surface_config,
-            rasterizer,
             scale_factor,
             screen_bind_group,
             screen_buffer,
@@ -202,15 +197,8 @@ impl<'window> Renderer<'window> {
         }
     }
 
-    /// Applies upstream draw-list mutations and marks GPU buffers dirty.
-    pub fn apply_ops(&mut self, ops: impl IntoIterator<Item = DrawListOp>) {
-        self.draw_list.apply_ops(ops);
-        self.dirty = true;
-    }
-
-    /// Updates surface and atlas state after a window resize or scale change.
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f32) {
-        let scale_factor_changed = self.scale_factor.to_bits() != scale_factor.to_bits();
+    /// Updates surface state after a window resize or scale change.
+    pub fn resize_surface(&mut self, new_size: PhysicalSize<u32>, scale_factor: f32) {
         self.scale_factor = scale_factor;
         self.surface_config.width = new_size.width;
         self.surface_config.height = new_size.height;
@@ -226,14 +214,27 @@ impl<'window> Renderer<'window> {
                 new_size.height.max(1),
             )]),
         );
+    }
 
-        if scale_factor_changed {
-            self.atlas = GlyphAtlas::new(&self.device, self.atlas.current_size, ATLAS_FORMAT);
-            self.tessellation_cache.clear();
-            self.refresh_glyph_bind_group();
-        }
+    /// Recreates the physical atlas texture and refreshes its bind group.
+    pub fn recreate_atlas(&mut self, size: u32) {
+        self.atlas = GlyphAtlas::new(&self.device, size, ATLAS_FORMAT);
+        self.refresh_glyph_bind_group();
+    }
 
-        self.dirty = true;
+    /// Clears the path tessellation cache after a scale-sensitive invalidation.
+    pub fn clear_tessellation_cache(&mut self) {
+        self.tessellation_cache.clear();
+    }
+
+    /// Writes one RGBA atlas patch into the physical atlas texture.
+    pub fn write_atlas_patch(&mut self, region: AtlasRegion, pixels: &[u8]) {
+        self.atlas.write_region(&self.queue, region, pixels);
+    }
+
+    /// Rebuilds GPU buffers and block ranges from the latest view-owned scene cache.
+    pub fn rebuild_from_view_state(&mut self, view_state: &ViewState) {
+        self.rebuild_gpu_data(view_state);
     }
 
     pub(super) fn reconfigure_surface(&self) {

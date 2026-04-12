@@ -1,7 +1,7 @@
 //! Baseline placement and run construction over broken lines.
 
+use crate::draw_list::PositionedGlyph;
 use crate::font::SubpixelBin;
-use crate::renderer::PositionedGlyph;
 
 use super::super::document::BlockRect;
 use super::super::prepare::PreparedGlyph;
@@ -16,6 +16,8 @@ pub(super) struct ContentRect {
     x: f32,
     y: f32,
     width: f32,
+    // Kept so the padding clamp remains directly assertable in layout unit tests.
+    #[allow(dead_code)]
     height: f32,
 }
 
@@ -36,6 +38,7 @@ impl ContentRect {
     }
 
     /// Returns the available content height.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn height(self) -> f32 {
         self.height
     }

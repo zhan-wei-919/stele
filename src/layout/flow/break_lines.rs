@@ -119,11 +119,13 @@ mod tests {
         line_break::BreakOpportunity,
         prepare::{PreparedBlock, PreparedGlyph, PreparedItem},
     };
+    use crate::scene::BlockId;
 
     #[test]
     fn greedy_break_wraps_at_allowed_boundaries() {
         let prepared = PreparedBlock {
-            block_index: 0,
+            block_id: BlockId::new(0),
+            document_index: 0,
             items: vec![
                 PreparedItem::Glyph(glyph(0, 1, 10.0, 14.0, BreakOpportunity::Forbidden)),
                 PreparedItem::Glyph(glyph(0, 2, 10.0, 14.0, BreakOpportunity::Forbidden)),
