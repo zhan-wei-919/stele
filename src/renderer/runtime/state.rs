@@ -22,7 +22,7 @@ use crate::scene::ViewState;
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// A contiguous slice inside one GPU buffer for a single primitive family.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct PrimitiveRange {
     pub start: u32,
     pub count: u32,
@@ -41,7 +41,7 @@ impl PrimitiveRange {
 }
 
 /// A contiguous image instance batch that can reuse one bind group.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ImageBatch {
     pub content_hash: u64,
     pub range: PrimitiveRange,
@@ -90,11 +90,7 @@ pub struct Renderer<'window> {
     pub(super) screen_buffer: wgpu::Buffer,
     pub(super) glyph_bind_group_layout: wgpu::BindGroupLayout,
     pub(super) glyph_bind_group: wgpu::BindGroup,
-    // Kept until SceneDiff images are plumbed through rebuild and upload.
-    #[allow(dead_code)]
     pub(super) image_bind_group_layout: wgpu::BindGroupLayout,
-    // Kept until SceneDiff images are plumbed through rebuild and upload.
-    #[allow(dead_code)]
     pub(super) image_sampler: wgpu::Sampler,
     pub(super) rect_buffer: wgpu::Buffer,
     pub(super) tessellation_cache: TessellationCache,

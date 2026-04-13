@@ -1,7 +1,12 @@
 //! Demo document assembly reused by the async store bootstrap.
 
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+use crate::draw_list::{ImageCmd, ImageData, RenderLayer};
 use crate::font::FreeTypeRasterizer;
 use crate::layout::{prepare_document, Block, BlockRect, Document, PreparedBlock, Span, TextStyle};
+use crate::scene::BlockId;
 
 const PAGE_BG: [f32; 4] = [0.05, 0.08, 0.12, 1.0];
 const PANEL_ACCENT_BG: [f32; 4] = [0.16, 0.21, 0.28, 0.98];
@@ -10,6 +15,7 @@ const TEXT_MUTED: [f32; 4] = [0.75, 0.80, 0.86, 1.0];
 const TEXT_ACCENT: [f32; 4] = [0.94, 0.69, 0.28, 1.0];
 const INLINE_BG: [f32; 4] = [0.19, 0.25, 0.33, 0.95];
 const OVERLAY_INLINE_BG: [f32; 4] = [0.24, 0.30, 0.38, 0.92];
+const SMOKE_IMAGE_SIZE_PX: u32 = 64;
 
 /// Prepared demo document reused by the async store.
 pub(crate) struct DemoState {
@@ -40,6 +46,33 @@ pub(crate) fn build_demo_state(
 /// Updates demo block geometry for a new logical viewport.
 pub(crate) fn resize_demo_document(document: &mut Document, logical_viewport: [f32; 2]) {
     apply_demo_block_rects(document, logical_viewport);
+}
+
+/// Returns demo-owned image commands keyed by an existing block id.
+pub(crate) fn demo_block_images(document: &Document) -> HashMap<BlockId, Vec<ImageCmd>> {
+    let Some(root_block) = document.block(0) else {
+        return HashMap::new();
+    };
+
+    let rect = root_block.rect();
+    let smoke_size = (rect.width().min(rect.height()) * 0.18)
+        .clamp(72.0, 128.0)
+        .min(rect.width() - 32.0)
+        .min(rect.height() - 32.0);
+    if smoke_size <= 0.0 {
+        return HashMap::new();
+    }
+
+    let x = (rect.x() + rect.width() - smoke_size - 40.0).max(rect.x() + 16.0);
+    let y = (rect.y() + 40.0).min(rect.y() + rect.height() - smoke_size - 16.0);
+    let image = ImageCmd::new(
+        [x, y.max(rect.y() + 16.0)],
+        [smoke_size, smoke_size],
+        demo_smoke_image_data(),
+        RenderLayer::Foreground,
+    );
+
+    HashMap::from([(root_block.id(), vec![image])])
 }
 
 #[derive(Clone, Copy)]
@@ -170,4 +203,55 @@ fn set_block_background(
 
 fn unit_rect(label: &str) -> BlockRect {
     BlockRect::new(0.0, 0.0, 1.0, 1.0).unwrap_or_else(|_| panic!("{label} must be valid"))
+}
+
+fn demo_smoke_image_data() -> Arc<ImageData> {
+    static DEMO_SMOKE_IMAGE: OnceLock<Arc<ImageData>> = OnceLock::new();
+
+    DEMO_SMOKE_IMAGE
+        .get_or_init(|| {
+            Arc::new(ImageData::new(
+                build_demo_smoke_rgba(),
+                SMOKE_IMAGE_SIZE_PX,
+                SMOKE_IMAGE_SIZE_PX,
+            ))
+        })
+        .clone()
+}
+
+fn build_demo_smoke_rgba() -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((SMOKE_IMAGE_SIZE_PX * SMOKE_IMAGE_SIZE_PX * 4) as usize);
+    let max = (SMOKE_IMAGE_SIZE_PX - 1) as f32;
+
+    for y in 0..SMOKE_IMAGE_SIZE_PX {
+        for x in 0..SMOKE_IMAGE_SIZE_PX {
+            let fx = x as f32 / max;
+            let fy = y as f32 / max;
+            let checker = ((x / 8) + (y / 8)) % 2 == 0;
+            let border =
+                x < 3 || y < 3 || x >= SMOKE_IMAGE_SIZE_PX - 3 || y >= SMOKE_IMAGE_SIZE_PX - 3;
+
+            let (r, g, b, a) = if border {
+                (255, 245, 230, 255)
+            } else if checker {
+                (
+                    (60.0 + fx * 150.0) as u8,
+                    (120.0 + fy * 90.0) as u8,
+                    220,
+                    255,
+                )
+            } else {
+                (
+                    240,
+                    (90.0 + fx * 100.0) as u8,
+                    (80.0 + fy * 120.0) as u8,
+                    255,
+                )
+            };
+
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+
+    rgba
 }

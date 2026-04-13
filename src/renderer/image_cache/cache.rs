@@ -5,17 +5,20 @@ use std::collections::HashMap;
 use crate::draw_list::ImageData;
 use crate::renderer::pipeline::create_image_bind_group;
 
+enum CachedImageResources {
+    Live {
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+        bind_group: wgpu::BindGroup,
+    },
+    #[cfg(test)]
+    Stub,
+}
+
 /// A GPU image resource stored in the cache.
 pub struct CachedImage {
-    // The render loop only looks up the bind group directly, but the cache entry
-    // must keep owning the texture and view so the GPU resources stay alive for
-    // as long as the bind group can be referenced by a later frame.
-    #[allow(dead_code)]
-    pub(crate) texture: wgpu::Texture,
-    #[allow(dead_code)]
-    pub(crate) view: wgpu::TextureView,
-    pub(crate) bind_group: wgpu::BindGroup,
     pub(crate) last_used: u64,
+    resources: CachedImageResources,
 }
 
 /// Deduplicates uploaded textures across frames using content hashes.
@@ -36,11 +39,16 @@ impl ImageCache {
         self.entries.get(&content_hash)
     }
 
+    /// Refreshes a cached image liveness from the frame path without rebuilding it.
+    pub fn touch(&mut self, content_hash: u64) -> bool {
+        let Some(entry) = self.entries.get_mut(&content_hash) else {
+            return false;
+        };
+        entry.last_used = self.generation;
+        true
+    }
+
     /// Uploads an image on first use and refreshes its liveness every rebuild.
-    ///
-    /// The current scene bridge does not emit image payloads yet, but this cache
-    /// is kept in-tree because the renderer and tests already rely on its resource model.
-    #[allow(dead_code)]
     pub fn get_or_insert(
         &mut self,
         data: &ImageData,
@@ -95,12 +103,7 @@ impl ImageCache {
             create_image_bind_group(device, bind_group_layout, screen_buffer, &view, sampler);
         self.entries.insert(
             content_hash,
-            CachedImage {
-                texture,
-                view,
-                bind_group,
-                last_used: self.generation,
-            },
+            CachedImage::live(texture, view, bind_group, self.generation),
         );
         true
     }
@@ -110,5 +113,54 @@ impl ImageCache {
         let min_generation = self.generation.saturating_sub(max_age);
         self.entries
             .retain(|_, entry| entry.last_used >= min_generation);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_stub(&mut self, content_hash: u64, last_used: u64) {
+        self.entries
+            .insert(content_hash, CachedImage::stub(last_used));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_used(&self, content_hash: u64) -> Option<u64> {
+        self.entries.get(&content_hash).map(|entry| entry.last_used)
+    }
+}
+
+impl CachedImage {
+    fn live(
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+        bind_group: wgpu::BindGroup,
+        last_used: u64,
+    ) -> Self {
+        Self {
+            last_used,
+            resources: CachedImageResources::Live {
+                texture,
+                view,
+                bind_group,
+            },
+        }
+    }
+
+    pub(crate) fn bind_group(&self) -> Option<&wgpu::BindGroup> {
+        match &self.resources {
+            CachedImageResources::Live {
+                texture: _texture,
+                view: _view,
+                bind_group,
+            } => Some(bind_group),
+            #[cfg(test)]
+            CachedImageResources::Stub => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn stub(last_used: u64) -> Self {
+        Self {
+            last_used,
+            resources: CachedImageResources::Stub,
+        }
     }
 }

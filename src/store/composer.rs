@@ -6,10 +6,11 @@ use std::hash::{Hash, Hasher};
 
 use bytemuck::cast_slice;
 
-use crate::draw_list::{ClipRect, PathCmd};
+use crate::demo::demo_block_images;
+use crate::draw_list::{ClipRect, ImageCmd, PathCmd};
 use crate::font::FreeTypeRasterizer;
 use crate::layout::layout_document;
-use crate::renderer::instance::{GlyphInstance, ImageInstance, RectInstance};
+use crate::renderer::instance::{GlyphInstance, RectInstance};
 use crate::scene::{BlockId, BlockSceneBatch};
 
 use super::logical_atlas::LogicalAtlas;
@@ -29,14 +30,19 @@ impl Composer {
         rasterizer: &FreeTypeRasterizer,
         viewport: ViewportState,
     ) -> SceneSnapshot {
+        let mut block_images = demo_block_images(model.document());
         let mut entries = layout_document(model.document(), layout_cache.prepared_blocks())
             .into_iter()
             .map(|layout_block| {
+                let images = block_images
+                    .remove(&layout_block.block_id)
+                    .unwrap_or_default();
                 compose_block(
                     layout_block,
                     logical_atlas,
                     rasterizer,
                     viewport.scale_factor,
+                    images,
                 )
             })
             .collect::<Vec<_>>();
@@ -71,6 +77,7 @@ fn compose_block(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    images: Vec<ImageCmd>,
 ) -> (BlockId, BlockSceneBatch) {
     let mut glyphs = Vec::new();
     let mut rects = Vec::new();
@@ -106,7 +113,6 @@ fn compose_block(
         layout_block.clip_rect.height(),
     );
     let paths = Vec::<PathCmd>::new();
-    let images = Vec::<ImageInstance>::new();
     let fingerprint = fingerprint_batch(
         clip_rect,
         layout_block.z_order,
@@ -137,7 +143,7 @@ fn fingerprint_batch(
     glyphs: &[GlyphInstance],
     rects: &[RectInstance],
     paths: &[PathCmd],
-    images: &[ImageInstance],
+    images: &[ImageCmd],
     atlas_generation: Option<u64>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -146,7 +152,7 @@ fn fingerprint_batch(
     hash_pod_slice(&mut hasher, glyphs);
     hash_pod_slice(&mut hasher, rects);
     hash_paths(&mut hasher, paths);
-    hash_pod_slice(&mut hasher, images);
+    hash_images(&mut hasher, images);
     atlas_generation.hash(&mut hasher);
     hasher.finish()
 }
@@ -173,10 +179,26 @@ fn hash_paths(hasher: &mut impl Hasher, paths: &[PathCmd]) {
     }
 }
 
+fn hash_images(hasher: &mut impl Hasher, images: &[ImageCmd]) {
+    images.len().hash(hasher);
+    for image in images {
+        let [x, y] = image.pos();
+        let [width, height] = image.size();
+        x.to_bits().hash(hasher);
+        y.to_bits().hash(hasher);
+        width.to_bits().hash(hasher);
+        height.to_bits().hash(hasher);
+        image.data().content_hash().hash(hasher);
+        image.layer().hash(hasher);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::sort_entries_by_z_order;
-    use crate::draw_list::ClipRect;
+    use crate::draw_list::{ClipRect, ImageCmd, ImageData, RenderLayer};
     use crate::scene::{BlockId, BlockSceneBatch};
 
     #[test]
@@ -205,6 +227,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fingerprint_changes_when_image_content_changes() {
+        let before = super::fingerprint_batch(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            &[],
+            &[],
+            &[],
+            &[sample_image(
+                [10.0, 12.0],
+                [16.0, 18.0],
+                vec![255, 0, 0, 255],
+                RenderLayer::Foreground,
+            )],
+            None,
+        );
+        let after = super::fingerprint_batch(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            &[],
+            &[],
+            &[],
+            &[sample_image(
+                [10.0, 12.0],
+                [16.0, 18.0],
+                vec![0, 255, 0, 255],
+                RenderLayer::Foreground,
+            )],
+            None,
+        );
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn fingerprint_changes_when_image_geometry_or_layer_changes() {
+        let baseline = super::fingerprint_batch(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            &[],
+            &[],
+            &[],
+            &[sample_image(
+                [10.0, 12.0],
+                [16.0, 18.0],
+                vec![255, 0, 0, 255],
+                RenderLayer::Foreground,
+            )],
+            None,
+        );
+        let moved = super::fingerprint_batch(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            &[],
+            &[],
+            &[],
+            &[sample_image(
+                [11.0, 12.0],
+                [16.0, 18.0],
+                vec![255, 0, 0, 255],
+                RenderLayer::Foreground,
+            )],
+            None,
+        );
+        let relayered = super::fingerprint_batch(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            &[],
+            &[],
+            &[],
+            &[sample_image(
+                [10.0, 12.0],
+                [16.0, 18.0],
+                vec![255, 0, 0, 255],
+                RenderLayer::Overlay,
+            )],
+            None,
+        );
+
+        assert_ne!(baseline, moved);
+        assert_ne!(baseline, relayered);
+    }
+
     fn sample_batch(z_order: u32) -> BlockSceneBatch {
         BlockSceneBatch::new(
             ClipRect::new(0.0, 0.0, 100.0, 80.0),
@@ -215,5 +320,9 @@ mod tests {
             Vec::new(),
             z_order as u64,
         )
+    }
+
+    fn sample_image(pos: [f32; 2], size: [f32; 2], rgba: Vec<u8>, layer: RenderLayer) -> ImageCmd {
+        ImageCmd::new(pos, size, Arc::new(ImageData::new(rgba, 1, 1)), layer)
     }
 }

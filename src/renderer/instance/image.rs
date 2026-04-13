@@ -1,8 +1,4 @@
 //! Image instance encoding shared between the CPU draw list and WGSL shaders.
-//
-// The renderer-side image bridge is staged behind store/view payload plumbing.
-// Keep the instance conversion here so the GPU ABI stays tested and ready.
-#![allow(dead_code)]
 
 use bytemuck::{Pod, Zeroable};
 

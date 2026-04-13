@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use crate::draw_list::{ClipRect, PathCmd};
+use crate::draw_list::{ClipRect, ImageCmd, PathCmd};
 use crate::io::SceneFrame;
-use crate::renderer::instance::{GlyphInstance, ImageInstance, RectInstance};
+use crate::renderer::instance::{GlyphInstance, RectInstance};
 
 /// Stable block identifier used across snapshots and scene frames.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -25,7 +25,7 @@ pub(crate) struct BlockSceneBatch {
     glyphs: Vec<GlyphInstance>,
     rects: Vec<RectInstance>,
     paths: Vec<PathCmd>,
-    images: Vec<ImageInstance>,
+    images: Vec<ImageCmd>,
     fingerprint: u64,
 }
 
@@ -37,7 +37,7 @@ impl BlockSceneBatch {
         glyphs: Vec<GlyphInstance>,
         rects: Vec<RectInstance>,
         paths: Vec<PathCmd>,
-        images: Vec<ImageInstance>,
+        images: Vec<ImageCmd>,
         fingerprint: u64,
     ) -> Self {
         Self {
@@ -76,8 +76,8 @@ impl BlockSceneBatch {
         &self.paths
     }
 
-    /// Returns the image instances ready for upload.
-    pub(crate) fn images(&self) -> &[ImageInstance] {
+    /// Returns the image commands that still need renderer-side upload and batching.
+    pub(crate) fn images(&self) -> &[ImageCmd] {
         &self.images
     }
 

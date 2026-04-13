@@ -2,14 +2,15 @@
 
 use std::mem::size_of;
 
-use log::{info, warn};
+use log::info;
 
 use super::super::state::{BlockGpuBatch, ImageBatch, PrimitiveRange, Renderer};
+use crate::draw_list::ImageCmd;
 use crate::renderer::instance::{GlyphInstance, ImageInstance, PathVertex, RectInstance};
 use crate::scene::{BlockSceneBatch, ViewState};
 
-const CACHE_EVICTION_AGE: u64 = 120;
 const MAX_PATH_VERTEX_BYTES: usize = 1024 * 1024;
+const TESSELLATION_CACHE_EVICTION_AGE: u64 = 120;
 
 impl<'window> Renderer<'window> {
     pub(in crate::renderer::runtime) fn rebuild_gpu_data(&mut self, view_state: &ViewState) {
@@ -39,8 +40,8 @@ impl<'window> Renderer<'window> {
             &image_batches,
         );
         self.refresh_glyph_bind_group();
-        self.tessellation_cache.evict_stale(CACHE_EVICTION_AGE);
-        self.image_cache.evict_stale(CACHE_EVICTION_AGE);
+        self.tessellation_cache
+            .evict_stale(TESSELLATION_CACHE_EVICTION_AGE);
 
         if tessellation_count > 0 {
             info!("path.tessellate count={tessellation_count}");
@@ -129,19 +130,26 @@ impl<'window> Renderer<'window> {
     }
 
     fn build_image_instances(
-        &self,
+        &mut self,
         ordered_blocks: &[&BlockSceneBatch],
     ) -> (Vec<ImageInstance>, Vec<Vec<ImageBatch>>) {
-        let mut warned = false;
-        let mut batches = Vec::with_capacity(ordered_blocks.len());
-        for block in ordered_blocks {
-            if !block.images().is_empty() && !warned {
-                warn!("renderer.image.unsupported reason=missing_payload_in_scene_batch");
-                warned = true;
-            }
-            batches.push(Vec::new());
-        }
-        (Vec::new(), batches)
+        let device = &self.device;
+        let queue = &self.queue;
+        let bind_group_layout = &self.image_bind_group_layout;
+        let screen_buffer = &self.screen_buffer;
+        let sampler = &self.image_sampler;
+        let image_cache = &mut self.image_cache;
+
+        collect_image_instances(ordered_blocks, self.scale_factor, |image| {
+            image_cache.get_or_insert(
+                image.data(),
+                device,
+                queue,
+                bind_group_layout,
+                screen_buffer,
+                sampler,
+            );
+        })
     }
 }
 
@@ -182,4 +190,145 @@ fn append_cached_path_mesh(
     let vertex_offset = path_vertices.len() as u32;
     path_vertices.extend_from_slice(&mesh.vertices);
     path_indices.extend(mesh.indices.iter().map(|index| index + vertex_offset));
+}
+
+fn collect_image_instances<F>(
+    ordered_blocks: &[&BlockSceneBatch],
+    scale_factor: f32,
+    mut cache_image: F,
+) -> (Vec<ImageInstance>, Vec<Vec<ImageBatch>>)
+where
+    F: FnMut(&ImageCmd),
+{
+    let mut image_instances = Vec::new();
+    let mut block_batches = Vec::with_capacity(ordered_blocks.len());
+
+    for block in ordered_blocks {
+        let mut image_batches = Vec::new();
+        let mut active_hash = None;
+        let mut active_start = 0u32;
+
+        for image in block.images() {
+            let content_hash = image.data().content_hash();
+            let instance_index = image_instances.len() as u32;
+            cache_image(image);
+            image_instances.push(ImageInstance::from_image(image, scale_factor));
+
+            match active_hash {
+                Some(current_hash) if current_hash == content_hash => {}
+                Some(current_hash) => {
+                    image_batches.push(ImageBatch {
+                        content_hash: current_hash,
+                        range: PrimitiveRange::new(active_start, instance_index - active_start),
+                    });
+                    active_hash = Some(content_hash);
+                    active_start = instance_index;
+                }
+                None => {
+                    active_hash = Some(content_hash);
+                    active_start = instance_index;
+                }
+            }
+        }
+
+        if let Some(content_hash) = active_hash {
+            let end = image_instances.len() as u32;
+            image_batches.push(ImageBatch {
+                content_hash,
+                range: PrimitiveRange::new(active_start, end - active_start),
+            });
+        }
+
+        block_batches.push(image_batches);
+    }
+
+    (image_instances, block_batches)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use super::collect_image_instances;
+    use crate::draw_list::{ClipRect, ImageCmd, ImageData, RenderLayer};
+    use crate::renderer::runtime::state::PrimitiveRange;
+    use crate::scene::BlockSceneBatch;
+
+    #[test]
+    fn image_rebuild_generates_instances_and_contiguous_batches() {
+        let block_a = sample_block(vec![
+            sample_image([1.0, 2.0], [3.0, 4.0], [255, 0, 0, 255]),
+            sample_image([5.0, 6.0], [7.0, 8.0], [255, 0, 0, 255]),
+            sample_image([9.0, 10.0], [11.0, 12.0], [0, 255, 0, 255]),
+        ]);
+        let block_b = sample_block(vec![sample_image(
+            [13.0, 14.0],
+            [15.0, 16.0],
+            [255, 0, 0, 255],
+        )]);
+        let ordered_blocks = vec![&block_a, &block_b];
+
+        let (instances, batches) = collect_image_instances(&ordered_blocks, 2.0, |_| {});
+
+        assert_eq!(instances.len(), 4);
+        assert_eq!(instances[0].pos, [2.0, 4.0]);
+        assert_eq!(instances[0].size, [6.0, 8.0]);
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[0][0].range, PrimitiveRange::new(0, 2),);
+        assert_eq!(batches[0][1].range, PrimitiveRange::new(2, 1),);
+        assert_eq!(batches[0][0].content_hash, batches[1][0].content_hash);
+        assert_eq!(
+            batches[1],
+            vec![super::ImageBatch {
+                content_hash: batches[0][0].content_hash,
+                range: PrimitiveRange::new(3, 1),
+            }]
+        );
+    }
+
+    #[test]
+    fn duplicate_content_hashes_only_create_one_cache_entry() {
+        let block_a = sample_block(vec![
+            sample_image([1.0, 2.0], [3.0, 4.0], [255, 0, 0, 255]),
+            sample_image([5.0, 6.0], [7.0, 8.0], [255, 0, 0, 255]),
+        ]);
+        let block_b = sample_block(vec![sample_image(
+            [9.0, 10.0],
+            [11.0, 12.0],
+            [255, 0, 0, 255],
+        )]);
+        let ordered_blocks = vec![&block_a, &block_b];
+        let mut seen_hashes = HashSet::new();
+        let mut created = 0usize;
+
+        collect_image_instances(&ordered_blocks, 1.0, |image| {
+            if seen_hashes.insert(image.data().content_hash()) {
+                created += 1;
+            }
+        });
+
+        assert_eq!(created, 1);
+    }
+
+    fn sample_block(images: Vec<ImageCmd>) -> BlockSceneBatch {
+        BlockSceneBatch::new(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            images,
+            0,
+        )
+    }
+
+    fn sample_image(pos: [f32; 2], size: [f32; 2], rgba: [u8; 4]) -> ImageCmd {
+        ImageCmd::new(
+            pos,
+            size,
+            Arc::new(ImageData::new(rgba.to_vec(), 1, 1)),
+            RenderLayer::Foreground,
+        )
+    }
 }
