@@ -83,7 +83,8 @@ impl Store {
             ReduceOutcome::Shutdown => false,
             ReduceOutcome::Continue => {
                 if scale_changed {
-                    self.logical_atlas.reset_for_scale(self.viewport.scale_factor);
+                    self.logical_atlas
+                        .reset_for_scale(self.viewport.scale_factor);
                 }
                 self.recompute_snapshot(pending_scene_mode, scale_changed);
                 true
@@ -91,11 +92,7 @@ impl Store {
         }
     }
 
-    fn recompute_snapshot(
-        &mut self,
-        mode: PendingSceneMode,
-        clear_tessellation_cache: bool,
-    ) {
+    fn recompute_snapshot(&mut self, mode: PendingSceneMode, clear_tessellation_cache: bool) {
         self.phase = StorePhase::Laying;
         let snapshot = self.compose_snapshot();
         self.pending_scene = Some(PendingScene {
@@ -136,7 +133,9 @@ impl Store {
 
         let payload = match pending_scene.mode {
             PendingSceneMode::ReplaceAll => replace_all_snapshot(&pending_scene.snapshot),
-            PendingSceneMode::Diff => diff_snapshots(&self.last_emitted_snapshot, &pending_scene.snapshot),
+            PendingSceneMode::Diff => {
+                diff_snapshots(&self.last_emitted_snapshot, &pending_scene.snapshot)
+            }
         };
         let mut scene_frame = SceneFrame::new(
             pending_scene.snapshot.viewport_revision,

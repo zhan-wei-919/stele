@@ -159,7 +159,6 @@ impl AtlasUpdate {
             patches: Vec::new(),
         }
     }
-
 }
 
 /// Unified async-to-view payload. Atlas and scene lifecycles are independent.

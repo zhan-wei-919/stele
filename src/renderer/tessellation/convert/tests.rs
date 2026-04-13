@@ -67,7 +67,10 @@ fn boundary_edge_collection_matches_expected_triangle_edges() {
     let edges = boundary_edges_for_test(&vertices, &indices);
 
     assert_eq!(
-        edges.into_iter().map(|edge| (edge.from, edge.to)).collect::<Vec<_>>(),
+        edges
+            .into_iter()
+            .map(|edge| (edge.from, edge.to))
+            .collect::<Vec<_>>(),
         vec![(0, 1), (1, 2), (2, 0)]
     );
 }

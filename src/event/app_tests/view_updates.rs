@@ -125,7 +125,10 @@ fn stale_scene_frame_is_dropped_after_newer_resize_arrives() {
 #[test]
 fn newer_viewport_revision_replace_all_clears_old_scene_before_apply() {
     let mut harness = build_app();
-    harness.app.view_state.set_block_order(vec![BlockId::new(7)]);
+    harness
+        .app
+        .view_state
+        .set_block_order(vec![BlockId::new(7)]);
     harness
         .app
         .view_state
@@ -211,7 +214,11 @@ fn scene_frame_waits_for_required_atlas_generation_before_apply() {
     assert!(!should_exit);
     assert_eq!(harness.app.view_state.block_order(), &[BlockId::new(9)]);
     assert_eq!(harness.app.view_state.blocks().len(), 1);
-    assert!(harness.app.view_state.blocks().contains_key(&BlockId::new(9)));
+    assert!(harness
+        .app
+        .view_state
+        .blocks()
+        .contains_key(&BlockId::new(9)));
     assert_eq!(harness.app.view_state.requested_viewport_revision(), 1);
     assert_eq!(harness.app.view_state.applied_viewport_revision(), 1);
     assert!(harness.app.view_state.pending_scene_frame().is_none());

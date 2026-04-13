@@ -30,7 +30,8 @@ where
         for patch in &update.patches {
             renderer.write_atlas_patch(patch);
         }
-        self.view_state.set_ready_atlas_generation(update.generation);
+        self.view_state
+            .set_ready_atlas_generation(update.generation);
     }
 
     /// Scene frames may outrun atlas uploads because atlas generation is no longer tied to
