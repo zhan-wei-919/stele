@@ -81,7 +81,11 @@ impl Store {
             .apply(&mut self.model, &mut self.viewport, &action)
         {
             ReduceOutcome::Shutdown => false,
-            ReduceOutcome::Continue => {
+            ReduceOutcome::NoChange => {
+                self.phase = StorePhase::Idle;
+                true
+            }
+            ReduceOutcome::Changed => {
                 if scale_changed {
                     self.logical_atlas
                         .reset_for_scale(self.viewport.scale_factor);

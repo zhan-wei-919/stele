@@ -1,5 +1,8 @@
 //! Shared action and view-update payloads crossing the winit/async boundary.
 
+use std::ops::{BitOr, BitOrAssign};
+use std::time::Instant;
+
 use crate::renderer::atlas::AtlasRegion;
 use crate::scene::{BlockId, BlockSceneBatch};
 
@@ -7,13 +10,6 @@ use crate::scene::{BlockId, BlockSceneBatch};
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum WakeEvent {
     Wake,
-}
-
-/// High-level button state independent of the windowing backend.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum ButtonState {
-    Pressed,
-    Released,
 }
 
 /// High-level mouse button independent of the windowing backend.
@@ -28,28 +24,158 @@ pub(crate) enum MouseButtonKind {
 }
 
 /// High-level scroll payload independent of the windowing backend.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum MouseScroll {
     LineDelta { x: f32, y: f32 },
     PixelDelta { x: f64, y: f64 },
 }
 
+/// Backend-agnostic keyboard modifiers snapshot.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct KeyModifiers(u8);
+
+#[allow(dead_code)]
+impl KeyModifiers {
+    pub(crate) const NONE: Self = Self(0);
+    pub(crate) const SHIFT: Self = Self(1 << 0);
+    pub(crate) const CONTROL: Self = Self(1 << 1);
+    pub(crate) const ALT: Self = Self(1 << 2);
+    pub(crate) const SUPER: Self = Self(1 << 3);
+
+    /// Returns whether no modifier bits are active.
+    pub(crate) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Returns whether all bits from `other` are active in this snapshot.
+    pub(crate) fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Returns whether the shift key is active in this snapshot.
+    pub(crate) fn shift(self) -> bool {
+        self.contains(Self::SHIFT)
+    }
+
+    /// Returns whether the control key is active in this snapshot.
+    pub(crate) fn control(self) -> bool {
+        self.contains(Self::CONTROL)
+    }
+
+    /// Returns whether the alt key is active in this snapshot.
+    pub(crate) fn alt(self) -> bool {
+        self.contains(Self::ALT)
+    }
+
+    /// Returns whether the super key is active in this snapshot.
+    pub(crate) fn super_key(self) -> bool {
+        self.contains(Self::SUPER)
+    }
+
+    /// Sets or clears one modifier bit.
+    pub(crate) fn set(&mut self, flag: Self, enabled: bool) {
+        if enabled {
+            self.0 |= flag.0;
+        } else {
+            self.0 &= !flag.0;
+        }
+    }
+}
+
+impl BitOr for KeyModifiers {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for KeyModifiers {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// Backend-agnostic keyboard event kind.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum KeyEventKind {
+    Press,
+    Release,
+    Repeat,
+}
+
+/// Backend-agnostic key code carried by keyboard input facts.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum KeyCode {
+    Character(String),
+    Enter,
+    Tab,
+    Escape,
+    Backspace,
+    Delete,
+    Insert,
+    Shift,
+    Control,
+    Alt,
+    Super,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    F(u8),
+    Unknown,
+}
+
+/// Backend-agnostic keyboard input fact.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct KeyEvent {
+    pub(crate) code: KeyCode,
+    pub(crate) text: Option<String>,
+    pub(crate) modifiers: KeyModifiers,
+    pub(crate) kind: KeyEventKind,
+}
+
+/// Backend-agnostic mouse input fact.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MouseEvent {
+    pub(crate) kind: MouseEventKind,
+    pub(crate) logical_position: Option<[f32; 2]>,
+    pub(crate) scroll_delta: Option<MouseScroll>,
+    pub(crate) modifiers: KeyModifiers,
+    pub(crate) event_time: Instant,
+}
+
+/// Backend-agnostic mouse event kind.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum MouseEventKind {
+    Down(MouseButtonKind),
+    Up(MouseButtonKind),
+    Drag(MouseButtonKind),
+    Moved,
+    ScrollUp,
+    ScrollDown,
+    ScrollLeft,
+    ScrollRight,
+}
+
+/// Typed input fact crossing the winit/async boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum InputEvent {
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+    CursorLeft,
+    FocusChanged { focused: bool },
+}
+
 /// Unified input action sent from winit into the async store.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Action {
-    KeyInput {
-        text: String,
-    },
-    MouseButton {
-        state: ButtonState,
-        button: MouseButtonKind,
-    },
-    MouseMove {
-        x: f64,
-        y: f64,
-    },
-    MouseScroll {
-        delta: MouseScroll,
+    Input {
+        event: InputEvent,
     },
     Resize {
         width: u32,
@@ -166,4 +292,22 @@ impl AtlasUpdate {
 pub(crate) enum ViewUpdate {
     Atlas(AtlasUpdate),
     Scene(SceneFrame),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KeyModifiers;
+
+    #[test]
+    fn key_modifiers_support_runtime_queries() {
+        let modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        assert!(!modifiers.is_empty());
+        assert!(modifiers.contains(KeyModifiers::CONTROL));
+        assert!(modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT));
+        assert!(modifiers.control());
+        assert!(modifiers.shift());
+        assert!(!modifiers.alt());
+        assert!(!modifiers.super_key());
+    }
 }

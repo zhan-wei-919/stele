@@ -8,7 +8,8 @@ use super::types::ViewportState;
 
 /// Result of applying one action to the store.
 pub(crate) enum ReduceOutcome {
-    Continue,
+    NoChange,
+    Changed,
     Shutdown,
 }
 
@@ -25,6 +26,7 @@ impl Reducer {
     ) -> ReduceOutcome {
         match action {
             Action::Shutdown => ReduceOutcome::Shutdown,
+            Action::Input { .. } => ReduceOutcome::NoChange,
             Action::Resize {
                 width,
                 height,
@@ -33,12 +35,8 @@ impl Reducer {
             } => {
                 *viewport = ViewportState::new(*width, *height, *scale_factor, *viewport_revision);
                 resize_demo_document(model.document_mut(), logical_viewport(*viewport));
-                ReduceOutcome::Continue
+                ReduceOutcome::Changed
             }
-            Action::KeyInput { .. }
-            | Action::MouseButton { .. }
-            | Action::MouseMove { .. }
-            | Action::MouseScroll { .. } => ReduceOutcome::Continue,
         }
     }
 }

@@ -2,9 +2,9 @@ use std::time::Instant;
 
 use super::Store;
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
-use crate::io::{Action, ViewUpdate};
+use crate::io::{Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ViewUpdate};
 use crate::renderer::subpixel::detect_subpixel_layout;
-use crate::store::ViewportState;
+use crate::store::{types::StorePhase, ViewportState};
 
 fn build_rasterizer_for_perf_test() -> FreeTypeRasterizer {
     let font_discovery = FontDiscovery::new().expect("failed to discover system fonts");
@@ -40,6 +40,29 @@ fn build_pending_updates_for_test(store: &mut Store) -> Vec<ViewUpdate> {
 
     store.last_emitted_snapshot = pending_scene.snapshot;
     updates
+}
+
+#[test]
+fn typed_input_actions_do_not_trigger_snapshot_recompute() {
+    let rasterizer = build_rasterizer_for_perf_test();
+    let mut store = Store::new(rasterizer, ViewportState::new(960, 640, 1.0, 0));
+
+    store.bootstrap();
+    let _ = build_pending_updates_for_test(&mut store);
+    assert!(store.pending_scene.is_none());
+
+    assert!(store.handle_action(Action::Input {
+        event: InputEvent::Key(KeyEvent {
+            code: KeyCode::Character(String::from("a")),
+            text: Some(String::from("a")),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+        }),
+    }));
+
+    assert!(store.pending_scene.is_none());
+    assert!(store.logical_atlas.take_pending_update().is_none());
+    assert_eq!(store.phase, StorePhase::Idle);
 }
 
 #[test]
