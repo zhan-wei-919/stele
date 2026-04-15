@@ -1,10 +1,14 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::Store;
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::io::{Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ViewUpdate};
+use crate::layout::{prepare_document, Block, BlockRect, Document};
 use crate::renderer::subpixel::detect_subpixel_layout;
-use crate::store::{types::StorePhase, ViewportState};
+use crate::store::{
+    types::StorePhase, BlockDrawCommands, Model, StoreBootstrap, StoreDelegate, ViewportState,
+};
 
 fn build_rasterizer_for_perf_test() -> FreeTypeRasterizer {
     let font_discovery = FontDiscovery::new().expect("failed to discover system fonts");
@@ -44,8 +48,7 @@ fn build_pending_updates_for_test(store: &mut Store) -> Vec<ViewUpdate> {
 
 #[test]
 fn typed_input_actions_do_not_trigger_snapshot_recompute() {
-    let rasterizer = build_rasterizer_for_perf_test();
-    let mut store = Store::new(rasterizer, ViewportState::new(960, 640, 1.0, 0));
+    let mut store = build_store_for_test();
 
     store.bootstrap();
     let _ = build_pending_updates_for_test(&mut store);
@@ -68,8 +71,7 @@ fn typed_input_actions_do_not_trigger_snapshot_recompute() {
 #[test]
 #[ignore = "manual perf smoke test"]
 fn reports_resize_recompute_and_diff_perf() {
-    let rasterizer = build_rasterizer_for_perf_test();
-    let mut store = Store::new(rasterizer, ViewportState::new(960, 640, 1.0, 0));
+    let mut store = build_store_for_test();
 
     store.bootstrap();
     let _ = build_pending_updates_for_test(&mut store);
@@ -137,4 +139,49 @@ fn reports_resize_recompute_and_diff_perf() {
         replace_all_block_count,
         diff_op_count,
     );
+}
+
+fn build_store_for_test() -> Store {
+    Store::new(
+        build_rasterizer_for_perf_test(),
+        ViewportState::new(960, 640, 1.0, 0),
+        Arc::new(TestStoreDelegate),
+    )
+}
+
+struct TestStoreDelegate;
+
+impl StoreDelegate for TestStoreDelegate {
+    fn bootstrap(
+        &self,
+        rasterizer: &FreeTypeRasterizer,
+        logical_viewport: [f32; 2],
+    ) -> StoreBootstrap {
+        let document = build_test_document(logical_viewport);
+        let prepared_blocks = prepare_document(&document, rasterizer);
+        StoreBootstrap::new(document, prepared_blocks, BlockDrawCommands::default())
+    }
+
+    fn resize(&self, model: &mut Model, logical_viewport: [f32; 2]) {
+        let rect = BlockRect::new(0.0, 0.0, logical_viewport[0], logical_viewport[1])
+            .expect("test viewport rect must be valid");
+        model
+            .document_mut()
+            .set_block_rect(0, rect)
+            .expect("test block must exist");
+        model.set_block_draw_commands(BlockDrawCommands::default());
+    }
+}
+
+fn build_test_document(logical_viewport: [f32; 2]) -> Document {
+    let block = Block::new(
+        BlockRect::new(0.0, 0.0, logical_viewport[0], logical_viewport[1])
+            .expect("test block rect must be valid"),
+        0.0,
+        None,
+        Vec::new(),
+        0,
+    )
+    .expect("test block must be valid");
+    Document::new(vec![block])
 }

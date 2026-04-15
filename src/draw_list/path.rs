@@ -8,8 +8,8 @@ use super::validation::color_is_valid;
 
 /// High-level path verbs that are later lowered into lyon path events.
 ///
-/// The current demo scene only emits rectangles, but the shared scene schema already
-/// needs the full verb set so future vector producers do not fork the draw-list API.
+/// The shared scene schema already needs the full verb set so future vector producers
+/// do not fork the draw-list API.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(crate) enum PathVerb {

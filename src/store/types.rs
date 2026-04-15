@@ -27,6 +27,18 @@ impl ViewportState {
             viewport_revision,
         }
     }
+
+    /// Returns the current viewport in logical layout units.
+    pub(crate) fn logical_size(self) -> [f32; 2] {
+        debug_assert!(
+            self.scale_factor > 0.0,
+            "viewport scale factor must stay positive"
+        );
+        [
+            self.width as f32 / self.scale_factor,
+            self.height as f32 / self.scale_factor,
+        ]
+    }
 }
 
 /// Store pipeline phase used for logs and debugging.

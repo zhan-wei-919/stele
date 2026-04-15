@@ -18,7 +18,7 @@ use self::event::EventRouter;
 use self::font::{FontDiscovery, FreeTypeRasterizer};
 use self::io::{IoRuntime, ViewUpdateDriver, WakeEvent};
 use self::renderer::Renderer;
-use self::store::{run_store, Store, ViewportState};
+use self::store::{run_store, ViewportState};
 use pollster::block_on;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = DesktopApp::new(io_runtime, view_update_driver, router);
     app.install_store_bootstrap(Box::new(move |runtime: &IoRuntime, size, scale_factor| {
         let rasterizer = build_rasterizer();
-        let store = Store::new(
+        let store = demo::build_store(
             rasterizer,
             ViewportState::new(size.width, size.height, scale_factor, 0),
         );

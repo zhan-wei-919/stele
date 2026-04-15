@@ -1,13 +1,15 @@
 //! Async store runtime loop that reduces actions, recomputes snapshots, and emits view updates.
 
+use std::sync::Arc;
+
 use log::info;
 use tokio::sync::mpsc::error::TryRecvError;
 
-use crate::demo::build_demo_state;
 use crate::font::FreeTypeRasterizer;
 use crate::io::{Action, IoHandle, SceneFrame, ViewUpdate};
 
 use super::composer::Composer;
+use super::delegate::StoreDelegate;
 use super::diff::{diff_snapshots, replace_all_snapshot};
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
@@ -37,15 +39,21 @@ pub(crate) struct Store {
     last_emitted_snapshot: SceneSnapshot,
     pending_scene: Option<PendingScene>,
     rasterizer: FreeTypeRasterizer,
+    delegate: Arc<dyn StoreDelegate>,
     reducer: Reducer,
     phase: StorePhase,
 }
 
 impl Store {
-    /// Builds the demo-backed store and prepares its initial model state.
-    pub(crate) fn new(rasterizer: FreeTypeRasterizer, viewport: ViewportState) -> Self {
-        let demo_state = build_demo_state(&rasterizer, super::reducer::logical_viewport(viewport));
-        let (model, layout_cache) = Model::from_demo_state(demo_state);
+    /// Builds the store from application-supplied model state and viewport hooks.
+    pub(crate) fn new(
+        rasterizer: FreeTypeRasterizer,
+        viewport: ViewportState,
+        delegate: Arc<dyn StoreDelegate>,
+    ) -> Self {
+        let (model, layout_cache) = delegate
+            .bootstrap(&rasterizer, viewport.logical_size())
+            .into_parts();
         Self {
             viewport,
             model,
@@ -55,6 +63,7 @@ impl Store {
             last_emitted_snapshot: SceneSnapshot::empty(viewport.viewport_revision),
             pending_scene: None,
             rasterizer,
+            delegate,
             reducer: Reducer,
             phase: StorePhase::Idle,
         }
@@ -76,10 +85,12 @@ impl Store {
             _ => PendingSceneMode::Diff,
         };
 
-        match self
-            .reducer
-            .apply(&mut self.model, &mut self.viewport, &action)
-        {
+        match self.reducer.apply(
+            &mut self.model,
+            &mut self.viewport,
+            &action,
+            self.delegate.as_ref(),
+        ) {
             ReduceOutcome::Shutdown => false,
             ReduceOutcome::NoChange => {
                 self.phase = StorePhase::Idle;

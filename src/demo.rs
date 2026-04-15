@@ -1,12 +1,16 @@
 //! Demo document assembly reused by the async store bootstrap.
 
 use std::collections::HashMap;
+use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
 
-use crate::draw_list::{ImageCmd, ImageData, RenderLayer};
+use crate::draw_list::{
+    ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, RenderLayer, StrokeStyle,
+};
 use crate::font::FreeTypeRasterizer;
-use crate::layout::{prepare_document, Block, BlockRect, Document, PreparedBlock, Span, TextStyle};
+use crate::layout::{prepare_document, Block, BlockRect, Document, Span, TextStyle};
 use crate::scene::BlockId;
+use crate::store::{BlockDrawCommands, Model, Store, StoreBootstrap, StoreDelegate, ViewportState};
 
 const PAGE_BG: [f32; 4] = [0.05, 0.08, 0.12, 1.0];
 const PANEL_ACCENT_BG: [f32; 4] = [0.16, 0.21, 0.28, 0.98];
@@ -16,40 +20,40 @@ const TEXT_ACCENT: [f32; 4] = [0.94, 0.69, 0.28, 1.0];
 const INLINE_BG: [f32; 4] = [0.19, 0.25, 0.33, 0.95];
 const OVERLAY_INLINE_BG: [f32; 4] = [0.24, 0.30, 0.38, 0.92];
 const SMOKE_IMAGE_SIZE_PX: u32 = 64;
+const STAR_LOGICAL_SIZE: f32 = 96.0;
+const STAR_MARGIN: f32 = 28.0;
+const STAR_FILL: [f32; 4] = [0.96, 0.73, 0.22, 0.92];
+const STAR_STROKE: [f32; 4] = [1.0, 0.94, 0.72, 1.0];
 
-/// Prepared demo document reused by the async store.
-pub(crate) struct DemoState {
-    document: Document,
-    prepared_blocks: Vec<PreparedBlock>,
+/// Demo-only store delegate that consumes the generic store boundary.
+pub(crate) struct DemoStoreDelegate;
+
+/// Builds a store instance backed by the demo document.
+pub(crate) fn build_store(rasterizer: FreeTypeRasterizer, viewport: ViewportState) -> Store {
+    Store::new(rasterizer, viewport, Arc::new(DemoStoreDelegate))
 }
 
-impl DemoState {
-    /// Splits the prepared demo state into document and prepare cache ownership.
-    pub(crate) fn into_parts(self) -> (Document, Vec<PreparedBlock>) {
-        (self.document, self.prepared_blocks)
+impl StoreDelegate for DemoStoreDelegate {
+    fn bootstrap(
+        &self,
+        rasterizer: &FreeTypeRasterizer,
+        logical_viewport: [f32; 2],
+    ) -> StoreBootstrap {
+        let document = build_demo_document(rasterizer.default_font_id(), logical_viewport);
+        let prepared_blocks = prepare_document(&document, rasterizer);
+        let block_draw_commands = build_demo_block_draw_commands(&document);
+        StoreBootstrap::new(document, prepared_blocks, block_draw_commands)
     }
-}
 
-/// Builds the demo model once and precomputes its prepare-stage cache.
-pub(crate) fn build_demo_state(
-    rasterizer: &FreeTypeRasterizer,
-    logical_viewport: [f32; 2],
-) -> DemoState {
-    let document = build_demo_document(rasterizer.default_font_id(), logical_viewport);
-    let prepared_blocks = prepare_document(&document, rasterizer);
-    DemoState {
-        document,
-        prepared_blocks,
+    fn resize(&self, model: &mut Model, logical_viewport: [f32; 2]) {
+        apply_demo_block_rects(model.document_mut(), logical_viewport);
+        let block_draw_commands = build_demo_block_draw_commands(model.document());
+        model.set_block_draw_commands(block_draw_commands);
     }
-}
-
-/// Updates demo block geometry for a new logical viewport.
-pub(crate) fn resize_demo_document(document: &mut Document, logical_viewport: [f32; 2]) {
-    apply_demo_block_rects(document, logical_viewport);
 }
 
 /// Returns demo-owned image commands keyed by an existing block id.
-pub(crate) fn demo_block_images(document: &Document) -> HashMap<BlockId, Vec<ImageCmd>> {
+fn demo_block_images(document: &Document) -> HashMap<BlockId, Vec<ImageCmd>> {
     let Some(root_block) = document.block(0) else {
         return HashMap::new();
     };
@@ -75,6 +79,29 @@ pub(crate) fn demo_block_images(document: &Document) -> HashMap<BlockId, Vec<Ima
     HashMap::from([(root_block.id(), vec![image])])
 }
 
+/// Returns demo-owned path commands keyed by an existing block id.
+fn demo_block_paths(document: &Document) -> HashMap<BlockId, Vec<PathCmd>> {
+    let Some(overlay_block) = document.block(2) else {
+        return HashMap::new();
+    };
+
+    let rect = overlay_block.rect();
+    let size = STAR_LOGICAL_SIZE.min(rect.width()).min(rect.height());
+    if size <= 0.0 {
+        return HashMap::new();
+    }
+
+    let outer_radius = size * 0.5;
+    let inner_radius = outer_radius * 0.46;
+    let center = [
+        (rect.x() + rect.width() - outer_radius - STAR_MARGIN).max(rect.x() + outer_radius),
+        (rect.y() + outer_radius + STAR_MARGIN).min(rect.y() + rect.height() - outer_radius),
+    ];
+    let star = build_star_path(center, outer_radius, inner_radius);
+
+    HashMap::from([(overlay_block.id(), vec![star])])
+}
+
 #[derive(Clone, Copy)]
 struct DemoStyles {
     title: TextStyle,
@@ -89,9 +116,14 @@ fn build_demo_document(font_id: u32, viewport: [f32; 2]) -> Document {
     let mut document = Document::new(vec![
         build_root_block(&styles),
         build_overlay_block(&styles),
+        build_path_overlay_block(),
     ]);
     apply_demo_block_rects(&mut document, viewport);
     document
+}
+
+fn build_demo_block_draw_commands(document: &Document) -> BlockDrawCommands {
+    BlockDrawCommands::new(demo_block_images(&document), demo_block_paths(&document))
 }
 
 fn build_demo_styles(font_id: u32) -> DemoStyles {
@@ -157,6 +189,17 @@ fn build_overlay_block(styles: &DemoStyles) -> Block {
     .expect("demo overlay block must be valid")
 }
 
+fn build_path_overlay_block() -> Block {
+    Block::new(
+        unit_rect("demo path overlay rect"),
+        0.0,
+        None,
+        Vec::new(),
+        2,
+    )
+    .expect("demo path overlay block must be valid")
+}
+
 fn apply_demo_block_rects(document: &mut Document, viewport: [f32; 2]) {
     let width = viewport[0].max(320.0);
     let height = viewport[1].max(240.0);
@@ -180,8 +223,15 @@ fn apply_demo_block_rects(document: &mut Document, viewport: [f32; 2]) {
             .expect("demo overlay rect must be valid"),
         "demo overlay",
     );
+    set_block_rect(
+        document,
+        2,
+        BlockRect::new(0.0, 0.0, width, height).expect("demo path overlay rect must be valid"),
+        "demo path overlay",
+    );
     set_block_background(document, 0, Some(PAGE_BG), "demo root");
     set_block_background(document, 1, Some(PANEL_ACCENT_BG), "demo overlay");
+    set_block_background(document, 2, None, "demo path overlay");
 }
 
 fn set_block_rect(document: &mut Document, block_index: usize, rect: BlockRect, label: &str) {
@@ -254,4 +304,38 @@ fn build_demo_smoke_rgba() -> Vec<u8> {
     }
 
     rgba
+}
+
+fn build_star_path(center: [f32; 2], outer_radius: f32, inner_radius: f32) -> PathCmd {
+    let mut verbs = Vec::with_capacity(11);
+    for point_index in 0..10 {
+        let angle = -PI * 0.5 + point_index as f32 * (PI / 5.0);
+        let radius = if point_index % 2 == 0 {
+            outer_radius
+        } else {
+            inner_radius
+        };
+        let point = [
+            center[0] + radius * angle.cos(),
+            center[1] + radius * angle.sin(),
+        ];
+        if point_index == 0 {
+            verbs.push(PathVerb::MoveTo { to: point });
+        } else {
+            verbs.push(PathVerb::LineTo { to: point });
+        }
+    }
+    verbs.push(PathVerb::Close);
+
+    PathCmd::new(
+        verbs,
+        Some(STAR_FILL),
+        Some(StrokeStyle::new(
+            STAR_STROKE,
+            2.0,
+            LineCap::Round,
+            LineJoin::Round,
+        )),
+        RenderLayer::Overlay,
+    )
 }

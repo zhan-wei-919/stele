@@ -6,7 +6,6 @@ use std::hash::{Hash, Hasher};
 
 use bytemuck::cast_slice;
 
-use crate::demo::demo_block_images;
 use crate::draw_list::{ClipRect, ImageCmd, PathCmd};
 use crate::font::FreeTypeRasterizer;
 use crate::layout::layout_document;
@@ -30,18 +29,27 @@ impl Composer {
         rasterizer: &FreeTypeRasterizer,
         viewport: ViewportState,
     ) -> SceneSnapshot {
-        let mut block_images = demo_block_images(model.document());
         let mut entries = layout_document(model.document(), layout_cache.prepared_blocks())
             .into_iter()
             .map(|layout_block| {
-                let images = block_images
-                    .remove(&layout_block.block_id)
+                let images = model
+                    .block_draw_commands()
+                    .images()
+                    .get(&layout_block.block_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let paths = model
+                    .block_draw_commands()
+                    .paths()
+                    .get(&layout_block.block_id)
+                    .cloned()
                     .unwrap_or_default();
                 compose_block(
                     layout_block,
                     logical_atlas,
                     rasterizer,
                     viewport.scale_factor,
+                    paths,
                     images,
                 )
             })
@@ -77,6 +85,7 @@ fn compose_block(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    paths: Vec<PathCmd>,
     images: Vec<ImageCmd>,
 ) -> (BlockId, BlockSceneBatch) {
     let mut glyphs = Vec::new();
@@ -112,7 +121,6 @@ fn compose_block(
         layout_block.clip_rect.width(),
         layout_block.clip_rect.height(),
     );
-    let paths = Vec::<PathCmd>::new();
     let fingerprint = fingerprint_batch(
         clip_rect,
         layout_block.z_order,
@@ -195,11 +203,23 @@ fn hash_images(hasher: &mut impl Hasher, images: &[ImageCmd]) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::sort_entries_by_z_order;
-    use crate::draw_list::{ClipRect, ImageCmd, ImageData, RenderLayer};
+    use super::Composer;
+    use crate::draw_list::{
+        ClipRect, ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, RenderLayer,
+        StrokeStyle,
+    };
+    use crate::font::{FontDiscovery, FreeTypeRasterizer};
+    use crate::layout::{Block, BlockRect, Document, PreparedBlock};
+    use crate::renderer::subpixel::detect_subpixel_layout;
     use crate::scene::{BlockId, BlockSceneBatch};
+    use crate::store::logical_atlas::LogicalAtlas;
+    use crate::store::{BlockDrawCommands, Model, ViewportState};
+
+    use super::super::model::LayoutCache;
 
     #[test]
     fn stable_z_order_sort_preserves_upstream_document_order_within_a_layer() {
@@ -310,6 +330,69 @@ mod tests {
         assert_ne!(baseline, relayered);
     }
 
+    #[test]
+    fn compose_snapshot_attaches_paths_to_block_batch() {
+        let clip_rect = BlockRect::new(0.0, 0.0, 120.0, 90.0).expect("rect must be valid");
+        let block = Block::new(clip_rect, 0.0, None, Vec::new(), 0).expect("block must be valid");
+        let document = Document::new(vec![block]);
+        let path = sample_path(18.0);
+        let model = Model::new(
+            document,
+            BlockDrawCommands::new(
+                HashMap::new(),
+                HashMap::from([(BlockId::new(0), vec![path.clone()])]),
+            ),
+        );
+        let layout_cache = LayoutCache::new(vec![PreparedBlock {
+            block_id: BlockId::new(0),
+            document_index: 0,
+            items: Vec::new(),
+            default_ascent: 0.0,
+            default_line_height: 0.0,
+        }]);
+        let rasterizer = build_rasterizer_for_test();
+        let mut logical_atlas = LogicalAtlas::new(1.0);
+        let snapshot = Composer.compose_snapshot(
+            &model,
+            &layout_cache,
+            &mut logical_atlas,
+            &rasterizer,
+            ViewportState::new(120, 90, 1.0, 7),
+        );
+
+        let batch = snapshot
+            .blocks
+            .get(&BlockId::new(0))
+            .expect("snapshot must contain the block batch");
+        assert_eq!(batch.paths().len(), 1);
+        assert_eq!(batch.paths()[0].content_hash(), path.content_hash());
+        assert_eq!(batch.paths()[0].layer(), path.layer());
+    }
+
+    #[test]
+    fn fingerprint_changes_when_path_content_changes() {
+        let before = super::fingerprint_batch(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            &[],
+            &[],
+            &[sample_path(12.0)],
+            &[],
+            None,
+        );
+        let after = super::fingerprint_batch(
+            ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            0,
+            &[],
+            &[],
+            &[sample_path(24.0)],
+            &[],
+            None,
+        );
+
+        assert_ne!(before, after);
+    }
+
     fn sample_batch(z_order: u32) -> BlockSceneBatch {
         BlockSceneBatch::new(
             ClipRect::new(0.0, 0.0, 100.0, 80.0),
@@ -324,5 +407,34 @@ mod tests {
 
     fn sample_image(pos: [f32; 2], size: [f32; 2], rgba: Vec<u8>, layer: RenderLayer) -> ImageCmd {
         ImageCmd::new(pos, size, Arc::new(ImageData::new(rgba, 1, 1)), layer)
+    }
+
+    fn sample_path(offset: f32) -> PathCmd {
+        PathCmd::new(
+            vec![
+                PathVerb::MoveTo { to: [offset, 10.0] },
+                PathVerb::LineTo {
+                    to: [offset + 24.0, 10.0],
+                },
+                PathVerb::LineTo {
+                    to: [offset + 12.0, 32.0],
+                },
+                PathVerb::Close,
+            ],
+            Some([0.9, 0.6, 0.2, 1.0]),
+            Some(StrokeStyle::new(
+                [1.0, 0.95, 0.8, 1.0],
+                2.0,
+                LineCap::Round,
+                LineJoin::Round,
+            )),
+            RenderLayer::Overlay,
+        )
+    }
+
+    fn build_rasterizer_for_test() -> FreeTypeRasterizer {
+        let font_discovery = FontDiscovery::new().expect("failed to discover system fonts");
+        FreeTypeRasterizer::new(font_discovery, detect_subpixel_layout())
+            .expect("failed to initialize FreeType rasterizer")
     }
 }

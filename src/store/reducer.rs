@@ -1,8 +1,8 @@
 //! Reducer that updates store-owned model state from incoming actions.
 
-use crate::demo::resize_demo_document;
 use crate::io::Action;
 
+use super::delegate::StoreDelegate;
 use super::model::Model;
 use super::types::ViewportState;
 
@@ -23,6 +23,7 @@ impl Reducer {
         model: &mut Model,
         viewport: &mut ViewportState,
         action: &Action,
+        delegate: &dyn StoreDelegate,
     ) -> ReduceOutcome {
         match action {
             Action::Shutdown => ReduceOutcome::Shutdown,
@@ -34,21 +35,9 @@ impl Reducer {
                 viewport_revision,
             } => {
                 *viewport = ViewportState::new(*width, *height, *scale_factor, *viewport_revision);
-                resize_demo_document(model.document_mut(), logical_viewport(*viewport));
+                delegate.resize(model, viewport.logical_size());
                 ReduceOutcome::Changed
             }
         }
     }
-}
-
-/// Converts the current physical viewport into logical layout dimensions.
-pub(crate) fn logical_viewport(viewport: ViewportState) -> [f32; 2] {
-    debug_assert!(
-        viewport.scale_factor > 0.0,
-        "viewport scale factor must stay positive"
-    );
-    [
-        viewport.width as f32 / viewport.scale_factor,
-        viewport.height as f32 / viewport.scale_factor,
-    ]
 }
