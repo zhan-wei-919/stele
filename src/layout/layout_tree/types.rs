@@ -74,13 +74,15 @@ pub(crate) struct LayoutConstraints {
 }
 
 impl LayoutConstraints {
-    pub(crate) fn new(max_width: f32, _viewport: [f32; 2]) -> Self {
+    pub(crate) fn new(max_width: f32) -> Self {
         debug_assert!(max_width.is_finite() && max_width > 0.0);
         Self { max_width }
     }
 
     pub(crate) fn document_clip_rect(self) -> LayoutRect {
         const DOCUMENT_CLIP_EXTENT: f32 = f32::MAX / 4.0;
+        // Tree layout works in document space, so use a large finite clip rect and leave the
+        // real viewport clipping to composition after scroll translation is known.
         LayoutRect::new(0.0, 0.0, DOCUMENT_CLIP_EXTENT, DOCUMENT_CLIP_EXTENT)
     }
 }
@@ -93,7 +95,9 @@ pub(crate) struct LayoutTree {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ScrollAnchor {
+    /// Content blocks move with document scrolling.
     FollowsContent,
+    /// Viewport overlays keep their screen-space position during document scrolling.
     FixedToViewport,
 }
 

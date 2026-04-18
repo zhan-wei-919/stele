@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 use bumpalo::Bump;
 use tokio::runtime::Runtime;
 
-use super::{compose_and_emit_with_post_clamp, run_store, Store};
+use super::{compose_and_emit_with_post_clamp, Store};
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::io::{
-    Action, InputEvent, IoHandle, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
-    MouseEventKind, MouseScroll, SceneFrame, ViewUpdate,
+    Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    MouseScroll, SceneFrame, ViewUpdate,
 };
 use crate::layout::prepare_tree::prepare_tree;
 use crate::layout::tree::{
@@ -19,8 +19,8 @@ use crate::layout::tree::{
 use crate::renderer::subpixel::detect_subpixel_layout;
 use crate::scene::{SceneBufferPool, SceneConfig};
 use crate::store::{
-    types::StorePhase, InputFilter, InteractionConfig, InteractionState, Model, StoreBootstrap,
-    StoreDelegate, ViewportState,
+    types::{InputFilter, InteractionConfig, InteractionState, StorePhase},
+    Model, StoreBootstrap, StoreDelegate, ViewportState,
 };
 use crate::test_support::log_capture::LogCapture;
 
@@ -158,52 +158,6 @@ fn resize_pre_clamps_scroll_offset_against_known_extent() {
 }
 
 #[test]
-fn run_store_skips_compose_for_zero_net_input_batch() {
-    let updates = run_store_with_actions(
-        build_store_with_delegate(Arc::new(ConfiguredTestStoreDelegate)),
-        vec![
-            key_input_action(KeyCode::Down),
-            key_input_action(KeyCode::Up),
-            Action::Shutdown,
-        ],
-    );
-
-    assert_eq!(scene_update_count(&updates), 1);
-}
-
-#[test]
-fn run_store_drains_input_batch_before_processing_resize() {
-    let updates = run_store_with_actions(
-        build_store_with_delegate(Arc::new(ConfiguredTestStoreDelegate)),
-        vec![
-            key_input_action(KeyCode::Down),
-            key_input_action(KeyCode::Down),
-            key_input_action(KeyCode::Down),
-            Action::Resize {
-                width: 960,
-                height: 640,
-                scale_factor: 1.0,
-                viewport_revision: 1,
-                event_time: Instant::now(),
-            },
-            Action::Shutdown,
-        ],
-    );
-
-    assert_eq!(scene_update_count(&updates), 3);
-}
-
-#[test]
-fn run_store_composes_scrolled_frame_before_honoring_shutdown() {
-    let updates = run_store_with_actions(
-        build_store_with_delegate(Arc::new(ConfiguredTestStoreDelegate)),
-        vec![key_input_action(KeyCode::Down), Action::Shutdown],
-    );
-
-    assert_eq!(scene_update_count(&updates), 2);
-}
-
-#[test]
 fn post_compose_clamp_triggers_one_recompose_after_reflow_shrinks_content() {
     let mut store = build_store_with_viewport(
         Arc::new(ReflowingResizeStoreDelegate),
@@ -239,7 +193,10 @@ fn post_compose_clamp_triggers_one_recompose_after_reflow_shrinks_content() {
         .block_on(async { compose_and_emit_with_post_clamp(&mut store, &mut pool, false).await });
 
     assert!(completed);
-    assert_eq!(scene_update_count(&drain_view_updates(&mut view_update_rx)), 2);
+    assert_eq!(
+        scene_update_count(&drain_view_updates(&mut view_update_rx)),
+        2
+    );
     assert!(
         store.interaction.scroll_offset[1] < old_max_scroll,
         "post-compose clamp must shrink the old scroll offset"
@@ -483,8 +440,7 @@ fn build_tree_test_document() -> DocumentTree {
             ))],
             ParagraphStyle {
                 block: BlockStyle {
-                    padding: crate::layout::tree::Edges::all(12.0)
-                        .expect("padding must be valid"),
+                    padding: crate::layout::tree::Edges::all(12.0).expect("padding must be valid"),
                     margin: crate::layout::tree::Edges::new(0.0, 0.0, 0.0, 12.0)
                         .expect("margin must be valid"),
                     background: Some([0.12, 0.16, 0.22, 1.0]),
@@ -498,12 +454,8 @@ fn build_tree_test_document() -> DocumentTree {
     }
 
     DocumentTree::new(BlockNode::Stack(
-        StackNode::new(
-            FlowDirection::Vertical,
-            children,
-            BlockStyle::default(),
-        )
-        .expect("stack must be valid"),
+        StackNode::new(FlowDirection::Vertical, children, BlockStyle::default())
+            .expect("stack must be valid"),
     ))
     .expect("tree must be valid")
 }
@@ -540,11 +492,7 @@ fn build_store_with_delegate(delegate: Arc<dyn StoreDelegate>) -> Store {
 }
 
 fn build_store_with_viewport(delegate: Arc<dyn StoreDelegate>, viewport: ViewportState) -> Store {
-    Store::new(
-        build_rasterizer_for_perf_test(),
-        viewport,
-        delegate,
-    )
+    Store::new(build_rasterizer_for_perf_test(), viewport, delegate)
 }
 
 fn compose_and_record_state(store: &mut Store) -> [f32; 2] {
@@ -554,34 +502,6 @@ fn compose_and_record_state(store: &mut Store) -> [f32; 2] {
     store.interaction.last_known_content_extent = compose_result.content_extent;
     let _ = store.logical_atlas.take_pending_update();
     compose_result.content_extent
-}
-
-fn key_input_action(code: KeyCode) -> Action {
-    Action::Input {
-        event: InputEvent::Key(KeyEvent {
-            code,
-            text: None,
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-        }),
-    }
-}
-
-fn run_store_with_actions(store: Store, actions: Vec<Action>) -> Vec<ViewUpdate> {
-    let (action_tx, handle) = IoHandle::new_for_test();
-    let (pool, mut view_update_rx) = SceneBufferPool::new_for_test(SceneConfig::default());
-    for action in actions {
-        action_tx
-            .send(action)
-            .expect("test action send must succeed");
-    }
-    drop(action_tx);
-
-    Runtime::new()
-        .expect("tokio runtime must build")
-        .block_on(async { run_store(store, handle, pool).await });
-
-    drain_view_updates(&mut view_update_rx)
 }
 
 fn scene_update_count(updates: &[ViewUpdate]) -> usize {

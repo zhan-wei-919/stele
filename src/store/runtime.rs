@@ -15,9 +15,7 @@ use super::delegate::StoreDelegate;
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
 use super::reducer::{ReduceOutcome, Reducer};
-use super::types::{
-    InteractionConfig, InteractionState, StorePhase, ViewportState,
-};
+use super::types::{InteractionConfig, InteractionState, StorePhase, ViewportState};
 
 const INPUT_COALESCE_DRAIN_COUNT: usize = 256;
 
@@ -196,12 +194,8 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
         };
 
         if needs_compose {
-            if !compose_and_emit_with_post_clamp(
-                &mut store,
-                &mut pool,
-                clear_tessellation_cache,
-            )
-            .await
+            if !compose_and_emit_with_post_clamp(&mut store, &mut pool, clear_tessellation_cache)
+                .await
             {
                 break;
             }
@@ -216,14 +210,15 @@ async fn compose_and_emit_with_post_clamp(
     pool: &mut SceneBufferPool,
     clear_tessellation_cache: bool,
 ) -> bool {
-    let Some(content_extent) =
-        compose_and_emit_once(store, pool, clear_tessellation_cache).await
+    let Some(content_extent) = compose_and_emit_once(store, pool, clear_tessellation_cache).await
     else {
         return false;
     };
     update_post_compose_state(store, content_extent);
 
     let pre_clamp = store.interaction.scroll_offset;
+    // Content height can change after a resize or reflow, so clamp only after one fresh compose
+    // has measured the new extent. If the clamp moves the viewport, emit one corrected frame.
     if !store.interaction.clamp_scroll_offset(
         store.interaction.last_known_viewport,
         store.interaction.last_known_content_extent,
@@ -272,8 +267,7 @@ async fn compose_and_emit_once(
         Ok(owner) => owner,
         Err(_) => return None,
     };
-    let compose_result =
-        store.compose_scene_buffer(owner, clear_tessellation_cache, pool.config());
+    let compose_result = store.compose_scene_buffer(owner, clear_tessellation_cache, pool.config());
     let content_extent = compose_result.content_extent;
     let scene_buffer = compose_result.scene_buffer;
 
@@ -360,6 +354,8 @@ fn drain_action_batch(first_action: Action, handle: &mut IoHandle) -> ActionBatc
             let mut actions = Vec::with_capacity(4);
             actions.push(input);
 
+            // Input bursts can collapse to a no-op scroll delta, so drain contiguous input first
+            // and decide whether a compose is needed from the batch's net effect.
             while actions.len() < INPUT_COALESCE_DRAIN_COUNT {
                 match handle.try_next_action() {
                     Ok(next @ Action::Input { .. }) => actions.push(next),

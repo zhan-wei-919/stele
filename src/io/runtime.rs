@@ -149,6 +149,10 @@ impl IoHandle {
     }
 
     #[cfg(test)]
+    // Top-level integration tests pull the runtime in via `#[path]`, so this helper is only
+    // consumed outside the main crate's unit-test target.
+    #[allow(dead_code)]
+    /// Builds an isolated handle pair for store-side tests without starting the runtime.
     pub(crate) fn new_for_test() -> (UnboundedSender<Action>, Self) {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         (

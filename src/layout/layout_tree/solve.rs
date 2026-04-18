@@ -1024,7 +1024,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
         assert_eq!(laid_out.overlays.len(), 1);
         assert!(laid_out.overlays[0].rect.x() >= laid_out.root.rect.x() + 8.0);
     }
@@ -1051,7 +1051,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };
@@ -1084,7 +1084,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };
@@ -1137,7 +1137,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };
@@ -1195,7 +1195,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
         assert_eq!(laid_out.overlays.len(), 1);
         assert!(laid_out.overlays[0].clip_rect.right() <= laid_out.root.clip_rect.right() + 0.01);
         assert!(laid_out.overlays[0].clip_rect.width() < laid_out.overlays[0].rect.width());
@@ -1246,7 +1246,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
         assert_eq!(laid_out.overlays.len(), 1);
         assert_eq!(laid_out.overlays[0].z_order, 2);
     }
@@ -1293,7 +1293,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };
@@ -1328,7 +1328,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(80.0, [80.0, 120.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(80.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };
@@ -1372,7 +1372,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(120.0, [120.0, 120.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(120.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };
@@ -1412,7 +1412,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(80.0, [80.0, 120.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(80.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };
@@ -1459,7 +1459,7 @@ mod tests {
         .expect("tree must be valid");
 
         let prepared = prepare_tree(&tree, &rasterizer());
-        let laid_out = layout_tree(&prepared, LayoutConstraints::new(120.0, [120.0, 120.0]));
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(120.0));
         let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
             panic!("root must be stack");
         };

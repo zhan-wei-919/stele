@@ -27,6 +27,7 @@ pub(crate) struct Composer;
 
 type OrderedBlock<'a> = (u32, BlockDataArena<'a>);
 
+/// One compose pass plus the document extent measured before viewport clipping.
 pub(crate) struct ComposeOutcome<'a> {
     pub(crate) scene: SceneBufferInner<'a>,
     pub(crate) content_extent: [f32; 2],
@@ -122,12 +123,14 @@ fn compose_tree_entries<'a>(
 ) -> (Vec<OrderedBlock<'a>>, [f32; 2]) {
     let layout_tree: layout_tree::LayoutTree = layout_tree::layout_tree(
         prepared_tree,
-        LayoutConstraints::new(viewport.logical_size()[0].max(1.0), viewport.logical_size()),
+        LayoutConstraints::new(viewport.logical_size()[0].max(1.0)),
     );
     let mut entries = Vec::new();
     let mut content_extent = [0.0, 0.0];
     let viewport_size = viewport.logical_size();
     let viewport_rect = TreeLayoutRect::new(0.0, 0.0, viewport_size[0], viewport_size[1]);
+    // Layout runs in document coordinates; composition is the first point where the store knows
+    // the live scroll offset and can translate content into viewport space.
     let scroll_translation = [-scroll_offset[0], -scroll_offset[1]];
     collect_tree_entries(
         owner,
@@ -180,6 +183,8 @@ fn collect_tree_entries<'a>(
     measure_content_extent: bool,
 ) {
     if measure_content_extent {
+        // Overlays stay out of the document scroll range because their anchors can be viewport-
+        // relative even when their source nodes live in the content tree.
         content_extent[0] = content_extent[0].max(block.rect.right());
         content_extent[1] = content_extent[1].max(block.rect.bottom());
     }
@@ -200,8 +205,7 @@ fn collect_tree_entries<'a>(
         logical_atlas,
         rasterizer,
         scale_factor,
-    )
-    {
+    ) {
         entries.push((block.doc_order, materialized));
     }
 
@@ -604,11 +608,13 @@ fn resolve_block_clip_rect(
     viewport_rect: TreeLayoutRect,
 ) -> TreeLayoutRect {
     match block.scroll_anchor {
-        ScrollAnchor::FollowsContent => translated_follows_content_clip_rect(
-            block.clip_rect,
-            translation,
-            viewport_rect,
-        ),
+        // Content clips are declared in document space, so translate them with the block and then
+        // intersect against the live viewport to match what the user can actually see.
+        ScrollAnchor::FollowsContent => {
+            translated_follows_content_clip_rect(block.clip_rect, translation, viewport_rect)
+        }
+        // Viewport overlays already resolve in screen space during layout and should not inherit
+        // the document scroll translation.
         ScrollAnchor::FixedToViewport => block.clip_rect,
     }
 }
@@ -973,9 +979,9 @@ mod tests {
     use crate::layout::prepare_tree::prepare_tree;
     use crate::layout::tree::{
         Align, AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, BorderStyle,
-        ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind,
-        InlineAtomStyle, InlineNode, LocalPaintCommand, OverlayAnchor, OverlayNode,
-        ParagraphNode, ParagraphStyle, StackNode, TextRun, TextStyle,
+        ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind, InlineAtomStyle,
+        InlineNode, LocalPaintCommand, OverlayAnchor, OverlayNode, ParagraphNode, ParagraphStyle,
+        StackNode, TextRun, TextStyle,
     };
     use crate::renderer::subpixel::detect_subpixel_layout;
     use crate::scene::{BlockDataArena, BlockId};
@@ -1137,18 +1143,19 @@ mod tests {
         let layout_cache = LayoutCache::new(prepared_tree);
         let rasterizer = build_rasterizer_for_test();
         let mut logical_atlas = LogicalAtlas::new(1.0);
-        let scene = Composer.compose_into_buffer(
-            &owner,
-            &model,
-            &layout_cache,
-            &mut logical_atlas,
-            &rasterizer,
-            ViewportState::new(120, 90, 1.0, 7, None),
-            [0.0, 0.0],
-            false,
-            512,
-        )
-        .scene;
+        let scene = Composer
+            .compose_into_buffer(
+                &owner,
+                &model,
+                &layout_cache,
+                &mut logical_atlas,
+                &rasterizer,
+                ViewportState::new(120, 90, 1.0, 7, None),
+                [0.0, 0.0],
+                false,
+                512,
+            )
+            .scene;
 
         let batch = scene
             .blocks()
@@ -1332,7 +1339,8 @@ mod tests {
 
         let baseline =
             compose_scene_with_scroll(&baseline_owner, build_overlay_test_tree(), [0.0, 0.0]);
-        let (content_overlay_id, viewport_overlay_id) = overlay_test_block_ids(&build_overlay_test_tree());
+        let (content_overlay_id, viewport_overlay_id) =
+            overlay_test_block_ids(&build_overlay_test_tree());
         let scrolled =
             compose_scene_with_scroll(&scrolled_owner, build_overlay_test_tree(), [0.0, 20.0]);
 
@@ -1378,10 +1386,22 @@ mod tests {
         let baseline_batch = &baseline.blocks()[0];
         let scrolled_batch = &scrolled.blocks()[0];
 
-        assert_close(scrolled_batch.clip_rect().origin()[0], baseline_batch.clip_rect().origin()[0]);
-        assert_close(scrolled_batch.clip_rect().origin()[1], baseline_batch.clip_rect().origin()[1]);
-        assert_close(scrolled_batch.clip_rect().size()[0], baseline_batch.clip_rect().size()[0]);
-        assert_close(scrolled_batch.clip_rect().size()[1], baseline_batch.clip_rect().size()[1]);
+        assert_close(
+            scrolled_batch.clip_rect().origin()[0],
+            baseline_batch.clip_rect().origin()[0],
+        );
+        assert_close(
+            scrolled_batch.clip_rect().origin()[1],
+            baseline_batch.clip_rect().origin()[1],
+        );
+        assert_close(
+            scrolled_batch.clip_rect().size()[0],
+            baseline_batch.clip_rect().size()[0],
+        );
+        assert_close(
+            scrolled_batch.clip_rect().size()[1],
+            baseline_batch.clip_rect().size()[1],
+        );
         assert_close(
             scrolled_batch.glyphs()[0].screen_pos[1],
             baseline_batch.glyphs()[0].screen_pos[1] - 20.0,
@@ -1400,8 +1420,7 @@ mod tests {
         );
         let scrolled_tree = build_clipped_scroll_regression_tree();
         let target_block_id = clipped_scroll_target_block_id(&scrolled_tree);
-        let scrolled =
-            compose_scene_with_scroll(&scrolled_owner, scrolled_tree, [0.0, 100.0]);
+        let scrolled = compose_scene_with_scroll(&scrolled_owner, scrolled_tree, [0.0, 100.0]);
 
         assert!(
             !scene_contains_block(&baseline, target_block_id),
@@ -1522,18 +1541,19 @@ mod tests {
         let model = Model::new(tree);
         let layout_cache = LayoutCache::new(prepared_tree);
         let mut logical_atlas = LogicalAtlas::new(1.0);
-        Composer.compose_into_buffer(
-            owner,
-            &model,
-            &layout_cache,
-            &mut logical_atlas,
-            &rasterizer,
-            ViewportState::new(120, 90, 1.0, 7, None),
-            scroll_offset,
-            false,
-            512,
-        )
-        .scene
+        Composer
+            .compose_into_buffer(
+                owner,
+                &model,
+                &layout_cache,
+                &mut logical_atlas,
+                &rasterizer,
+                ViewportState::new(120, 90, 1.0, 7, None),
+                scroll_offset,
+                false,
+                512,
+            )
+            .scene
     }
 
     fn build_overlay_test_tree() -> DocumentTree {
@@ -1541,7 +1561,10 @@ mod tests {
         let text_style =
             TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
         let mut anchor_paragraph = ParagraphNode::new(
-            vec![InlineNode::Text(TextRun::new("anchor paragraph", text_style))],
+            vec![InlineNode::Text(TextRun::new(
+                "anchor paragraph",
+                text_style,
+            ))],
             ParagraphStyle {
                 block: BlockStyle {
                     padding: Edges::all(8.0).expect("padding must be valid"),
@@ -1561,7 +1584,10 @@ mod tests {
             },
             BlockNode::Paragraph(
                 ParagraphNode::new(
-                    vec![InlineNode::Text(TextRun::new("content overlay", text_style))],
+                    vec![InlineNode::Text(TextRun::new(
+                        "content overlay",
+                        text_style,
+                    ))],
                     ParagraphStyle {
                         block: BlockStyle {
                             padding: Edges::all(6.0).expect("padding must be valid"),
@@ -1577,10 +1603,15 @@ mod tests {
         ));
 
         let viewport_overlay = BlockNode::Overlay(OverlayNode::new(
-            OverlayAnchor::Viewport { offset: [12.0, 10.0] },
+            OverlayAnchor::Viewport {
+                offset: [12.0, 10.0],
+            },
             BlockNode::Paragraph(
                 ParagraphNode::new(
-                    vec![InlineNode::Text(TextRun::new("viewport overlay", text_style))],
+                    vec![InlineNode::Text(TextRun::new(
+                        "viewport overlay",
+                        text_style,
+                    ))],
                     ParagraphStyle {
                         block: BlockStyle {
                             padding: Edges::all(6.0).expect("padding must be valid"),

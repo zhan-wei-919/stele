@@ -9,8 +9,7 @@ use crate::layout::tree::{
     Align, AnchorKey, AtomBaseline, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle,
     BorderStyle, ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind,
     InlineAtomStyle, InlineNode, LineHeight, LocalPaintCommand, OverlayAnchor, OverlayNode,
-    ParagraphNode, ParagraphStyle, PathStroke, StackNode, TextAlign, TextRun, TextStyle,
-    WrapMode,
+    ParagraphNode, ParagraphStyle, PathStroke, StackNode, TextAlign, TextRun, TextStyle, WrapMode,
 };
 use crate::store::{Model, Store, StoreBootstrap, StoreDelegate, ViewportState};
 

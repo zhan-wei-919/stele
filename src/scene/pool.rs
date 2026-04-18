@@ -36,8 +36,10 @@ impl SceneBufferPool {
     }
 
     #[cfg(test)]
+    /// Builds an in-memory pool that captures dispatched updates without a wake handle.
     pub(crate) fn new_for_test(config: SceneConfig) -> (Self, mpsc::Receiver<ViewUpdate>) {
-        let (view_update_tx, view_update_rx) = mpsc::channel(crate::scene::VIEW_UPDATE_CHANNEL_CAPACITY);
+        let (view_update_tx, view_update_rx) =
+            mpsc::channel(crate::scene::VIEW_UPDATE_CHANNEL_CAPACITY);
         let (return_tx, return_rx) = mpsc::channel(crate::scene::SCENE_BUFFER_SLOTS);
         for _ in 0..crate::scene::SCENE_BUFFER_SLOTS {
             return_tx

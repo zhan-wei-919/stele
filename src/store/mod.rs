@@ -6,10 +6,9 @@ mod logical_atlas;
 mod model;
 mod reducer;
 mod runtime;
-mod types;
+pub(crate) mod types;
 
 pub(crate) use delegate::StoreDelegate;
 pub(crate) use model::{Model, StoreBootstrap};
 pub(crate) use runtime::{run_store, Store};
-#[allow(unused_imports)]
-pub(crate) use types::{InputFilter, InteractionConfig, InteractionState, ViewportState};
+pub(crate) use types::ViewportState;

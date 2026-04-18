@@ -147,7 +147,8 @@ fn map_key_input_to_next_scroll_y(
         _ => {
             trace!(
                 "store.input_unhandled code={:?} kind={:?}",
-                event.code, event.kind
+                event.code,
+                event.kind
             );
             return None;
         }
