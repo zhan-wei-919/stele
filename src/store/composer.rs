@@ -27,6 +27,23 @@ pub(crate) struct Composer;
 
 type OrderedBlock<'a> = (u32, BlockDataArena<'a>);
 
+#[derive(Default)]
+struct MaterializedPrimitives {
+    glyphs: Vec<GlyphInstance>,
+    rects: Vec<RectInstance>,
+    paths: Vec<PathCmd>,
+    images: Vec<ImageCmd>,
+}
+
+impl MaterializedPrimitives {
+    fn is_empty(&self) -> bool {
+        self.glyphs.is_empty()
+            && self.rects.is_empty()
+            && self.paths.is_empty()
+            && self.images.is_empty()
+    }
+}
+
 impl Composer {
     /// Recomputes the full scene payload into one arena-backed scene buffer.
     pub(crate) fn compose_into_buffer<'a>(
@@ -161,189 +178,314 @@ fn compose_tree_block<'a>(
         return None;
     }
 
-    let mut glyphs = Vec::new();
-    let mut rects = Vec::new();
-    let mut paths = Vec::new();
-    let mut images = Vec::new();
+    let mut batch = MaterializedPrimitives::default();
+    push_block_background(&mut batch, block.background, block.rect, scale_factor);
+    materialize_block_content(
+        &mut batch,
+        &block.content,
+        logical_atlas,
+        rasterizer,
+        scale_factor,
+    );
+    build_block_arena(owner, block, logical_atlas.generation, batch)
+}
 
-    if let Some(background) = block.background {
-        push_rect_instance(&mut rects, block.rect, background, scale_factor);
+fn push_block_background(
+    batch: &mut MaterializedPrimitives,
+    background: Option<[f32; 4]>,
+    rect: TreeLayoutRect,
+    scale_factor: f32,
+) {
+    if let Some(background) = background {
+        push_rect_instance(&mut batch.rects, rect, background, scale_factor);
     }
+}
 
-    match &block.content {
+fn materialize_block_content(
+    batch: &mut MaterializedPrimitives,
+    content: &TreeLayoutBlockContent,
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) {
+    match content {
         TreeLayoutBlockContent::Stack { .. } => {}
         TreeLayoutBlockContent::Paragraph(paragraph) => {
             for line in &paragraph.lines {
-                for run in &line.runs {
-                    match run {
-                        TreeLayoutRun::Text(run) => {
-                            for glyph in &run.glyphs {
-                                let key = glyph.glyph_key(scale_factor);
-                                let region = logical_atlas.get_or_insert(key, rasterizer);
-                                glyphs.push(GlyphInstance::from_positioned_glyph(
-                                    glyph,
-                                    region,
-                                    scale_factor,
-                                ));
-                            }
-                            rects.extend(
-                                run.decoration_rects
-                                    .iter()
-                                    .copied()
-                                    .map(|rect| RectInstance::from_rect(rect, scale_factor)),
-                            );
-                        }
-                        TreeLayoutRun::Atom(run) => match &run.payload {
-                            LayoutAtomPayload::Chip { glyphs: chip_glyphs } => {
-                                if let Some(color) = run.background {
-                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
-                                }
-                                if let Some(border) = run.border {
-                                    push_border_instances(
-                                        &mut rects,
-                                        run.rect,
-                                        border,
-                                        scale_factor,
-                                    );
-                                }
-                                for glyph in chip_glyphs {
-                                    let key = glyph.glyph_key(scale_factor);
-                                    let region = logical_atlas.get_or_insert(key, rasterizer);
-                                    glyphs.push(GlyphInstance::from_positioned_glyph(
-                                        glyph,
-                                        region,
-                                        scale_factor,
-                                    ));
-                                }
-                            }
-                            LayoutAtomPayload::Icon { glyph } => {
-                                if let Some(color) = run.background {
-                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
-                                }
-                                if let Some(border) = run.border {
-                                    push_border_instances(
-                                        &mut rects,
-                                        run.rect,
-                                        border,
-                                        scale_factor,
-                                    );
-                                }
-                                let key = glyph.glyph_key(scale_factor);
-                                let region = logical_atlas.get_or_insert(key, rasterizer);
-                                glyphs.push(GlyphInstance::from_positioned_glyph(
-                                    glyph,
-                                    region,
-                                    scale_factor,
-                                ));
-                            }
-                            LayoutAtomPayload::Image { data_ref } => {
-                                if let Some(color) = run.background {
-                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
-                                }
-                                if let Some(border) = run.border {
-                                    push_border_instances(
-                                        &mut rects,
-                                        run.rect,
-                                        border,
-                                        scale_factor,
-                                    );
-                                }
-                                if !run.content_rect.is_empty() {
-                                    images.push(ImageCmd::new(
-                                        [run.content_rect.x(), run.content_rect.y()],
-                                        [run.content_rect.width(), run.content_rect.height()],
-                                        data_ref.clone(),
-                                        RenderLayer::Foreground,
-                                    ));
-                                }
-                            }
-                            LayoutAtomPayload::Custom { paint } => {
-                                if let Some(color) = run.background {
-                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
-                                }
-                                if let Some(border) = run.border {
-                                    push_border_instances(
-                                        &mut rects,
-                                        run.rect,
-                                        border,
-                                        scale_factor,
-                                    );
-                                }
-                                append_local_paint_translated(
-                                    &mut rects,
-                                    &mut paths,
-                                    &mut images,
-                                    paint,
-                                    [run.content_rect.x(), run.content_rect.y()],
-                                    scale_factor,
-                                );
-                            }
-                        },
-                    }
-                }
+                materialize_runs(batch, &line.runs, logical_atlas, rasterizer, scale_factor);
             }
         }
-        TreeLayoutBlockContent::Embed(embed) => match &embed.kind {
-            LayoutEmbedKind::Image { data_ref } => {
-                images.push(ImageCmd::new(
-                    [embed.rect.x(), embed.rect.y()],
-                    [embed.rect.width(), embed.rect.height()],
-                    data_ref.clone(),
-                    RenderLayer::Foreground,
-                ));
-            }
-            LayoutEmbedKind::Path {
-                verbs,
-                fill,
-                stroke,
-            } => {
-                let scale_x = if embed.intrinsic_size[0] > 0.0 {
-                    embed.rect.width() / embed.intrinsic_size[0]
-                } else {
-                    1.0
-                };
-                let scale_y = if embed.intrinsic_size[1] > 0.0 {
-                    embed.rect.height() / embed.intrinsic_size[1]
-                } else {
-                    1.0
-                };
-                paths.push(PathCmd::new(
-                    transform_path_verbs(verbs, embed.rect, embed.intrinsic_size),
-                    *fill,
-                    stroke.map(|stroke| scale_stroke(stroke, scale_x, scale_y)),
-                    RenderLayer::Foreground,
-                ));
-            }
-            LayoutEmbedKind::Custom { paint } => append_local_paint_scaled(
-                &mut rects,
-                &mut paths,
-                &mut images,
-                paint,
-                embed.rect,
-                embed.intrinsic_size,
-                scale_factor,
-            ),
-        },
+        TreeLayoutBlockContent::Embed(embed) => materialize_embed(
+            batch,
+            embed.rect,
+            embed.intrinsic_size,
+            &embed.kind,
+            scale_factor,
+        ),
     }
+}
 
-    if glyphs.is_empty() && rects.is_empty() && paths.is_empty() && images.is_empty() {
+fn materialize_runs(
+    batch: &mut MaterializedPrimitives,
+    runs: &[TreeLayoutRun],
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) {
+    for run in runs {
+        materialize_layout_run(batch, run, logical_atlas, rasterizer, scale_factor);
+    }
+}
+
+fn materialize_layout_run(
+    batch: &mut MaterializedPrimitives,
+    run: &TreeLayoutRun,
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) {
+    match run {
+        TreeLayoutRun::Text(run) => {
+            materialize_text_run(
+                batch,
+                &run.glyphs,
+                &run.decoration_rects,
+                logical_atlas,
+                rasterizer,
+                scale_factor,
+            );
+        }
+        TreeLayoutRun::Atom(run) => {
+            materialize_atom_run(
+                batch,
+                run.rect,
+                run.content_rect,
+                run.background,
+                run.border,
+                &run.payload,
+                logical_atlas,
+                rasterizer,
+                scale_factor,
+            );
+        }
+    }
+}
+
+fn materialize_text_run(
+    batch: &mut MaterializedPrimitives,
+    glyphs: &[crate::draw_list::PositionedGlyph],
+    decoration_rects: &[RectCmd],
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) {
+    for glyph in glyphs {
+        push_glyph_instance(
+            &mut batch.glyphs,
+            glyph,
+            logical_atlas,
+            rasterizer,
+            scale_factor,
+        );
+    }
+    batch.rects.extend(
+        decoration_rects
+            .iter()
+            .copied()
+            .map(|rect| RectInstance::from_rect(rect, scale_factor)),
+    );
+}
+
+fn materialize_atom_run(
+    batch: &mut MaterializedPrimitives,
+    rect: TreeLayoutRect,
+    content_rect: TreeLayoutRect,
+    background: Option<[f32; 4]>,
+    border: Option<BorderStyle>,
+    payload: &LayoutAtomPayload,
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) {
+    push_atom_frame(batch, rect, background, border, scale_factor);
+    match payload {
+        LayoutAtomPayload::Chip { glyphs } => {
+            for glyph in glyphs {
+                push_glyph_instance(
+                    &mut batch.glyphs,
+                    &glyph,
+                    logical_atlas,
+                    rasterizer,
+                    scale_factor,
+                );
+            }
+        }
+        LayoutAtomPayload::Icon { glyph } => {
+            push_glyph_instance(
+                &mut batch.glyphs,
+                &glyph,
+                logical_atlas,
+                rasterizer,
+                scale_factor,
+            );
+        }
+        LayoutAtomPayload::Image { data_ref } => {
+            push_layout_image(
+                &mut batch.images,
+                content_rect,
+                data_ref.clone(),
+                RenderLayer::Foreground,
+            );
+        }
+        LayoutAtomPayload::Custom { paint } => append_local_paint_translated(
+            &mut batch.rects,
+            &mut batch.paths,
+            &mut batch.images,
+            paint.as_ref(),
+            [content_rect.x(), content_rect.y()],
+            scale_factor,
+        ),
+    }
+}
+
+fn push_atom_frame(
+    batch: &mut MaterializedPrimitives,
+    rect: TreeLayoutRect,
+    background: Option<[f32; 4]>,
+    border: Option<BorderStyle>,
+    scale_factor: f32,
+) {
+    if let Some(color) = background {
+        push_rect_instance(&mut batch.rects, rect, color, scale_factor);
+    }
+    if let Some(border) = border {
+        push_border_instances(&mut batch.rects, rect, border, scale_factor);
+    }
+}
+
+fn materialize_embed(
+    batch: &mut MaterializedPrimitives,
+    rect: TreeLayoutRect,
+    intrinsic_size: [f32; 2],
+    kind: &LayoutEmbedKind,
+    scale_factor: f32,
+) {
+    match kind {
+        LayoutEmbedKind::Image { data_ref } => {
+            push_layout_image(
+                &mut batch.images,
+                rect,
+                data_ref.clone(),
+                RenderLayer::Foreground,
+            );
+        }
+        LayoutEmbedKind::Path {
+            verbs,
+            fill,
+            stroke,
+        } => materialize_path_embed(
+            &mut batch.paths,
+            rect,
+            intrinsic_size,
+            verbs.as_slice(),
+            fill.clone(),
+            stroke.clone(),
+        ),
+        LayoutEmbedKind::Custom { paint } => append_local_paint_scaled(
+            &mut batch.rects,
+            &mut batch.paths,
+            &mut batch.images,
+            paint.as_ref(),
+            rect,
+            intrinsic_size,
+            scale_factor,
+        ),
+    }
+}
+
+fn materialize_path_embed(
+    paths: &mut Vec<PathCmd>,
+    rect: TreeLayoutRect,
+    intrinsic_size: [f32; 2],
+    verbs: &[PathVerb],
+    fill: Option<[f32; 4]>,
+    stroke: Option<PathStroke>,
+) {
+    let [scale_x, scale_y] = embed_scale(rect, intrinsic_size);
+    paths.push(PathCmd::new(
+        transform_path_verbs(verbs, rect, intrinsic_size),
+        fill,
+        stroke.map(|stroke| scale_stroke(stroke, scale_x, scale_y)),
+        RenderLayer::Foreground,
+    ));
+}
+
+fn embed_scale(rect: TreeLayoutRect, intrinsic_size: [f32; 2]) -> [f32; 2] {
+    let scale_x = if intrinsic_size[0] > 0.0 {
+        rect.width() / intrinsic_size[0]
+    } else {
+        1.0
+    };
+    let scale_y = if intrinsic_size[1] > 0.0 {
+        rect.height() / intrinsic_size[1]
+    } else {
+        1.0
+    };
+    [scale_x, scale_y]
+}
+
+fn push_glyph_instance(
+    glyphs: &mut Vec<GlyphInstance>,
+    glyph: &crate::draw_list::PositionedGlyph,
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) {
+    let key = glyph.glyph_key(scale_factor);
+    let region = logical_atlas.get_or_insert(key, rasterizer);
+    glyphs.push(GlyphInstance::from_positioned_glyph(
+        glyph,
+        region,
+        scale_factor,
+    ));
+}
+
+fn push_layout_image(
+    images: &mut Vec<ImageCmd>,
+    rect: TreeLayoutRect,
+    data_ref: std::sync::Arc<crate::draw_list::ImageData>,
+    layer: RenderLayer,
+) {
+    if rect.is_empty() {
+        return;
+    }
+    images.push(ImageCmd::new(
+        [rect.x(), rect.y()],
+        [rect.width(), rect.height()],
+        data_ref,
+        layer,
+    ));
+}
+
+fn build_block_arena<'a>(
+    owner: &'a Bump,
+    block: &TreeLayoutBlock,
+    logical_atlas_generation: u64,
+    batch: MaterializedPrimitives,
+) -> Option<BlockDataArena<'a>> {
+    if batch.is_empty() {
         return None;
     }
 
-    let clip_rect = ClipRect::new(
-        block.clip_rect.x(),
-        block.clip_rect.y(),
-        block.clip_rect.width(),
-        block.clip_rect.height(),
-    );
+    let clip_rect = tree_clip_rect(block.clip_rect);
     let fingerprint = fingerprint_batch(
         clip_rect,
         block.z_order,
-        &glyphs,
-        &rects,
-        &paths,
-        &images,
-        (!glyphs.is_empty()).then_some(logical_atlas.generation),
+        &batch.glyphs,
+        &batch.rects,
+        &batch.paths,
+        &batch.images,
+        (!batch.glyphs.is_empty()).then_some(logical_atlas_generation),
     );
     let mut arena = BlockDataArena::new_in(
         owner,
@@ -352,11 +494,25 @@ fn compose_tree_block<'a>(
         block.z_order,
         fingerprint,
     );
+    populate_block_arena(&mut arena, batch);
+    Some(arena)
+}
+
+fn tree_clip_rect(rect: TreeLayoutRect) -> ClipRect {
+    ClipRect::new(rect.x(), rect.y(), rect.width(), rect.height())
+}
+
+fn populate_block_arena(arena: &mut BlockDataArena<'_>, batch: MaterializedPrimitives) {
+    let MaterializedPrimitives {
+        glyphs,
+        rects,
+        paths,
+        images,
+    } = batch;
     arena.glyphs_mut().extend(glyphs);
     arena.rects_mut().extend(rects);
     arena.paths_mut().extend(paths);
     arena.images_mut().extend(images);
-    Some(arena)
 }
 
 fn push_rect_instance(
@@ -379,7 +535,12 @@ fn push_rect_instance_with_layer(
         return;
     }
     rects.push(RectInstance::from_rect(
-        RectCmd::new([rect.x(), rect.y()], [rect.width(), rect.height()], color, layer),
+        RectCmd::new(
+            [rect.x(), rect.y()],
+            [rect.width(), rect.height()],
+            color,
+            layer,
+        ),
         scale_factor,
     ));
 }
@@ -537,7 +698,11 @@ fn append_local_paint_with_transform(
                     scale_factor,
                 );
             }
-            LocalPaintCommand::Path { verbs, fill, stroke } => {
+            LocalPaintCommand::Path {
+                verbs,
+                fill,
+                stroke,
+            } => {
                 paths.push(PathCmd::new(
                     verbs
                         .iter()

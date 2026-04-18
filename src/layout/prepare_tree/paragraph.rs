@@ -40,15 +40,9 @@ impl PreparedInlineAtom {
 #[derive(Clone, Debug)]
 pub(crate) enum PreparedAtomPayload {
     Chip { measured_text: Vec<PreparedGlyph> },
-    Icon {
-        glyph: PreparedGlyph,
-    },
-    Image {
-        data_ref: Arc<ImageData>,
-    },
-    Custom {
-        paint: Arc<[LocalPaintCommand]>,
-    },
+    Icon { glyph: PreparedGlyph },
+    Image { data_ref: Arc<ImageData> },
+    Custom { paint: Arc<[LocalPaintCommand]> },
 }
 
 #[derive(Clone, Debug)]

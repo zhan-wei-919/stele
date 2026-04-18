@@ -154,15 +154,9 @@ pub(crate) struct LayoutAtomRun {
 #[derive(Clone, Debug)]
 pub(crate) enum LayoutAtomPayload {
     Chip { glyphs: Vec<PositionedGlyph> },
-    Icon {
-        glyph: PositionedGlyph,
-    },
-    Image {
-        data_ref: Arc<ImageData>,
-    },
-    Custom {
-        paint: Arc<[LocalPaintCommand]>,
-    },
+    Icon { glyph: PositionedGlyph },
+    Image { data_ref: Arc<ImageData> },
+    Custom { paint: Arc<[LocalPaintCommand]> },
 }
 
 #[derive(Clone, Debug)]

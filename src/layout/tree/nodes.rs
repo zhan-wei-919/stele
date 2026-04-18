@@ -9,8 +9,8 @@ use crate::layout::document::DocumentError;
 use super::render::{LocalPaintCommand, PathStroke};
 use super::style::{BlockStyle, InlineAtomStyle, ParagraphStyle};
 use super::text_style::TextStyle;
-use super::validation::validate_dimension;
 use super::validate_local_paint_commands;
+use super::validation::validate_dimension;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct NodeId(u64);
@@ -430,11 +430,11 @@ fn validate_overlay_targets(
 mod tests {
     use std::sync::Arc;
 
-    use crate::draw_list::PathVerb;
     use super::{
         AnchorKey, BlockNode, DocumentTree, FlowDirection, InlineAtom, InlineAtomKind,
         LocalPaintCommand, OverlayAnchor, OverlayNode, ParagraphNode, StackNode, TextRun,
     };
+    use crate::draw_list::PathVerb;
     use crate::layout::document::DocumentError;
     use crate::layout::tree::style::{InlineAtomStyle, ParagraphStyle};
     use crate::layout::tree::text_style::TextStyle;

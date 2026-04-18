@@ -11,9 +11,7 @@ pub(crate) use nodes::{
     InlineAtomKind, InlineNode, NodeId, OverlayAnchor, OverlayNode, ParagraphNode, StackNode,
     TextRun,
 };
-pub(crate) use render::{
-    validate_local_paint_commands, LocalPaintCommand, PathStroke,
-};
+pub(crate) use render::{validate_local_paint_commands, LocalPaintCommand, PathStroke};
 pub(crate) use style::{
     Align, AtomBaseline, BlockStyle, BorderStyle, ClipMode, Edges, InlineAtomStyle, LineHeight,
     ParagraphStyle, TextAlign, WrapMode,

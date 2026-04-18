@@ -40,6 +40,7 @@ pub(crate) enum LocalPaintCommand {
     },
 }
 
+/// Validates a local paint payload before it is embedded into the semantic tree.
 pub(crate) fn validate_local_paint_commands(
     paint: &[LocalPaintCommand],
 ) -> Result<(), DocumentError> {
@@ -56,7 +57,11 @@ fn validate_local_paint_command(command: &LocalPaintCommand) -> Result<(), Docum
             validate_size(*size)?;
             validate_color(*color).map_err(|_| DocumentError::InvalidLocalPaint)
         }
-        LocalPaintCommand::Path { verbs, fill, stroke } => {
+        LocalPaintCommand::Path {
+            verbs,
+            fill,
+            stroke,
+        } => {
             if fill.is_none() && stroke.is_none() {
                 return Err(DocumentError::InvalidLocalPaint);
             }

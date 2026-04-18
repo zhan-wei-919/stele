@@ -16,6 +16,7 @@ use super::types::{
 
 const SUBPIXEL_BIN_COUNT: f32 = 4.0;
 
+/// Measures the paragraph's wrapped content width without block padding or margins.
 pub(crate) fn measure_paragraph_content_width(
     paragraph: &PreparedParagraph,
     available_width: f32,
@@ -27,6 +28,7 @@ pub(crate) fn measure_paragraph_content_width(
         .fold(0.0, f32::max)
 }
 
+/// Breaks and positions one paragraph inside the provided content rect.
 pub(crate) fn layout_paragraph(paragraph: &PreparedParagraph, rect: LayoutRect) -> LayoutParagraph {
     if rect.width() <= 0.0 {
         return LayoutParagraph {
@@ -81,10 +83,7 @@ struct BrokenLine {
     justify_opportunity_count: usize,
 }
 
-fn break_paragraph_lines(
-    paragraph: &PreparedParagraph,
-    max_width: f32,
-) -> Vec<BrokenLine> {
+fn break_paragraph_lines(paragraph: &PreparedParagraph, max_width: f32) -> Vec<BrokenLine> {
     let mut lines = Vec::new();
     let mut current = PendingLine::default();
 
@@ -252,6 +251,8 @@ fn place_lines(
                 TextAlign::End => free_width,
                 TextAlign::Center => free_width * 0.5,
             };
+            // Justification only stretches wrapped interior lines. The final line and explicit
+            // hard breaks stay ragged so authors can force shorter line endings intentionally.
             let justify_gap = if paragraph.style.text_align == TextAlign::Justify
                 && matches!(paragraph.style.wrap, WrapMode::Wrap)
                 && !is_final_line
@@ -383,6 +384,8 @@ fn build_runs(
 }
 
 fn atom_content_rect(atom: &PreparedInlineAtom, rect: LayoutRect) -> LayoutRect {
+    // Clamp the border inset to half the atom size so very small atoms never invert the
+    // remaining content box when border and padding are both applied.
     let border_inset = atom.style.border.map_or(0.0, |border| {
         border
             .width
@@ -412,7 +415,10 @@ fn layout_atom_payload(atom: &PreparedInlineAtom, content_rect: LayoutRect) -> L
         PreparedAtomPayload::Chip { measured_text } => {
             let mut x = content_rect.x();
             let inner_baseline = content_rect.y()
-                + measured_text.iter().map(|glyph| glyph.ascent).fold(0.0, f32::max);
+                + measured_text
+                    .iter()
+                    .map(|glyph| glyph.ascent)
+                    .fold(0.0, f32::max);
             let glyphs = measured_text
                 .iter()
                 .map(|glyph| {

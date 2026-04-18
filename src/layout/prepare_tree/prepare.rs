@@ -8,8 +8,8 @@ use crate::font::{FontSelection, FreeTypeRasterizer, LineMetrics, MeasuredGlyph}
 use crate::layout::line_break::{collect_breaks, BreakOpportunity};
 use crate::layout::prepare::PreparedGlyph;
 use crate::layout::tree::{
-    BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, InlineAtom, InlineAtomKind, InlineNode,
-    OverlayNode, ParagraphNode, StackNode, TextStyle,
+    BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, InlineAtom, InlineAtomKind,
+    InlineNode, OverlayNode, ParagraphNode, StackNode, TextStyle,
 };
 
 use super::embed::{PreparedEmbed, PreparedEmbedPayload};
