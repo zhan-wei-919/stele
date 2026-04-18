@@ -7,5 +7,5 @@ mod types;
 pub(crate) use solve::layout_tree;
 pub(crate) use types::{
     LayoutAtomPayload, LayoutBlock, LayoutBlockContent, LayoutConstraints, LayoutEmbedKind,
-    LayoutRect, LayoutRun, LayoutTree,
+    LayoutRect, LayoutRun, LayoutTree, ScrollAnchor,
 };

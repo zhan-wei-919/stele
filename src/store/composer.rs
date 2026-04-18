@@ -12,7 +12,7 @@ use crate::font::FreeTypeRasterizer;
 use crate::layout::layout_tree::{
     self, LayoutAtomPayload, LayoutBlock as TreeLayoutBlock,
     LayoutBlockContent as TreeLayoutBlockContent, LayoutConstraints, LayoutEmbedKind,
-    LayoutRect as TreeLayoutRect, LayoutRun as TreeLayoutRun,
+    LayoutRect as TreeLayoutRect, LayoutRun as TreeLayoutRun, ScrollAnchor,
 };
 use crate::layout::tree::{BorderStyle, LocalPaintCommand, PathStroke};
 use crate::renderer::instance::{GlyphInstance, RectInstance};
@@ -26,6 +26,11 @@ use super::types::ViewportState;
 pub(crate) struct Composer;
 
 type OrderedBlock<'a> = (u32, BlockDataArena<'a>);
+
+pub(crate) struct ComposeOutcome<'a> {
+    pub(crate) scene: SceneBufferInner<'a>,
+    pub(crate) content_extent: [f32; 2],
+}
 
 #[derive(Default)]
 struct MaterializedPrimitives {
@@ -54,17 +59,24 @@ impl Composer {
         logical_atlas: &mut LogicalAtlas,
         rasterizer: &FreeTypeRasterizer,
         viewport: ViewportState,
+        scroll_offset: [f32; 2],
         clear_tessellation_cache: bool,
         max_blocks_per_scene: usize,
-    ) -> SceneBufferInner<'a> {
+    ) -> ComposeOutcome<'a> {
         let prepared_tree = layout_cache.prepared();
         debug_assert_eq!(
             model.document().anchor_index().len(),
             prepared_tree.anchor_index.len(),
             "model and prepared tree must stay in sync",
         );
-        let mut entries =
-            compose_tree_entries(owner, prepared_tree, logical_atlas, rasterizer, viewport);
+        let (mut entries, content_extent) = compose_tree_entries(
+            owner,
+            prepared_tree,
+            logical_atlas,
+            rasterizer,
+            viewport,
+            scroll_offset,
+        );
 
         sort_ordered_entries(&mut entries);
         if entries.len() > max_blocks_per_scene {
@@ -93,7 +105,10 @@ impl Composer {
             scene.order_mut().push(block.block_id());
             scene.blocks_mut().push(block);
         }
-        scene
+        ComposeOutcome {
+            scene,
+            content_extent,
+        }
     }
 }
 
@@ -103,28 +118,41 @@ fn compose_tree_entries<'a>(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     viewport: ViewportState,
-) -> Vec<OrderedBlock<'a>> {
+    scroll_offset: [f32; 2],
+) -> (Vec<OrderedBlock<'a>>, [f32; 2]) {
     let layout_tree: layout_tree::LayoutTree = layout_tree::layout_tree(
         prepared_tree,
         LayoutConstraints::new(viewport.logical_size()[0].max(1.0), viewport.logical_size()),
     );
     let mut entries = Vec::new();
+    let mut content_extent = [0.0, 0.0];
+    let viewport_size = viewport.logical_size();
+    let viewport_rect = TreeLayoutRect::new(0.0, 0.0, viewport_size[0], viewport_size[1]);
+    let scroll_translation = [-scroll_offset[0], -scroll_offset[1]];
     collect_tree_entries(
         owner,
         &layout_tree.root,
         &mut entries,
+        &mut content_extent,
         logical_atlas,
         rasterizer,
         viewport.scale_factor,
+        viewport_rect,
+        scroll_translation,
+        true,
     );
     for overlay in &layout_tree.overlays {
         collect_tree_entries(
             owner,
             overlay,
             &mut entries,
+            &mut content_extent,
             logical_atlas,
             rasterizer,
             viewport.scale_factor,
+            viewport_rect,
+            scroll_translation,
+            false,
         );
     }
     info!(
@@ -132,7 +160,7 @@ fn compose_tree_entries<'a>(
         entries.len(),
         layout_tree.overlays.len()
     );
-    entries
+    (entries, content_extent)
 }
 
 fn sort_ordered_entries(entries: &mut [OrderedBlock<'_>]) {
@@ -143,12 +171,36 @@ fn collect_tree_entries<'a>(
     owner: &'a Bump,
     block: &TreeLayoutBlock,
     entries: &mut Vec<OrderedBlock<'a>>,
+    content_extent: &mut [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    viewport_rect: TreeLayoutRect,
+    scroll_translation: [f32; 2],
+    measure_content_extent: bool,
 ) {
-    if let Some(materialized) =
-        compose_tree_block(owner, block, logical_atlas, rasterizer, scale_factor)
+    if measure_content_extent {
+        content_extent[0] = content_extent[0].max(block.rect.right());
+        content_extent[1] = content_extent[1].max(block.rect.bottom());
+    }
+
+    let translation = match block.scroll_anchor {
+        ScrollAnchor::FollowsContent => scroll_translation,
+        ScrollAnchor::FixedToViewport => [0.0, 0.0],
+    };
+    let translated_rect = translate_layout_rect(block.rect, translation);
+    let translated_clip_rect = resolve_block_clip_rect(block, translation, viewport_rect);
+
+    if let Some(materialized) = compose_tree_block(
+        owner,
+        block,
+        translated_rect,
+        translated_clip_rect,
+        translation,
+        logical_atlas,
+        rasterizer,
+        scale_factor,
+    )
     {
         entries.push((block.doc_order, materialized));
     }
@@ -159,9 +211,13 @@ fn collect_tree_entries<'a>(
                 owner,
                 child,
                 entries,
+                content_extent,
                 logical_atlas,
                 rasterizer,
                 scale_factor,
+                viewport_rect,
+                scroll_translation,
+                measure_content_extent,
             );
         }
     }
@@ -170,24 +226,28 @@ fn collect_tree_entries<'a>(
 fn compose_tree_block<'a>(
     owner: &'a Bump,
     block: &TreeLayoutBlock,
+    rect: TreeLayoutRect,
+    clip_rect: TreeLayoutRect,
+    translation: [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
 ) -> Option<BlockDataArena<'a>> {
-    if block.rect.is_empty() || block.clip_rect.is_empty() {
+    if rect.is_empty() || clip_rect.is_empty() {
         return None;
     }
 
     let mut batch = MaterializedPrimitives::default();
-    push_block_background(&mut batch, block.background, block.rect, scale_factor);
+    push_block_background(&mut batch, block.background, rect, scale_factor);
     materialize_block_content(
         &mut batch,
         &block.content,
+        translation,
         logical_atlas,
         rasterizer,
         scale_factor,
     );
-    build_block_arena(owner, block, logical_atlas.generation, batch)
+    build_block_arena(owner, block, clip_rect, logical_atlas.generation, batch)
 }
 
 fn push_block_background(
@@ -204,6 +264,7 @@ fn push_block_background(
 fn materialize_block_content(
     batch: &mut MaterializedPrimitives,
     content: &TreeLayoutBlockContent,
+    translation: [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
@@ -212,7 +273,14 @@ fn materialize_block_content(
         TreeLayoutBlockContent::Stack { .. } => {}
         TreeLayoutBlockContent::Paragraph(paragraph) => {
             for line in &paragraph.lines {
-                materialize_runs(batch, &line.runs, logical_atlas, rasterizer, scale_factor);
+                materialize_runs(
+                    batch,
+                    &line.runs,
+                    translation,
+                    logical_atlas,
+                    rasterizer,
+                    scale_factor,
+                );
             }
         }
         TreeLayoutBlockContent::Embed(embed) => materialize_embed(
@@ -220,6 +288,7 @@ fn materialize_block_content(
             embed.rect,
             embed.intrinsic_size,
             &embed.kind,
+            translation,
             scale_factor,
         ),
     }
@@ -228,18 +297,27 @@ fn materialize_block_content(
 fn materialize_runs(
     batch: &mut MaterializedPrimitives,
     runs: &[TreeLayoutRun],
+    translation: [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
 ) {
     for run in runs {
-        materialize_layout_run(batch, run, logical_atlas, rasterizer, scale_factor);
+        materialize_layout_run(
+            batch,
+            run,
+            translation,
+            logical_atlas,
+            rasterizer,
+            scale_factor,
+        );
     }
 }
 
 fn materialize_layout_run(
     batch: &mut MaterializedPrimitives,
     run: &TreeLayoutRun,
+    translation: [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
@@ -250,6 +328,7 @@ fn materialize_layout_run(
                 batch,
                 &run.glyphs,
                 &run.decoration_rects,
+                translation,
                 logical_atlas,
                 rasterizer,
                 scale_factor,
@@ -263,6 +342,7 @@ fn materialize_layout_run(
                 run.background,
                 run.border,
                 &run.payload,
+                translation,
                 logical_atlas,
                 rasterizer,
                 scale_factor,
@@ -275,6 +355,7 @@ fn materialize_text_run(
     batch: &mut MaterializedPrimitives,
     glyphs: &[crate::draw_list::PositionedGlyph],
     decoration_rects: &[RectCmd],
+    translation: [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
@@ -283,6 +364,7 @@ fn materialize_text_run(
         push_glyph_instance(
             &mut batch.glyphs,
             glyph,
+            translation,
             logical_atlas,
             rasterizer,
             scale_factor,
@@ -292,6 +374,7 @@ fn materialize_text_run(
         decoration_rects
             .iter()
             .copied()
+            .map(|rect| translate_rect_cmd(rect, translation))
             .map(|rect| RectInstance::from_rect(rect, scale_factor)),
     );
 }
@@ -303,17 +386,21 @@ fn materialize_atom_run(
     background: Option<[f32; 4]>,
     border: Option<BorderStyle>,
     payload: &LayoutAtomPayload,
+    translation: [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
 ) {
-    push_atom_frame(batch, rect, background, border, scale_factor);
+    let translated_rect = translate_layout_rect(rect, translation);
+    let translated_content_rect = translate_layout_rect(content_rect, translation);
+    push_atom_frame(batch, translated_rect, background, border, scale_factor);
     match payload {
         LayoutAtomPayload::Chip { glyphs } => {
             for glyph in glyphs {
                 push_glyph_instance(
                     &mut batch.glyphs,
                     &glyph,
+                    translation,
                     logical_atlas,
                     rasterizer,
                     scale_factor,
@@ -324,6 +411,7 @@ fn materialize_atom_run(
             push_glyph_instance(
                 &mut batch.glyphs,
                 &glyph,
+                translation,
                 logical_atlas,
                 rasterizer,
                 scale_factor,
@@ -332,7 +420,7 @@ fn materialize_atom_run(
         LayoutAtomPayload::Image { data_ref } => {
             push_layout_image(
                 &mut batch.images,
-                content_rect,
+                translated_content_rect,
                 data_ref.clone(),
                 RenderLayer::Foreground,
             );
@@ -342,7 +430,7 @@ fn materialize_atom_run(
             &mut batch.paths,
             &mut batch.images,
             paint.as_ref(),
-            [content_rect.x(), content_rect.y()],
+            [translated_content_rect.x(), translated_content_rect.y()],
             scale_factor,
         ),
     }
@@ -368,13 +456,15 @@ fn materialize_embed(
     rect: TreeLayoutRect,
     intrinsic_size: [f32; 2],
     kind: &LayoutEmbedKind,
+    translation: [f32; 2],
     scale_factor: f32,
 ) {
+    let translated_rect = translate_layout_rect(rect, translation);
     match kind {
         LayoutEmbedKind::Image { data_ref } => {
             push_layout_image(
                 &mut batch.images,
-                rect,
+                translated_rect,
                 data_ref.clone(),
                 RenderLayer::Foreground,
             );
@@ -385,7 +475,7 @@ fn materialize_embed(
             stroke,
         } => materialize_path_embed(
             &mut batch.paths,
-            rect,
+            translated_rect,
             intrinsic_size,
             verbs.as_slice(),
             fill.clone(),
@@ -396,7 +486,7 @@ fn materialize_embed(
             &mut batch.paths,
             &mut batch.images,
             paint.as_ref(),
-            rect,
+            translated_rect,
             intrinsic_size,
             scale_factor,
         ),
@@ -437,14 +527,19 @@ fn embed_scale(rect: TreeLayoutRect, intrinsic_size: [f32; 2]) -> [f32; 2] {
 fn push_glyph_instance(
     glyphs: &mut Vec<GlyphInstance>,
     glyph: &crate::draw_list::PositionedGlyph,
+    translation: [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
 ) {
     let key = glyph.glyph_key(scale_factor);
     let region = logical_atlas.get_or_insert(key, rasterizer);
+    let translated_glyph = crate::draw_list::PositionedGlyph {
+        pos: translate_point(glyph.pos, translation),
+        ..*glyph
+    };
     glyphs.push(GlyphInstance::from_positioned_glyph(
-        glyph,
+        &translated_glyph,
         region,
         scale_factor,
     ));
@@ -470,6 +565,7 @@ fn push_layout_image(
 fn build_block_arena<'a>(
     owner: &'a Bump,
     block: &TreeLayoutBlock,
+    clip_rect: TreeLayoutRect,
     logical_atlas_generation: u64,
     batch: MaterializedPrimitives,
 ) -> Option<BlockDataArena<'a>> {
@@ -477,7 +573,7 @@ fn build_block_arena<'a>(
         return None;
     }
 
-    let clip_rect = tree_clip_rect(block.clip_rect);
+    let clip_rect = tree_clip_rect(clip_rect);
     let fingerprint = fingerprint_batch(
         clip_rect,
         block.z_order,
@@ -500,6 +596,47 @@ fn build_block_arena<'a>(
 
 fn tree_clip_rect(rect: TreeLayoutRect) -> ClipRect {
     ClipRect::new(rect.x(), rect.y(), rect.width(), rect.height())
+}
+
+fn resolve_block_clip_rect(
+    block: &TreeLayoutBlock,
+    translation: [f32; 2],
+    viewport_rect: TreeLayoutRect,
+) -> TreeLayoutRect {
+    match block.scroll_anchor {
+        ScrollAnchor::FollowsContent => translated_follows_content_clip_rect(
+            block.clip_rect,
+            translation,
+            viewport_rect,
+        ),
+        ScrollAnchor::FixedToViewport => block.clip_rect,
+    }
+}
+
+fn translated_follows_content_clip_rect(
+    clip_rect: TreeLayoutRect,
+    translation: [f32; 2],
+    viewport_rect: TreeLayoutRect,
+) -> TreeLayoutRect {
+    translate_layout_rect(clip_rect, translation).intersect(viewport_rect)
+}
+
+fn translate_layout_rect(rect: TreeLayoutRect, translation: [f32; 2]) -> TreeLayoutRect {
+    TreeLayoutRect::new(
+        rect.x() + translation[0],
+        rect.y() + translation[1],
+        rect.width(),
+        rect.height(),
+    )
+}
+
+fn translate_rect_cmd(rect: RectCmd, translation: [f32; 2]) -> RectCmd {
+    let pos = translate_point(rect.pos(), translation);
+    RectCmd::new(pos, rect.size(), rect.color(), rect.layer())
+}
+
+fn translate_point(point: [f32; 2], translation: [f32; 2]) -> [f32; 2] {
+    [point[0] + translation[0], point[1] + translation[1]]
 }
 
 fn populate_block_arena(arena: &mut BlockDataArena<'_>, batch: MaterializedPrimitives) {
@@ -835,9 +972,10 @@ mod tests {
     use crate::font::{FontDiscovery, FreeTypeRasterizer};
     use crate::layout::prepare_tree::prepare_tree;
     use crate::layout::tree::{
-        Align, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, BorderStyle, DocumentTree,
-        Edges, FlowDirection, InlineAtom, InlineAtomKind, InlineAtomStyle, InlineNode,
-        LocalPaintCommand, ParagraphNode, ParagraphStyle, StackNode, TextRun, TextStyle,
+        Align, AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, BorderStyle,
+        ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind,
+        InlineAtomStyle, InlineNode, LocalPaintCommand, OverlayAnchor, OverlayNode,
+        ParagraphNode, ParagraphStyle, StackNode, TextRun, TextStyle,
     };
     use crate::renderer::subpixel::detect_subpixel_layout;
     use crate::scene::{BlockDataArena, BlockId};
@@ -1006,9 +1144,11 @@ mod tests {
             &mut logical_atlas,
             &rasterizer,
             ViewportState::new(120, 90, 1.0, 7, None),
+            [0.0, 0.0],
             false,
             512,
-        );
+        )
+        .scene;
 
         let batch = scene
             .blocks()
@@ -1185,6 +1325,100 @@ mod tests {
         assert_close(batch.rects()[0].size[1], 12.0);
     }
 
+    #[test]
+    fn scroll_translation_moves_content_overlay_but_not_viewport_overlay() {
+        let baseline_owner = Bump::new();
+        let scrolled_owner = Bump::new();
+
+        let baseline =
+            compose_scene_with_scroll(&baseline_owner, build_overlay_test_tree(), [0.0, 0.0]);
+        let (content_overlay_id, viewport_overlay_id) = overlay_test_block_ids(&build_overlay_test_tree());
+        let scrolled =
+            compose_scene_with_scroll(&scrolled_owner, build_overlay_test_tree(), [0.0, 20.0]);
+
+        let baseline_content = find_block(&baseline, content_overlay_id);
+        let scrolled_content = find_block(&scrolled, content_overlay_id);
+        let baseline_viewport = find_block(&baseline, viewport_overlay_id);
+        let scrolled_viewport = find_block(&scrolled, viewport_overlay_id);
+
+        assert_close(
+            scrolled_content.clip_rect().origin()[1],
+            baseline_content.clip_rect().origin()[1] - 20.0,
+        );
+        assert_close(
+            scrolled_content.glyphs()[0].screen_pos[1],
+            baseline_content.glyphs()[0].screen_pos[1] - 20.0,
+        );
+        assert_close(
+            scrolled_viewport.clip_rect().origin()[1],
+            baseline_viewport.clip_rect().origin()[1],
+        );
+        assert_close(
+            scrolled_viewport.glyphs()[0].screen_pos[1],
+            baseline_viewport.glyphs()[0].screen_pos[1],
+        );
+    }
+
+    #[test]
+    fn viewport_inherited_clip_does_not_shrink_when_content_scrolls() {
+        let baseline_owner = Bump::new();
+        let scrolled_owner = Bump::new();
+
+        let baseline = compose_scene_with_scroll(
+            &baseline_owner,
+            tree_with_text_paragraph("scroll clip regression"),
+            [0.0, 0.0],
+        );
+        let scrolled = compose_scene_with_scroll(
+            &scrolled_owner,
+            tree_with_text_paragraph("scroll clip regression"),
+            [0.0, 20.0],
+        );
+
+        let baseline_batch = &baseline.blocks()[0];
+        let scrolled_batch = &scrolled.blocks()[0];
+
+        assert_close(scrolled_batch.clip_rect().origin()[0], baseline_batch.clip_rect().origin()[0]);
+        assert_close(scrolled_batch.clip_rect().origin()[1], baseline_batch.clip_rect().origin()[1]);
+        assert_close(scrolled_batch.clip_rect().size()[0], baseline_batch.clip_rect().size()[0]);
+        assert_close(scrolled_batch.clip_rect().size()[1], baseline_batch.clip_rect().size()[1]);
+        assert_close(
+            scrolled_batch.glyphs()[0].screen_pos[1],
+            baseline_batch.glyphs()[0].screen_pos[1] - 20.0,
+        );
+    }
+
+    #[test]
+    fn clipped_container_below_initial_viewport_enters_scene_after_scroll() {
+        let baseline_owner = Bump::new();
+        let scrolled_owner = Bump::new();
+
+        let baseline = compose_scene_with_scroll(
+            &baseline_owner,
+            build_clipped_scroll_regression_tree(),
+            [0.0, 0.0],
+        );
+        let scrolled_tree = build_clipped_scroll_regression_tree();
+        let target_block_id = clipped_scroll_target_block_id(&scrolled_tree);
+        let scrolled =
+            compose_scene_with_scroll(&scrolled_owner, scrolled_tree, [0.0, 100.0]);
+
+        assert!(
+            !scene_contains_block(&baseline, target_block_id),
+            "target block should start outside the initial viewport"
+        );
+        assert!(
+            scene_contains_block(&scrolled, target_block_id),
+            "scroll should bring the clipped container's target block into the scene"
+        );
+
+        let scrolled_target = find_block(&scrolled, target_block_id);
+        assert!(
+            !scrolled_target.glyphs().is_empty(),
+            "scrolled target block should materialize glyphs once it enters the viewport"
+        );
+    }
+
     fn sample_block<'a>(owner: &'a Bump, block_id: BlockId, z_order: u32) -> BlockDataArena<'a> {
         BlockDataArena::new_in(
             owner,
@@ -1251,9 +1485,37 @@ mod tests {
         .expect("tree must be valid")
     }
 
+    fn tree_with_text_paragraph(text: &str) -> DocumentTree {
+        let text_style =
+            TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::Paragraph(
+                    ParagraphNode::new(
+                        vec![InlineNode::Text(TextRun::new(text, text_style))],
+                        ParagraphStyle::default(),
+                    )
+                    .expect("paragraph must be valid"),
+                )],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid")
+    }
+
     fn compose_scene<'a>(
         owner: &'a Bump,
         tree: DocumentTree,
+    ) -> crate::scene::SceneBufferInner<'a> {
+        compose_scene_with_scroll(owner, tree, [0.0, 0.0])
+    }
+
+    fn compose_scene_with_scroll<'a>(
+        owner: &'a Bump,
+        tree: DocumentTree,
+        scroll_offset: [f32; 2],
     ) -> crate::scene::SceneBufferInner<'a> {
         let rasterizer = build_rasterizer_for_test();
         let prepared_tree = prepare_tree(&tree, &rasterizer);
@@ -1267,9 +1529,225 @@ mod tests {
             &mut logical_atlas,
             &rasterizer,
             ViewportState::new(120, 90, 1.0, 7, None),
+            scroll_offset,
             false,
             512,
         )
+        .scene
+    }
+
+    fn build_overlay_test_tree() -> DocumentTree {
+        let anchor_key = AnchorKey::new("overlay-anchor").expect("anchor must be valid");
+        let text_style =
+            TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let mut anchor_paragraph = ParagraphNode::new(
+            vec![InlineNode::Text(TextRun::new("anchor paragraph", text_style))],
+            ParagraphStyle {
+                block: BlockStyle {
+                    padding: Edges::all(8.0).expect("padding must be valid"),
+                    background: Some([0.2, 0.24, 0.32, 1.0]),
+                    ..BlockStyle::default()
+                },
+                ..ParagraphStyle::default()
+            },
+        )
+        .expect("paragraph must be valid");
+        anchor_paragraph.anchor_key = Some(anchor_key.clone());
+
+        let content_overlay = BlockNode::Overlay(OverlayNode::new(
+            OverlayAnchor::BlockRelative {
+                target: anchor_key,
+                offset: [0.0, 24.0],
+            },
+            BlockNode::Paragraph(
+                ParagraphNode::new(
+                    vec![InlineNode::Text(TextRun::new("content overlay", text_style))],
+                    ParagraphStyle {
+                        block: BlockStyle {
+                            padding: Edges::all(6.0).expect("padding must be valid"),
+                            clip: ClipMode::Rect,
+                            background: Some([0.7, 0.35, 0.25, 1.0]),
+                            ..BlockStyle::default()
+                        },
+                        ..ParagraphStyle::default()
+                    },
+                )
+                .expect("overlay paragraph must be valid"),
+            ),
+        ));
+
+        let viewport_overlay = BlockNode::Overlay(OverlayNode::new(
+            OverlayAnchor::Viewport { offset: [12.0, 10.0] },
+            BlockNode::Paragraph(
+                ParagraphNode::new(
+                    vec![InlineNode::Text(TextRun::new("viewport overlay", text_style))],
+                    ParagraphStyle {
+                        block: BlockStyle {
+                            padding: Edges::all(6.0).expect("padding must be valid"),
+                            clip: ClipMode::Rect,
+                            background: Some([0.2, 0.55, 0.35, 1.0]),
+                            ..BlockStyle::default()
+                        },
+                        ..ParagraphStyle::default()
+                    },
+                )
+                .expect("viewport paragraph must be valid"),
+            ),
+        ));
+
+        DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![
+                    BlockNode::Paragraph(anchor_paragraph),
+                    BlockNode::Paragraph(
+                        ParagraphNode::new(
+                            vec![InlineNode::Text(TextRun::new(
+                                "second paragraph to make scrolling visible",
+                                text_style,
+                            ))],
+                            ParagraphStyle {
+                                block: BlockStyle {
+                                    padding: Edges::all(8.0).expect("padding must be valid"),
+                                    margin: Edges::new(0.0, 0.0, 0.0, 60.0)
+                                        .expect("margin must be valid"),
+                                    background: Some([0.15, 0.18, 0.24, 1.0]),
+                                    ..BlockStyle::default()
+                                },
+                                ..ParagraphStyle::default()
+                            },
+                        )
+                        .expect("body paragraph must be valid"),
+                    ),
+                    content_overlay,
+                    viewport_overlay,
+                ],
+                BlockStyle {
+                    clip: ClipMode::Rect,
+                    ..BlockStyle::default()
+                },
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("overlay test tree must be valid")
+    }
+
+    fn build_clipped_scroll_regression_tree() -> DocumentTree {
+        let text_style =
+            TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let spacer = BlockNode::Paragraph(
+            ParagraphNode::new(
+                vec![InlineNode::Text(TextRun::new("spacer", text_style))],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        min_height: Some(120.0),
+                        ..BlockStyle::default()
+                    },
+                    ..ParagraphStyle::default()
+                },
+            )
+            .expect("spacer paragraph must be valid"),
+        );
+        let target = BlockNode::Paragraph(
+            ParagraphNode::new(
+                vec![InlineNode::Text(TextRun::new(
+                    "target content should appear after scroll",
+                    text_style,
+                ))],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        padding: Edges::all(8.0).expect("padding must be valid"),
+                        background: Some([0.68, 0.42, 0.28, 1.0]),
+                        ..BlockStyle::default()
+                    },
+                    ..ParagraphStyle::default()
+                },
+            )
+            .expect("target paragraph must be valid"),
+        );
+        let clipped_card = BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![target],
+                BlockStyle {
+                    clip: ClipMode::Rect,
+                    padding: Edges::all(8.0).expect("padding must be valid"),
+                    background: Some([0.24, 0.18, 0.16, 1.0]),
+                    ..BlockStyle::default()
+                },
+            )
+            .expect("clipped card stack must be valid"),
+        );
+
+        DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![spacer, clipped_card],
+                BlockStyle {
+                    clip: ClipMode::Rect,
+                    background: Some([0.08, 0.1, 0.14, 1.0]),
+                    ..BlockStyle::default()
+                },
+            )
+            .expect("root stack must be valid"),
+        ))
+        .expect("clipped scroll regression tree must be valid")
+    }
+
+    fn overlay_test_block_ids(tree: &DocumentTree) -> (u64, u64) {
+        let BlockNode::Stack(root) = tree.root() else {
+            panic!("overlay test tree root must be a stack");
+        };
+        let BlockNode::Overlay(content_overlay) = &root.children[2] else {
+            panic!("expected block-relative overlay");
+        };
+        let BlockNode::Overlay(viewport_overlay) = &root.children[3] else {
+            panic!("expected viewport overlay");
+        };
+        (
+            block_node_id(content_overlay.child.as_ref()),
+            block_node_id(viewport_overlay.child.as_ref()),
+        )
+    }
+
+    fn clipped_scroll_target_block_id(tree: &DocumentTree) -> u64 {
+        let BlockNode::Stack(root) = tree.root() else {
+            panic!("clipped scroll regression tree root must be a stack");
+        };
+        let BlockNode::Stack(clipped_card) = &root.children[1] else {
+            panic!("expected clipped card stack");
+        };
+        let BlockNode::Paragraph(target) = &clipped_card.children[0] else {
+            panic!("expected target paragraph");
+        };
+        target.node_id.value()
+    }
+
+    fn find_block<'a>(
+        scene: &'a crate::scene::SceneBufferInner<'a>,
+        block_id: u64,
+    ) -> &'a BlockDataArena<'a> {
+        scene
+            .blocks()
+            .iter()
+            .find(|block| block.block_id() == BlockId::new(block_id))
+            .expect("block must exist in scene")
+    }
+
+    fn scene_contains_block(scene: &crate::scene::SceneBufferInner<'_>, block_id: u64) -> bool {
+        scene
+            .blocks()
+            .iter()
+            .any(|block| block.block_id() == BlockId::new(block_id))
+    }
+
+    fn block_node_id(block: &BlockNode) -> u64 {
+        match block {
+            BlockNode::Stack(node) => node.node_id.value(),
+            BlockNode::Paragraph(node) => node.node_id.value(),
+            BlockNode::Embed(node) => node.node_id.value(),
+            BlockNode::Overlay(node) => node.node_id.value(),
+        }
     }
 
     fn assert_close(actual: f32, expected: f32) {

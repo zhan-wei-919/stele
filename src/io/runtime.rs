@@ -147,4 +147,16 @@ impl IoHandle {
         );
         self.pending_action = Some(action);
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> (UnboundedSender<Action>, Self) {
+        let (action_tx, action_rx) = mpsc::unbounded_channel();
+        (
+            action_tx,
+            Self {
+                action_rx,
+                pending_action: None,
+            },
+        )
+    }
 }

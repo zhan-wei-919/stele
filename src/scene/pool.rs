@@ -15,7 +15,7 @@ pub(crate) struct ViewDisconnected;
 pub(crate) struct SceneBufferPool {
     return_rx: mpsc::Receiver<bumpalo::Bump>,
     view_update_tx: mpsc::Sender<ViewUpdate>,
-    view_wake_handle: WakeHandle,
+    view_wake_handle: Option<WakeHandle>,
     config: SceneConfig,
 }
 
@@ -30,9 +30,33 @@ impl SceneBufferPool {
         Self {
             return_rx,
             view_update_tx,
-            view_wake_handle,
+            view_wake_handle: Some(view_wake_handle),
             config,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(config: SceneConfig) -> (Self, mpsc::Receiver<ViewUpdate>) {
+        let (view_update_tx, view_update_rx) = mpsc::channel(crate::scene::VIEW_UPDATE_CHANNEL_CAPACITY);
+        let (return_tx, return_rx) = mpsc::channel(crate::scene::SCENE_BUFFER_SLOTS);
+        for _ in 0..crate::scene::SCENE_BUFFER_SLOTS {
+            return_tx
+                .blocking_send(bumpalo::Bump::with_capacity(
+                    config.arena_initial_chunk_bytes,
+                ))
+                .expect("test pool must accept warm-up buffers");
+        }
+        drop(return_tx);
+
+        (
+            Self {
+                return_rx,
+                view_update_tx,
+                view_wake_handle: None,
+                config,
+            },
+            view_update_rx,
+        )
     }
 
     /// Returns the scene runtime config injected at startup.
@@ -61,7 +85,12 @@ impl SceneBufferPool {
             .send(update)
             .await
             .map_err(|_| ViewDisconnected)?;
-        if self.view_wake_handle.wake() {
+        if self
+            .view_wake_handle
+            .as_ref()
+            .map(WakeHandle::wake)
+            .unwrap_or(true)
+        {
             return Ok(());
         }
         warn!("io.runtime.send_failed payload=view_update_wake");

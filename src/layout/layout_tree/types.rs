@@ -71,25 +71,17 @@ impl LayoutRect {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LayoutConstraints {
     pub(crate) max_width: f32,
-    pub(crate) viewport: [f32; 2],
 }
 
 impl LayoutConstraints {
-    pub(crate) fn new(max_width: f32, viewport: [f32; 2]) -> Self {
+    pub(crate) fn new(max_width: f32, _viewport: [f32; 2]) -> Self {
         debug_assert!(max_width.is_finite() && max_width > 0.0);
-        Self {
-            max_width,
-            viewport,
-        }
+        Self { max_width }
     }
 
-    pub(crate) fn viewport_rect(self) -> LayoutRect {
-        LayoutRect::new(
-            0.0,
-            0.0,
-            self.viewport[0].max(0.0),
-            self.viewport[1].max(0.0),
-        )
+    pub(crate) fn document_clip_rect(self) -> LayoutRect {
+        const DOCUMENT_CLIP_EXTENT: f32 = f32::MAX / 4.0;
+        LayoutRect::new(0.0, 0.0, DOCUMENT_CLIP_EXTENT, DOCUMENT_CLIP_EXTENT)
     }
 }
 
@@ -99,12 +91,19 @@ pub(crate) struct LayoutTree {
     pub(crate) overlays: Vec<LayoutBlock>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScrollAnchor {
+    FollowsContent,
+    FixedToViewport,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct LayoutBlock {
     pub(crate) node_id: NodeId,
     pub(crate) doc_order: u32,
     pub(crate) rect: LayoutRect,
     pub(crate) clip_rect: LayoutRect,
+    pub(crate) scroll_anchor: ScrollAnchor,
     pub(crate) z_order: u32,
     pub(crate) background: Option<[f32; 4]>,
     pub(crate) content: LayoutBlockContent,

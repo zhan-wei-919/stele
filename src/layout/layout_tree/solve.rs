@@ -13,7 +13,7 @@ use crate::layout::tree::{Align, BlockStyle, ClipMode, FlowDirection, OverlayAnc
 use super::paragraph::{layout_paragraph, measure_paragraph_content_width};
 use super::types::{
     LayoutBlock, LayoutBlockContent, LayoutConstraints, LayoutEmbed, LayoutEmbedKind, LayoutRect,
-    LayoutTree,
+    LayoutTree, ScrollAnchor,
 };
 
 struct SolveContext<'a> {
@@ -39,6 +39,7 @@ struct AnchorPlacement {
 struct ResolvedOverlayTarget {
     origin: [f32; 2],
     anchor_z_order: Option<u32>,
+    scroll_anchor: ScrollAnchor,
 }
 
 struct SolvedBlock {
@@ -70,7 +71,7 @@ struct StackMeasureResult<'a> {
 
 /// Solves the prepared rich-text tree into concrete layout geometry.
 pub(crate) fn layout_tree(prepared: &PreparedTree, constraints: LayoutConstraints) -> LayoutTree {
-    let viewport_rect = constraints.viewport_rect();
+    let document_clip_rect = constraints.document_clip_rect();
     let mut context = SolveContext {
         anchor_layouts: HashMap::new(),
         overlays: Vec::new(),
@@ -81,7 +82,7 @@ pub(crate) fn layout_tree(prepared: &PreparedTree, constraints: LayoutConstraint
         &prepared.root,
         [0.0, 0.0],
         constraints.max_width,
-        viewport_rect,
+        document_clip_rect,
         &mut context,
         true,
         ChildWidthMode::Default,
@@ -115,6 +116,7 @@ pub(crate) fn layout_tree(prepared: &PreparedTree, constraints: LayoutConstraint
             ChildWidthMode::Default,
         )
         .block;
+        set_subtree_scroll_anchor(&mut block, target.scroll_anchor);
         block.doc_order = doc_order;
         if let Some(anchor_z_order) = target.anchor_z_order {
             lift_subtree_above_z(&mut block, anchor_z_order.saturating_add(1));
@@ -261,6 +263,7 @@ fn stack_block(
         doc_order: stack.node_id.value() as u32,
         rect,
         clip_rect,
+        scroll_anchor: ScrollAnchor::FollowsContent,
         z_order: style.z_index,
         background: style.background,
         content: LayoutBlockContent::Stack { children },
@@ -482,6 +485,7 @@ fn layout_leaf_paragraph<'a>(
         doc_order: paragraph.node_id.value() as u32,
         rect,
         clip_rect,
+        scroll_anchor: ScrollAnchor::FollowsContent,
         z_order: style.z_index,
         background: style.background,
         content: LayoutBlockContent::Paragraph(laid_out),
@@ -537,6 +541,7 @@ fn layout_leaf_embed<'a>(
         doc_order: embed.node_id.value() as u32,
         rect,
         clip_rect,
+        scroll_anchor: ScrollAnchor::FollowsContent,
         z_order: style.z_index,
         background: style.background,
         content: LayoutBlockContent::Embed(LayoutEmbed {
@@ -569,6 +574,7 @@ fn layout_overlay_placeholder<'a>(
             doc_order: overlay.node_id.value() as u32,
             rect: LayoutRect::new(0.0, 0.0, 0.0, 0.0),
             clip_rect: inherited_clip,
+            scroll_anchor: ScrollAnchor::FollowsContent,
             z_order: 0,
             background: None,
             content: LayoutBlockContent::Stack {
@@ -588,6 +594,7 @@ fn resolve_overlay_target(
         OverlayAnchor::Viewport { offset } => Some(ResolvedOverlayTarget {
             origin: *offset,
             anchor_z_order: None,
+            scroll_anchor: ScrollAnchor::FixedToViewport,
         }),
         OverlayAnchor::BlockRelative { target, offset } => prepared
             .anchor_index
@@ -599,7 +606,17 @@ fn resolve_overlay_target(
                     placement.rect.y() + offset[1],
                 ],
                 anchor_z_order: placement.z_order,
+                scroll_anchor: ScrollAnchor::FollowsContent,
             }),
+    }
+}
+
+fn set_subtree_scroll_anchor(block: &mut LayoutBlock, scroll_anchor: ScrollAnchor) {
+    block.scroll_anchor = scroll_anchor;
+    if let LayoutBlockContent::Stack { children } = &mut block.content {
+        for child in children {
+            set_subtree_scroll_anchor(child, scroll_anchor);
+        }
     }
 }
 
