@@ -9,7 +9,6 @@ use log::{info, warn};
 
 use crate::draw_list::{ClipRect, ImageCmd, PathCmd, PathVerb, RectCmd, RenderLayer, StrokeStyle};
 use crate::font::FreeTypeRasterizer;
-use crate::layout::layout_document;
 use crate::layout::layout_tree::{
     self, LayoutAtomPayload, LayoutBlock as TreeLayoutBlock,
     LayoutBlockContent as TreeLayoutBlockContent, LayoutConstraints, LayoutEmbedKind,
@@ -19,7 +18,7 @@ use crate::renderer::instance::{GlyphInstance, RectInstance};
 use crate::scene::{BlockDataArena, BlockId, SceneBufferInner, SceneFrameMetadata};
 
 use super::logical_atlas::LogicalAtlas;
-use super::model::{DocumentSource, LayoutCache, Model, PreparedLayoutCache};
+use super::model::{LayoutCache, Model};
 use super::types::ViewportState;
 
 /// Stateless composer from logical layout output to one render-ready scene buffer.
@@ -40,29 +39,14 @@ impl Composer {
         clear_tessellation_cache: bool,
         max_blocks_per_scene: usize,
     ) -> SceneBufferInner<'a> {
-        let mut entries = match (model.document_source(), layout_cache.prepared()) {
-            (DocumentSource::Legacy(document), PreparedLayoutCache::Legacy(prepared_blocks)) => {
-                compose_legacy_entries(
-                    owner,
-                    document,
-                    model,
-                    prepared_blocks,
-                    logical_atlas,
-                    rasterizer,
-                    viewport.scale_factor,
-                )
-            }
-            (DocumentSource::Tree(_), PreparedLayoutCache::Tree(prepared_tree)) => {
-                compose_tree_entries(owner, prepared_tree, logical_atlas, rasterizer, viewport)
-            }
-            _ => {
-                debug_assert!(
-                    false,
-                    "model and layout cache must share the same source kind"
-                );
-                Vec::new()
-            }
-        };
+        let prepared_tree = layout_cache.prepared();
+        debug_assert_eq!(
+            model.document().anchor_index().len(),
+            prepared_tree.anchor_index.len(),
+            "model and prepared tree must stay in sync",
+        );
+        let mut entries =
+            compose_tree_entries(owner, prepared_tree, logical_atlas, rasterizer, viewport);
 
         sort_ordered_entries(&mut entries);
         if entries.len() > max_blocks_per_scene {
@@ -93,55 +77,6 @@ impl Composer {
         }
         scene
     }
-}
-
-fn sort_entries_by_z_order(entries: &mut [BlockDataArena<'_>]) {
-    // Keep the sort key to z-order only. This works because prepare/layout already emit
-    // blocks in current document order, and Rust's `sort_by_key` is stable, so blocks
-    // that share a z-order keep the upstream document order instead of falling back to
-    // stable ids or creation order.
-    entries.sort_by_key(BlockDataArena::z_order);
-}
-
-fn compose_legacy_entries<'a>(
-    owner: &'a Bump,
-    document: &crate::layout::Document,
-    model: &Model,
-    prepared_blocks: &[crate::layout::PreparedBlock],
-    logical_atlas: &mut LogicalAtlas,
-    rasterizer: &FreeTypeRasterizer,
-    scale_factor: f32,
-) -> Vec<OrderedBlock<'a>> {
-    layout_document(document, prepared_blocks)
-        .into_iter()
-        .enumerate()
-        .map(|(doc_order, layout_block)| {
-            let images = model
-                .block_draw_commands()
-                .images()
-                .get(&layout_block.block_id)
-                .cloned()
-                .unwrap_or_default();
-            let paths = model
-                .block_draw_commands()
-                .paths()
-                .get(&layout_block.block_id)
-                .cloned()
-                .unwrap_or_default();
-            (
-                doc_order as u32,
-                compose_legacy_block(
-                    owner,
-                    layout_block,
-                    logical_atlas,
-                    rasterizer,
-                    scale_factor,
-                    paths,
-                    images,
-                ),
-            )
-        })
-        .collect()
 }
 
 fn compose_tree_entries<'a>(
@@ -189,72 +124,6 @@ fn compose_tree_entries<'a>(
 
 fn sort_ordered_entries(entries: &mut [OrderedBlock<'_>]) {
     entries.sort_by_key(|(doc_order, block)| (block.z_order(), *doc_order));
-}
-
-fn compose_legacy_block<'a>(
-    owner: &'a Bump,
-    layout_block: crate::layout::LayoutBlock,
-    logical_atlas: &mut LogicalAtlas,
-    rasterizer: &FreeTypeRasterizer,
-    scale_factor: f32,
-    paths: Vec<PathCmd>,
-    images: Vec<ImageCmd>,
-) -> BlockDataArena<'a> {
-    let mut glyphs = Vec::new();
-    let mut rects = Vec::new();
-
-    if let Some(background_rect) = layout_block.background_rect {
-        rects.push(RectInstance::from_rect(background_rect, scale_factor));
-    }
-
-    for line in &layout_block.lines {
-        for run in &line.runs {
-            for glyph in &run.glyphs {
-                let key = glyph.glyph_key(scale_factor);
-                let region = logical_atlas.get_or_insert(key, rasterizer);
-                glyphs.push(GlyphInstance::from_positioned_glyph(
-                    glyph,
-                    region,
-                    scale_factor,
-                ));
-            }
-            rects.extend(
-                run.decoration_rects
-                    .iter()
-                    .copied()
-                    .map(|rect| RectInstance::from_rect(rect, scale_factor)),
-            );
-        }
-    }
-
-    let clip_rect = ClipRect::new(
-        layout_block.clip_rect.x(),
-        layout_block.clip_rect.y(),
-        layout_block.clip_rect.width(),
-        layout_block.clip_rect.height(),
-    );
-    let fingerprint = fingerprint_batch(
-        clip_rect,
-        layout_block.z_order,
-        &glyphs,
-        &rects,
-        &paths,
-        &images,
-        (!glyphs.is_empty()).then_some(logical_atlas.generation),
-    );
-
-    let mut block = BlockDataArena::new_in(
-        owner,
-        layout_block.block_id,
-        clip_rect,
-        layout_block.z_order,
-        fingerprint,
-    );
-    block.glyphs_mut().extend(glyphs);
-    block.rects_mut().extend(rects);
-    block.paths_mut().extend(paths);
-    block.images_mut().extend(images);
-    block
 }
 
 fn collect_tree_entries<'a>(
@@ -565,23 +434,25 @@ fn hash_images(hasher: &mut impl Hasher, images: &[ImageCmd]) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use bumpalo::Bump;
 
-    use super::sort_entries_by_z_order;
-    use super::Composer;
+    use super::{sort_ordered_entries, Composer};
     use crate::draw_list::{
         ClipRect, ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, RenderLayer,
         StrokeStyle,
     };
     use crate::font::{FontDiscovery, FreeTypeRasterizer};
-    use crate::layout::{Block, BlockRect, Document, PreparedBlock};
+    use crate::layout::prepare_tree::prepare_tree;
+    use crate::layout::tree::{
+        BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, DocumentTree, FlowDirection,
+        StackNode,
+    };
     use crate::renderer::subpixel::detect_subpixel_layout;
     use crate::scene::{BlockDataArena, BlockId};
     use crate::store::logical_atlas::LogicalAtlas;
-    use crate::store::{BlockDrawCommands, Model, ViewportState};
+    use crate::store::{Model, ViewportState};
 
     use super::super::model::LayoutCache;
 
@@ -589,17 +460,17 @@ mod tests {
     fn stable_z_order_sort_preserves_upstream_document_order_within_a_layer() {
         let owner = Bump::new();
         let mut entries = vec![
-            sample_block(&owner, BlockId::new(30), 1),
-            sample_block(&owner, BlockId::new(99), 0),
-            sample_block(&owner, BlockId::new(10), 0),
-            sample_block(&owner, BlockId::new(40), 1),
+            (1, sample_block(&owner, BlockId::new(30), 1)),
+            (0, sample_block(&owner, BlockId::new(99), 0)),
+            (0, sample_block(&owner, BlockId::new(10), 0)),
+            (1, sample_block(&owner, BlockId::new(40), 1)),
         ];
 
-        sort_entries_by_z_order(&mut entries);
+        sort_ordered_entries(&mut entries);
 
         let order = entries
             .into_iter()
-            .map(|block| block.block_id())
+            .map(|(_, block)| block.block_id())
             .collect::<Vec<_>>();
         assert_eq!(
             order,
@@ -698,24 +569,41 @@ mod tests {
     #[test]
     fn compose_into_buffer_attaches_paths_to_block_batch() {
         let owner = Bump::new();
-        let clip_rect = BlockRect::new(0.0, 0.0, 120.0, 90.0).expect("rect must be valid");
-        let block = Block::new(clip_rect, 0.0, None, Vec::new(), 0).expect("block must be valid");
-        let document = Document::new(vec![block]);
         let path = sample_path(18.0);
-        let model = Model::new(
-            document,
-            BlockDrawCommands::new(
-                HashMap::new(),
-                HashMap::from([(BlockId::new(0), vec![path.clone()])]),
-            ),
-        );
-        let layout_cache = LayoutCache::new(vec![PreparedBlock {
-            block_id: BlockId::new(0),
-            document_index: 0,
-            items: Vec::new(),
-            default_ascent: 0.0,
-            default_line_height: 0.0,
-        }]);
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::Embed(
+                    BlockEmbedNode::new(
+                        BlockEmbedKind::Path {
+                            verbs: vec![
+                                PathVerb::MoveTo { to: [18.0, 10.0] },
+                                PathVerb::LineTo { to: [42.0, 10.0] },
+                                PathVerb::LineTo { to: [30.0, 32.0] },
+                                PathVerb::Close,
+                            ],
+                            fill: Some([0.9, 0.6, 0.2, 1.0]),
+                            stroke: Some(crate::layout::tree::PathStroke {
+                                color: [1.0, 0.95, 0.8, 1.0],
+                                width: 2.0,
+                                line_cap: LineCap::Round,
+                                line_join: LineJoin::Round,
+                            }),
+                            intrinsic_size: [64.0, 64.0],
+                        },
+                        BlockStyle::default(),
+                    )
+                    .expect("embed must be valid"),
+                )],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+        let rasterizer = build_rasterizer_for_test();
+        let prepared_tree = prepare_tree(&tree, &rasterizer);
+        let model = Model::new(tree);
+        let layout_cache = LayoutCache::new(prepared_tree);
         let rasterizer = build_rasterizer_for_test();
         let mut logical_atlas = LogicalAtlas::new(1.0);
         let scene = Composer.compose_into_buffer(
@@ -732,11 +620,11 @@ mod tests {
         let batch = scene
             .blocks()
             .iter()
-            .find(|batch| batch.block_id() == BlockId::new(0))
-            .expect("scene must contain the block batch");
+            .find(|batch| !batch.paths().is_empty())
+            .expect("scene must contain a path batch");
         assert_eq!(batch.paths().len(), 1);
         assert_eq!(batch.paths()[0].content_hash(), path.content_hash());
-        assert_eq!(batch.paths()[0].layer(), path.layer());
+        assert_eq!(batch.paths()[0].layer(), RenderLayer::Foreground);
     }
 
     #[test]

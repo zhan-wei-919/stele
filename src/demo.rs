@@ -41,7 +41,7 @@ impl StoreDelegate for DemoStoreDelegate {
     ) -> StoreBootstrap {
         let document = build_demo_document_tree(rasterizer.default_font_id());
         let prepared_tree = prepare_tree(&document, rasterizer);
-        StoreBootstrap::new_tree(document, prepared_tree)
+        StoreBootstrap::new(document, prepared_tree)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}

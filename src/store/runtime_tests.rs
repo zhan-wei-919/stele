@@ -12,12 +12,9 @@ use crate::layout::tree::{
     BlockNode, BlockStyle, DocumentTree, FlowDirection, InlineNode, ParagraphNode, ParagraphStyle,
     StackNode, TextRun, TextStyle,
 };
-use crate::layout::{prepare_document, Block, BlockRect, Document};
 use crate::renderer::subpixel::detect_subpixel_layout;
 use crate::scene::SceneConfig;
-use crate::store::{
-    types::StorePhase, BlockDrawCommands, Model, StoreBootstrap, StoreDelegate, ViewportState,
-};
+use crate::store::{types::StorePhase, Model, StoreBootstrap, StoreDelegate, ViewportState};
 use crate::test_support::log_capture::LogCapture;
 
 fn build_rasterizer_for_perf_test() -> FreeTypeRasterizer {
@@ -182,22 +179,14 @@ impl StoreDelegate for TestStoreDelegate {
     fn bootstrap(
         &self,
         rasterizer: &FreeTypeRasterizer,
-        logical_viewport: [f32; 2],
+        _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
-        let document = build_test_document(logical_viewport);
-        let prepared_blocks = prepare_document(&document, rasterizer);
-        StoreBootstrap::new(document, prepared_blocks, BlockDrawCommands::default())
+        let tree = build_tree_test_document();
+        let prepared_tree = prepare_tree(&tree, rasterizer);
+        StoreBootstrap::new(tree, prepared_tree)
     }
 
-    fn resize(&self, model: &mut Model, logical_viewport: [f32; 2]) {
-        let rect = BlockRect::new(0.0, 0.0, logical_viewport[0], logical_viewport[1])
-            .expect("test viewport rect must be valid");
-        model
-            .document_mut()
-            .set_block_rect(0, rect)
-            .expect("test block must exist");
-        model.set_block_draw_commands(BlockDrawCommands::default());
-    }
+    fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
 }
 
 impl StoreDelegate for TreeTestStoreDelegate {
@@ -209,23 +198,10 @@ impl StoreDelegate for TreeTestStoreDelegate {
         self.bootstrap_count.fetch_add(1, Ordering::Relaxed);
         let tree = build_tree_test_document();
         let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new_tree(tree, prepared_tree)
+        StoreBootstrap::new(tree, prepared_tree)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
-}
-
-fn build_test_document(logical_viewport: [f32; 2]) -> Document {
-    let block = Block::new(
-        BlockRect::new(0.0, 0.0, logical_viewport[0], logical_viewport[1])
-            .expect("test block rect must be valid"),
-        0.0,
-        None,
-        Vec::new(),
-        0,
-    )
-    .expect("test block must be valid");
-    Document::new(vec![block])
 }
 
 fn build_tree_test_document() -> DocumentTree {

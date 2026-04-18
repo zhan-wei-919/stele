@@ -1,27 +1,8 @@
 //! Prepared inline measurements shared by prepare and layout stages.
 
-use crate::font::{FontSelection, LineMetrics, MeasuredGlyph};
-use crate::scene::BlockId;
-
 use super::super::document::TextStyle;
 use super::super::line_break::BreakOpportunity;
-
-/// A block's prepared inline content plus cached metrics for later layout.
-#[derive(Clone, Debug)]
-pub(crate) struct PreparedBlock {
-    pub(crate) block_id: BlockId,
-    pub(crate) document_index: usize,
-    pub(crate) items: Vec<PreparedItem>,
-    pub(crate) default_ascent: f32,
-    pub(crate) default_line_height: f32,
-}
-
-/// A layout item that is either visible content or an explicit hard break.
-#[derive(Clone, Debug)]
-pub(crate) enum PreparedItem {
-    Glyph(PreparedGlyph),
-    Break(BreakOpportunity),
-}
+use crate::font::{FontSelection, LineMetrics, MeasuredGlyph};
 
 /// One measured glyph plus the styling needed to emit renderer primitives later.
 #[derive(Clone, Debug)]

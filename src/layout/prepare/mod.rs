@@ -1,8 +1,5 @@
-//! Prepare-stage measurement that turns spans into FreeType-free layout data.
+//! Shared measured glyph data reused by the tree prepare and layout stages.
 
-mod measure;
-mod stage;
 mod types;
 
-pub(crate) use measure::prepare_document;
-pub(crate) use types::{PreparedBlock, PreparedGlyph, PreparedItem};
+pub(crate) use types::PreparedGlyph;

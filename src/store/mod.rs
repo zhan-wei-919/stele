@@ -9,6 +9,6 @@ mod runtime;
 mod types;
 
 pub(crate) use delegate::StoreDelegate;
-pub(crate) use model::{BlockDrawCommands, Model, StoreBootstrap};
+pub(crate) use model::{Model, StoreBootstrap};
 pub(crate) use runtime::{run_store, Store};
 pub(crate) use types::ViewportState;
