@@ -3,7 +3,7 @@
 mod block;
 mod error;
 mod style;
-mod validation;
+pub(crate) mod validation;
 
 pub(crate) use block::{Block, BlockRect, Document, Span};
 pub(crate) use error::DocumentError;

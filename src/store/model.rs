@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 
 use crate::draw_list::{ImageCmd, PathCmd};
+use crate::layout::prepare_tree::PreparedTree;
+use crate::layout::tree::DocumentTree;
 use crate::layout::{Document, PreparedBlock};
 use crate::scene::BlockId;
 
@@ -22,6 +24,14 @@ impl StoreBootstrap {
         Self {
             model: Model::new(document, block_draw_commands),
             layout_cache: LayoutCache::new(prepared_blocks),
+        }
+    }
+
+    /// Creates a tree-path bootstrap payload from a semantic document tree and prepared cache.
+    pub(crate) fn new_tree(document: DocumentTree, prepared_tree: PreparedTree) -> Self {
+        Self {
+            model: Model::new_tree(document),
+            layout_cache: LayoutCache::new_tree(prepared_tree),
         }
     }
 
@@ -60,7 +70,7 @@ impl BlockDrawCommands {
 
 /// Store-owned logical document model.
 pub(crate) struct Model {
-    document: Document,
+    document: DocumentSource,
     block_draw_commands: BlockDrawCommands,
 }
 
@@ -68,19 +78,42 @@ impl Model {
     /// Creates the model from a document plus any block-level draw commands.
     pub(crate) fn new(document: Document, block_draw_commands: BlockDrawCommands) -> Self {
         Self {
-            document,
+            document: DocumentSource::Legacy(document),
             block_draw_commands,
+        }
+    }
+
+    /// Creates the model from a rich-text tree. Tree-owned payloads are carried by layout nodes.
+    pub(crate) fn new_tree(document: DocumentTree) -> Self {
+        Self {
+            document: DocumentSource::Tree(document),
+            block_draw_commands: BlockDrawCommands::default(),
         }
     }
 
     /// Returns the current logical document.
     pub(crate) fn document(&self) -> &Document {
-        &self.document
+        match &self.document {
+            DocumentSource::Legacy(document) => document,
+            DocumentSource::Tree(_) => {
+                panic!("tree-backed model does not expose a legacy document")
+            }
+        }
     }
 
     /// Returns mutable access to the logical document.
     pub(crate) fn document_mut(&mut self) -> &mut Document {
-        &mut self.document
+        match &mut self.document {
+            DocumentSource::Legacy(document) => document,
+            DocumentSource::Tree(_) => {
+                panic!("tree-backed model does not expose a legacy document")
+            }
+        }
+    }
+
+    /// Returns the current document source.
+    pub(crate) fn document_source(&self) -> &DocumentSource {
+        &self.document
     }
 
     /// Returns block-level non-text draw commands attached to the current document.
@@ -94,19 +127,50 @@ impl Model {
     }
 }
 
+/// Store-owned logical document source for legacy and tree layout pipelines.
+pub(crate) enum DocumentSource {
+    Legacy(Document),
+    Tree(DocumentTree),
+}
+
 /// Prepared layout cache reused across reflow-only updates.
 pub(crate) struct LayoutCache {
-    prepared_blocks: Vec<PreparedBlock>,
+    prepared: PreparedLayoutCache,
 }
 
 impl LayoutCache {
     /// Creates the prepared layout cache once for later reflow-only updates.
     pub(crate) fn new(prepared_blocks: Vec<PreparedBlock>) -> Self {
-        Self { prepared_blocks }
+        Self {
+            prepared: PreparedLayoutCache::Legacy(prepared_blocks),
+        }
+    }
+
+    /// Creates the tree-path prepared cache once for later layout-only updates.
+    pub(crate) fn new_tree(prepared_tree: PreparedTree) -> Self {
+        Self {
+            prepared: PreparedLayoutCache::Tree(prepared_tree),
+        }
     }
 
     /// Returns the prepared blocks consumed by the layout stage.
     pub(crate) fn prepared_blocks(&self) -> &[PreparedBlock] {
-        &self.prepared_blocks
+        match &self.prepared {
+            PreparedLayoutCache::Legacy(prepared_blocks) => prepared_blocks,
+            PreparedLayoutCache::Tree(_) => {
+                panic!("tree-backed cache does not expose legacy prepared blocks")
+            }
+        }
     }
+
+    /// Returns the owned prepare cache representation.
+    pub(crate) fn prepared(&self) -> &PreparedLayoutCache {
+        &self.prepared
+    }
+}
+
+/// Prepared layout cache for either the legacy or tree layout pipeline.
+pub(crate) enum PreparedLayoutCache {
+    Legacy(Vec<PreparedBlock>),
+    Tree(PreparedTree),
 }

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -6,6 +7,11 @@ use bumpalo::Bump;
 use super::Store;
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::io::{Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, SceneFrame};
+use crate::layout::prepare_tree::prepare_tree;
+use crate::layout::tree::{
+    BlockNode, BlockStyle, DocumentTree, FlowDirection, InlineNode, ParagraphNode, ParagraphStyle,
+    StackNode, TextRun, TextStyle,
+};
 use crate::layout::{prepare_document, Block, BlockRect, Document};
 use crate::renderer::subpixel::detect_subpixel_layout;
 use crate::scene::SceneConfig;
@@ -113,6 +119,51 @@ fn compose_budget_warns_for_sub_millisecond_overrun() {
     );
 }
 
+#[test]
+fn tree_resize_reuses_prepared_tree_cache() {
+    let delegate = Arc::new(TreeTestStoreDelegate {
+        bootstrap_count: AtomicUsize::new(0),
+    });
+    let mut store = Store::new(
+        build_rasterizer_for_perf_test(),
+        ViewportState::new(960, 640, 1.0, 0, None),
+        delegate.clone(),
+    );
+    let scene_config = SceneConfig::default();
+
+    let first = store.compose_scene_buffer(Bump::with_capacity(4096), false, &scene_config);
+    assert!(
+        !first.blocks().is_empty(),
+        "tree path must materialize at least one block"
+    );
+    assert_eq!(delegate.bootstrap_count.load(Ordering::Relaxed), 1);
+
+    let outcome = store.handle_action(Action::Resize {
+        width: 1280,
+        height: 720,
+        scale_factor: 1.0,
+        viewport_revision: 2,
+        event_time: Instant::now(),
+    });
+    assert!(matches!(
+        outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+
+    let second = store.compose_scene_buffer(Bump::with_capacity(4096), false, &scene_config);
+    assert!(
+        !second.blocks().is_empty(),
+        "tree path must still materialize after resize"
+    );
+    assert_eq!(
+        delegate.bootstrap_count.load(Ordering::Relaxed),
+        1,
+        "resize must reuse the prepared tree instead of rebuilding it"
+    );
+}
+
 fn build_store_for_test() -> Store {
     Store::new(
         build_rasterizer_for_perf_test(),
@@ -122,6 +173,10 @@ fn build_store_for_test() -> Store {
 }
 
 struct TestStoreDelegate;
+
+struct TreeTestStoreDelegate {
+    bootstrap_count: AtomicUsize,
+}
 
 impl StoreDelegate for TestStoreDelegate {
     fn bootstrap(
@@ -145,6 +200,21 @@ impl StoreDelegate for TestStoreDelegate {
     }
 }
 
+impl StoreDelegate for TreeTestStoreDelegate {
+    fn bootstrap(
+        &self,
+        rasterizer: &FreeTypeRasterizer,
+        _logical_viewport: [f32; 2],
+    ) -> StoreBootstrap {
+        self.bootstrap_count.fetch_add(1, Ordering::Relaxed);
+        let tree = build_tree_test_document();
+        let prepared_tree = prepare_tree(&tree, rasterizer);
+        StoreBootstrap::new_tree(tree, prepared_tree)
+    }
+
+    fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
+}
+
 fn build_test_document(logical_viewport: [f32; 2]) -> Document {
     let block = Block::new(
         BlockRect::new(0.0, 0.0, logical_viewport[0], logical_viewport[1])
@@ -156,4 +226,32 @@ fn build_test_document(logical_viewport: [f32; 2]) -> Document {
     )
     .expect("test block must be valid");
     Document::new(vec![block])
+}
+
+fn build_tree_test_document() -> DocumentTree {
+    let style = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+    let paragraph = ParagraphNode::new(
+        vec![InlineNode::Text(TextRun::new(
+            "tree layout path for runtime resize testing",
+            style,
+        ))],
+        ParagraphStyle {
+            block: BlockStyle {
+                padding: crate::layout::tree::Edges::all(12.0).expect("padding must be valid"),
+                background: Some([0.12, 0.16, 0.22, 1.0]),
+                ..BlockStyle::default()
+            },
+            ..ParagraphStyle::default()
+        },
+    )
+    .expect("paragraph must be valid");
+    DocumentTree::new(BlockNode::Stack(
+        StackNode::new(
+            FlowDirection::Vertical,
+            vec![BlockNode::Paragraph(paragraph)],
+            BlockStyle::default(),
+        )
+        .expect("stack must be valid"),
+    ))
+    .expect("tree must be valid")
 }

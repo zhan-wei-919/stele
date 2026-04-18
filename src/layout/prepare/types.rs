@@ -41,7 +41,7 @@ pub(crate) struct PreparedGlyph {
 }
 
 impl PreparedGlyph {
-    pub(super) fn from_measurement(
+    pub(crate) fn from_measurement(
         span_index: usize,
         style: TextStyle,
         font_selection: FontSelection,

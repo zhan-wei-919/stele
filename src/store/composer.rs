@@ -5,20 +5,27 @@ use std::hash::{Hash, Hasher};
 
 use bumpalo::Bump;
 use bytemuck::cast_slice;
-use log::warn;
+use log::{info, warn};
 
-use crate::draw_list::{ClipRect, ImageCmd, PathCmd};
+use crate::draw_list::{ClipRect, ImageCmd, PathCmd, PathVerb, RectCmd, RenderLayer, StrokeStyle};
 use crate::font::FreeTypeRasterizer;
 use crate::layout::layout_document;
+use crate::layout::layout_tree::{
+    self, LayoutAtomPayload, LayoutBlock as TreeLayoutBlock,
+    LayoutBlockContent as TreeLayoutBlockContent, LayoutConstraints, LayoutEmbedKind,
+    LayoutRect as TreeLayoutRect, LayoutRun as TreeLayoutRun,
+};
 use crate::renderer::instance::{GlyphInstance, RectInstance};
-use crate::scene::{BlockDataArena, SceneBufferInner, SceneFrameMetadata};
+use crate::scene::{BlockDataArena, BlockId, SceneBufferInner, SceneFrameMetadata};
 
 use super::logical_atlas::LogicalAtlas;
-use super::model::{LayoutCache, Model};
+use super::model::{DocumentSource, LayoutCache, Model, PreparedLayoutCache};
 use super::types::ViewportState;
 
 /// Stateless composer from logical layout output to one render-ready scene buffer.
 pub(crate) struct Composer;
+
+type OrderedBlock<'a> = (u32, BlockDataArena<'a>);
 
 impl Composer {
     /// Recomputes the full scene payload into one arena-backed scene buffer.
@@ -33,34 +40,31 @@ impl Composer {
         clear_tessellation_cache: bool,
         max_blocks_per_scene: usize,
     ) -> SceneBufferInner<'a> {
-        let mut entries = layout_document(model.document(), layout_cache.prepared_blocks())
-            .into_iter()
-            .map(|layout_block| {
-                let images = model
-                    .block_draw_commands()
-                    .images()
-                    .get(&layout_block.block_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let paths = model
-                    .block_draw_commands()
-                    .paths()
-                    .get(&layout_block.block_id)
-                    .cloned()
-                    .unwrap_or_default();
-                compose_block(
+        let mut entries = match (model.document_source(), layout_cache.prepared()) {
+            (DocumentSource::Legacy(document), PreparedLayoutCache::Legacy(prepared_blocks)) => {
+                compose_legacy_entries(
                     owner,
-                    layout_block,
+                    document,
+                    model,
+                    prepared_blocks,
                     logical_atlas,
                     rasterizer,
                     viewport.scale_factor,
-                    paths,
-                    images,
                 )
-            })
-            .collect::<Vec<_>>();
+            }
+            (DocumentSource::Tree(_), PreparedLayoutCache::Tree(prepared_tree)) => {
+                compose_tree_entries(owner, prepared_tree, logical_atlas, rasterizer, viewport)
+            }
+            _ => {
+                debug_assert!(
+                    false,
+                    "model and layout cache must share the same source kind"
+                );
+                Vec::new()
+            }
+        };
 
-        sort_entries_by_z_order(&mut entries);
+        sort_ordered_entries(&mut entries);
         if entries.len() > max_blocks_per_scene {
             warn!(
                 "store.scene_block_limit_exceeded blocks={} limit={}",
@@ -77,13 +81,13 @@ impl Composer {
             viewport_revision: viewport.viewport_revision,
             required_atlas_generation: entries
                 .iter()
-                .any(|block| !block.glyphs().is_empty())
+                .any(|(_, block)| !block.glyphs().is_empty())
                 .then_some(logical_atlas.generation),
             clear_tessellation_cache,
             resize_started_at: viewport.resize_started_at,
         };
         let mut scene = SceneBufferInner::empty_in(owner, metadata);
-        for block in entries {
+        for (_, block) in entries {
             scene.order_mut().push(block.block_id());
             scene.blocks_mut().push(block);
         }
@@ -99,7 +103,95 @@ fn sort_entries_by_z_order(entries: &mut [BlockDataArena<'_>]) {
     entries.sort_by_key(BlockDataArena::z_order);
 }
 
-fn compose_block<'a>(
+fn compose_legacy_entries<'a>(
+    owner: &'a Bump,
+    document: &crate::layout::Document,
+    model: &Model,
+    prepared_blocks: &[crate::layout::PreparedBlock],
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) -> Vec<OrderedBlock<'a>> {
+    layout_document(document, prepared_blocks)
+        .into_iter()
+        .enumerate()
+        .map(|(doc_order, layout_block)| {
+            let images = model
+                .block_draw_commands()
+                .images()
+                .get(&layout_block.block_id)
+                .cloned()
+                .unwrap_or_default();
+            let paths = model
+                .block_draw_commands()
+                .paths()
+                .get(&layout_block.block_id)
+                .cloned()
+                .unwrap_or_default();
+            (
+                doc_order as u32,
+                compose_legacy_block(
+                    owner,
+                    layout_block,
+                    logical_atlas,
+                    rasterizer,
+                    scale_factor,
+                    paths,
+                    images,
+                ),
+            )
+        })
+        .collect()
+}
+
+fn compose_tree_entries<'a>(
+    owner: &'a Bump,
+    prepared_tree: &crate::layout::prepare_tree::PreparedTree,
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    viewport: ViewportState,
+) -> Vec<OrderedBlock<'a>> {
+    let layout_tree = layout_tree::layout_tree(
+        prepared_tree,
+        LayoutConstraints::new(
+            viewport.logical_size()[0].max(1.0),
+            Some(viewport.logical_size()[1].max(1.0)),
+            viewport.scale_factor,
+            viewport.logical_size(),
+        ),
+    );
+    let mut entries = Vec::new();
+    collect_tree_entries(
+        owner,
+        &layout_tree.root,
+        &mut entries,
+        logical_atlas,
+        rasterizer,
+        viewport.scale_factor,
+    );
+    for overlay in &layout_tree.overlays {
+        collect_tree_entries(
+            owner,
+            overlay,
+            &mut entries,
+            logical_atlas,
+            rasterizer,
+            viewport.scale_factor,
+        );
+    }
+    info!(
+        "layout.tree.compose block_count={} overlay_count={}",
+        entries.len(),
+        layout_tree.overlays.len()
+    );
+    entries
+}
+
+fn sort_ordered_entries(entries: &mut [OrderedBlock<'_>]) {
+    entries.sort_by_key(|(doc_order, block)| (block.z_order(), *doc_order));
+}
+
+fn compose_legacy_block<'a>(
     owner: &'a Bump,
     layout_block: crate::layout::LayoutBlock,
     logical_atlas: &mut LogicalAtlas,
@@ -163,6 +255,256 @@ fn compose_block<'a>(
     block.paths_mut().extend(paths);
     block.images_mut().extend(images);
     block
+}
+
+fn collect_tree_entries<'a>(
+    owner: &'a Bump,
+    block: &TreeLayoutBlock,
+    entries: &mut Vec<OrderedBlock<'a>>,
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) {
+    if let Some(materialized) =
+        compose_tree_block(owner, block, logical_atlas, rasterizer, scale_factor)
+    {
+        entries.push((block.doc_order, materialized));
+    }
+
+    if let TreeLayoutBlockContent::Stack { children } = &block.content {
+        for child in children {
+            collect_tree_entries(
+                owner,
+                child,
+                entries,
+                logical_atlas,
+                rasterizer,
+                scale_factor,
+            );
+        }
+    }
+}
+
+fn compose_tree_block<'a>(
+    owner: &'a Bump,
+    block: &TreeLayoutBlock,
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+) -> Option<BlockDataArena<'a>> {
+    if block.rect.is_empty() || block.clip_rect.is_empty() {
+        return None;
+    }
+
+    let mut glyphs = Vec::new();
+    let mut rects = Vec::new();
+    let mut paths = Vec::new();
+    let mut images = Vec::new();
+
+    if let Some(background) = block.background {
+        push_rect_instance(&mut rects, block.rect, background, scale_factor);
+    }
+
+    match &block.content {
+        TreeLayoutBlockContent::Stack { .. } => {}
+        TreeLayoutBlockContent::Paragraph(paragraph) => {
+            for line in &paragraph.lines {
+                for run in &line.runs {
+                    match run {
+                        TreeLayoutRun::Text(run) => {
+                            for glyph in &run.glyphs {
+                                let key = glyph.glyph_key(scale_factor);
+                                let region = logical_atlas.get_or_insert(key, rasterizer);
+                                glyphs.push(GlyphInstance::from_positioned_glyph(
+                                    glyph,
+                                    region,
+                                    scale_factor,
+                                ));
+                            }
+                            rects.extend(
+                                run.decoration_rects
+                                    .iter()
+                                    .copied()
+                                    .map(|rect| RectInstance::from_rect(rect, scale_factor)),
+                            );
+                        }
+                        TreeLayoutRun::Atom(run) => match &run.payload {
+                            LayoutAtomPayload::Chip {
+                                background,
+                                glyphs: chip_glyphs,
+                            } => {
+                                if let Some(color) = background {
+                                    push_rect_instance(&mut rects, run.rect, *color, scale_factor);
+                                }
+                                for glyph in chip_glyphs {
+                                    let key = glyph.glyph_key(scale_factor);
+                                    let region = logical_atlas.get_or_insert(key, rasterizer);
+                                    glyphs.push(GlyphInstance::from_positioned_glyph(
+                                        glyph,
+                                        region,
+                                        scale_factor,
+                                    ));
+                                }
+                            }
+                            LayoutAtomPayload::Icon { glyph } => {
+                                let key = glyph.glyph_key(scale_factor);
+                                let region = logical_atlas.get_or_insert(key, rasterizer);
+                                glyphs.push(GlyphInstance::from_positioned_glyph(
+                                    glyph,
+                                    region,
+                                    scale_factor,
+                                ));
+                            }
+                            LayoutAtomPayload::Image { data_ref } => {
+                                images.push(ImageCmd::new(
+                                    [run.rect.x(), run.rect.y()],
+                                    [run.rect.width(), run.rect.height()],
+                                    data_ref.clone(),
+                                    RenderLayer::Foreground,
+                                ));
+                            }
+                            LayoutAtomPayload::Custom => {}
+                        },
+                    }
+                }
+            }
+        }
+        TreeLayoutBlockContent::Embed(embed) => match &embed.kind {
+            LayoutEmbedKind::Image { data_ref } => {
+                images.push(ImageCmd::new(
+                    [embed.rect.x(), embed.rect.y()],
+                    [embed.rect.width(), embed.rect.height()],
+                    data_ref.clone(),
+                    RenderLayer::Foreground,
+                ));
+            }
+            LayoutEmbedKind::Path {
+                verbs,
+                fill,
+                stroke,
+            } => {
+                let scale_x = if embed.intrinsic_size[0] > 0.0 {
+                    embed.rect.width() / embed.intrinsic_size[0]
+                } else {
+                    1.0
+                };
+                let scale_y = if embed.intrinsic_size[1] > 0.0 {
+                    embed.rect.height() / embed.intrinsic_size[1]
+                } else {
+                    1.0
+                };
+                let width_scale = ((scale_x + scale_y) * 0.5).max(0.0);
+                paths.push(PathCmd::new(
+                    transform_path_verbs(verbs, embed.rect, embed.intrinsic_size),
+                    *fill,
+                    stroke.map(|stroke| {
+                        StrokeStyle::new(
+                            stroke.color,
+                            (stroke.width * width_scale).max(1.0),
+                            stroke.line_cap,
+                            stroke.line_join,
+                        )
+                    }),
+                    RenderLayer::Foreground,
+                ));
+            }
+            LayoutEmbedKind::Custom => {}
+        },
+    }
+
+    if glyphs.is_empty() && rects.is_empty() && paths.is_empty() && images.is_empty() {
+        return None;
+    }
+
+    let clip_rect = ClipRect::new(
+        block.clip_rect.x(),
+        block.clip_rect.y(),
+        block.clip_rect.width(),
+        block.clip_rect.height(),
+    );
+    let fingerprint = fingerprint_batch(
+        clip_rect,
+        block.z_order,
+        &glyphs,
+        &rects,
+        &paths,
+        &images,
+        (!glyphs.is_empty()).then_some(logical_atlas.generation),
+    );
+    let mut arena = BlockDataArena::new_in(
+        owner,
+        BlockId::new(block.node_id.value()),
+        clip_rect,
+        block.z_order,
+        fingerprint,
+    );
+    arena.glyphs_mut().extend(glyphs);
+    arena.rects_mut().extend(rects);
+    arena.paths_mut().extend(paths);
+    arena.images_mut().extend(images);
+    Some(arena)
+}
+
+fn push_rect_instance(
+    rects: &mut Vec<RectInstance>,
+    rect: TreeLayoutRect,
+    color: [f32; 4],
+    scale_factor: f32,
+) {
+    if rect.is_empty() {
+        return;
+    }
+    rects.push(RectInstance::from_rect(
+        RectCmd::new(
+            [rect.x(), rect.y()],
+            [rect.width(), rect.height()],
+            color,
+            RenderLayer::Background,
+        ),
+        scale_factor,
+    ));
+}
+
+fn transform_path_verbs(
+    verbs: &[PathVerb],
+    rect: TreeLayoutRect,
+    intrinsic_size: [f32; 2],
+) -> Vec<PathVerb> {
+    let scale_x = if intrinsic_size[0] > 0.0 {
+        rect.width() / intrinsic_size[0]
+    } else {
+        1.0
+    };
+    let scale_y = if intrinsic_size[1] > 0.0 {
+        rect.height() / intrinsic_size[1]
+    } else {
+        1.0
+    };
+    verbs
+        .iter()
+        .map(|verb| transform_path_verb(verb, rect.x(), rect.y(), scale_x, scale_y))
+        .collect()
+}
+
+fn transform_path_verb(verb: &PathVerb, x: f32, y: f32, scale_x: f32, scale_y: f32) -> PathVerb {
+    match verb {
+        PathVerb::MoveTo { to } => PathVerb::MoveTo {
+            to: [x + to[0] * scale_x, y + to[1] * scale_y],
+        },
+        PathVerb::LineTo { to } => PathVerb::LineTo {
+            to: [x + to[0] * scale_x, y + to[1] * scale_y],
+        },
+        PathVerb::QuadTo { ctrl, to } => PathVerb::QuadTo {
+            ctrl: [x + ctrl[0] * scale_x, y + ctrl[1] * scale_y],
+            to: [x + to[0] * scale_x, y + to[1] * scale_y],
+        },
+        PathVerb::CubicTo { ctrl1, ctrl2, to } => PathVerb::CubicTo {
+            ctrl1: [x + ctrl1[0] * scale_x, y + ctrl1[1] * scale_y],
+            ctrl2: [x + ctrl2[0] * scale_x, y + ctrl2[1] * scale_y],
+            to: [x + to[0] * scale_x, y + to[1] * scale_y],
+        },
+        PathVerb::Close => PathVerb::Close,
+    }
 }
 
 fn fingerprint_batch(

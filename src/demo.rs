@@ -1,16 +1,17 @@
 //! Demo document assembly reused by the async store bootstrap.
 
-use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::{Arc, OnceLock};
 
-use crate::draw_list::{
-    ImageCmd, ImageData, LineCap, LineJoin, PathCmd, PathVerb, RenderLayer, StrokeStyle,
-};
+use crate::draw_list::{ImageData, LineCap, LineJoin, PathVerb};
 use crate::font::FreeTypeRasterizer;
-use crate::layout::{prepare_document, Block, BlockRect, Document, Span, TextStyle};
-use crate::scene::BlockId;
-use crate::store::{BlockDrawCommands, Model, Store, StoreBootstrap, StoreDelegate, ViewportState};
+use crate::layout::prepare_tree::prepare_tree;
+use crate::layout::tree::{
+    AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, ClipMode, DocumentTree,
+    Edges, FlowDirection, InlineAtom, InlineAtomKind, InlineAtomStyle, InlineNode, OverlayAnchor,
+    OverlayNode, ParagraphNode, ParagraphStyle, PathStroke, StackNode, TextRun, TextStyle,
+};
+use crate::store::{Model, Store, StoreBootstrap, StoreDelegate, ViewportState};
 
 const PAGE_BG: [f32; 4] = [0.05, 0.08, 0.12, 1.0];
 const PANEL_ACCENT_BG: [f32; 4] = [0.16, 0.21, 0.28, 0.98];
@@ -21,7 +22,6 @@ const INLINE_BG: [f32; 4] = [0.19, 0.25, 0.33, 0.95];
 const OVERLAY_INLINE_BG: [f32; 4] = [0.24, 0.30, 0.38, 0.92];
 const SMOKE_IMAGE_SIZE_PX: u32 = 64;
 const STAR_LOGICAL_SIZE: f32 = 96.0;
-const STAR_MARGIN: f32 = 28.0;
 const STAR_FILL: [f32; 4] = [0.96, 0.73, 0.22, 0.92];
 const STAR_STROKE: [f32; 4] = [1.0, 0.94, 0.72, 1.0];
 
@@ -37,69 +37,14 @@ impl StoreDelegate for DemoStoreDelegate {
     fn bootstrap(
         &self,
         rasterizer: &FreeTypeRasterizer,
-        logical_viewport: [f32; 2],
+        _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
-        let document = build_demo_document(rasterizer.default_font_id(), logical_viewport);
-        let prepared_blocks = prepare_document(&document, rasterizer);
-        let block_draw_commands = build_demo_block_draw_commands(&document);
-        StoreBootstrap::new(document, prepared_blocks, block_draw_commands)
+        let document = build_demo_document_tree(rasterizer.default_font_id());
+        let prepared_tree = prepare_tree(&document, rasterizer);
+        StoreBootstrap::new_tree(document, prepared_tree)
     }
 
-    fn resize(&self, model: &mut Model, logical_viewport: [f32; 2]) {
-        apply_demo_block_rects(model.document_mut(), logical_viewport);
-        let block_draw_commands = build_demo_block_draw_commands(model.document());
-        model.set_block_draw_commands(block_draw_commands);
-    }
-}
-
-/// Returns demo-owned image commands keyed by an existing block id.
-fn demo_block_images(document: &Document) -> HashMap<BlockId, Vec<ImageCmd>> {
-    let Some(root_block) = document.block(0) else {
-        return HashMap::new();
-    };
-
-    let rect = root_block.rect();
-    let smoke_size = (rect.width().min(rect.height()) * 0.18)
-        .clamp(72.0, 128.0)
-        .min(rect.width() - 32.0)
-        .min(rect.height() - 32.0);
-    if smoke_size <= 0.0 {
-        return HashMap::new();
-    }
-
-    let x = (rect.x() + rect.width() - smoke_size - 40.0).max(rect.x() + 16.0);
-    let y = (rect.y() + 40.0).min(rect.y() + rect.height() - smoke_size - 16.0);
-    let image = ImageCmd::new(
-        [x, y.max(rect.y() + 16.0)],
-        [smoke_size, smoke_size],
-        demo_smoke_image_data(),
-        RenderLayer::Foreground,
-    );
-
-    HashMap::from([(root_block.id(), vec![image])])
-}
-
-/// Returns demo-owned path commands keyed by an existing block id.
-fn demo_block_paths(document: &Document) -> HashMap<BlockId, Vec<PathCmd>> {
-    let Some(overlay_block) = document.block(2) else {
-        return HashMap::new();
-    };
-
-    let rect = overlay_block.rect();
-    let size = STAR_LOGICAL_SIZE.min(rect.width()).min(rect.height());
-    if size <= 0.0 {
-        return HashMap::new();
-    }
-
-    let outer_radius = size * 0.5;
-    let inner_radius = outer_radius * 0.46;
-    let center = [
-        (rect.x() + rect.width() - outer_radius - STAR_MARGIN).max(rect.x() + outer_radius),
-        (rect.y() + outer_radius + STAR_MARGIN).min(rect.y() + rect.height() - outer_radius),
-    ];
-    let star = build_star_path(center, outer_radius, inner_radius);
-
-    HashMap::from([(overlay_block.id(), vec![star])])
+    fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
 }
 
 #[derive(Clone, Copy)]
@@ -111,19 +56,109 @@ struct DemoStyles {
     overlay_body: TextStyle,
 }
 
-fn build_demo_document(font_id: u32, viewport: [f32; 2]) -> Document {
+fn build_demo_document_tree(font_id: u32) -> DocumentTree {
     let styles = build_demo_styles(font_id);
-    let mut document = Document::new(vec![
-        build_root_block(&styles),
-        build_overlay_block(&styles),
-        build_path_overlay_block(),
-    ]);
-    apply_demo_block_rects(&mut document, viewport);
-    document
-}
+    let body_anchor = AnchorKey::new("hero-body").expect("anchor must be valid");
+    let smoke_embed = BlockNode::Embed(
+        BlockEmbedNode::new(
+            BlockEmbedKind::Image {
+                data_ref: demo_smoke_image_data(),
+                intrinsic_size: [SMOKE_IMAGE_SIZE_PX as f32, SMOKE_IMAGE_SIZE_PX as f32],
+            },
+            BlockStyle {
+                margin: Edges::new(0.0, 22.0, 0.0, 0.0).expect("edges must be valid"),
+                ..BlockStyle::default()
+            },
+        )
+        .expect("image embed must be valid"),
+    );
+    let overlay_card = BlockNode::Overlay(OverlayNode::new(
+        OverlayAnchor::BlockRelative {
+            target: body_anchor.clone(),
+            offset: [28.0, 104.0],
+        },
+        build_overlay_card(&styles),
+    ));
+    let overlay_star = BlockNode::Overlay(OverlayNode::new(
+        OverlayAnchor::BlockRelative {
+            target: body_anchor.clone(),
+            offset: [360.0, -18.0],
+        },
+        BlockNode::Embed(
+            BlockEmbedNode::new(
+                BlockEmbedKind::Path {
+                    verbs: build_star_verbs(STAR_LOGICAL_SIZE),
+                    fill: Some(STAR_FILL),
+                    stroke: Some(PathStroke {
+                        color: STAR_STROKE,
+                        width: 2.0,
+                        line_cap: LineCap::Round,
+                        line_join: LineJoin::Round,
+                    }),
+                    intrinsic_size: [STAR_LOGICAL_SIZE, STAR_LOGICAL_SIZE],
+                },
+                BlockStyle {
+                    z_index: 2,
+                    ..BlockStyle::default()
+                },
+            )
+            .expect("path embed must be valid"),
+        ),
+    ));
 
-fn build_demo_block_draw_commands(document: &Document) -> BlockDrawCommands {
-    BlockDrawCommands::new(demo_block_images(&document), demo_block_paths(&document))
+    let mut hero = ParagraphNode::new(
+        vec![
+            InlineNode::Text(TextRun::new("Stele Layout Engine", styles.title)),
+            InlineNode::Text(TextRun::new(
+                "\n最小 LayoutTree 已经接进 prepare -> layout -> scene 管线；现在段落负责断行、baseline 和 inline mixed flow。\n",
+                styles.body,
+            )),
+            InlineNode::Atom(
+                InlineAtom::new(
+                    InlineAtomKind::Chip {
+                        label: String::from("layout tree ready"),
+                        text_style: styles.badge,
+                    },
+                    InlineAtomStyle {
+                        background: Some(INLINE_BG),
+                        padding: Edges::new(10.0, 4.0, 10.0, 4.0).expect("edges must be valid"),
+                        ..InlineAtomStyle::default()
+                    },
+                )
+                .expect("chip atom must be valid"),
+            ),
+            InlineNode::Text(TextRun::new(
+                " with mixed ASCII/CJK content. The quick brown fox jumps over the lazy dog, 你好世界ABC测试，长单词Supercalifragilisticexpialidocious也会按字符强制换行。",
+                styles.body,
+            )),
+        ],
+        ParagraphStyle {
+            block: BlockStyle {
+                background: Some(PAGE_BG),
+                padding: Edges::all(28.0).expect("padding must be valid"),
+                clip: ClipMode::Rect,
+                ..BlockStyle::default()
+            },
+            ..ParagraphStyle::default()
+        },
+    )
+    .expect("hero paragraph must be valid");
+    hero.anchor_key = Some(body_anchor);
+
+    DocumentTree::new(BlockNode::Stack(
+        StackNode::new(
+            FlowDirection::Vertical,
+            vec![
+                BlockNode::Paragraph(hero),
+                smoke_embed,
+                overlay_card,
+                overlay_star,
+            ],
+            BlockStyle::default(),
+        )
+        .expect("root stack must be valid"),
+    ))
+    .expect("demo tree must be valid")
 }
 
 fn build_demo_styles(font_id: u32) -> DemoStyles {
@@ -150,109 +185,37 @@ fn build_demo_styles(font_id: u32) -> DemoStyles {
     }
 }
 
-fn build_root_block(styles: &DemoStyles) -> Block {
-    Block::new(
-        unit_rect("demo root rect"),
-        28.0,
-        Some(PAGE_BG),
-        vec![
-            Span::new("Stele Layout Engine", styles.title),
-            Span::new(
-                "\n多 Block stacking、自动换行、baseline 对齐，以及 block clip 已经接入 renderer。\n",
-                styles.body,
-            ),
-            Span::new("inline decoration sample", styles.badge),
-            Span::new(
-                " with mixed ASCII/CJK content. The quick brown fox jumps over the lazy dog, 你好世界ABC测试，长单词Supercalifragilisticexpialidocious也会按字符强制换行。",
-                styles.body,
-            ),
-        ],
-        0,
+fn build_overlay_card(styles: &DemoStyles) -> BlockNode {
+    BlockNode::Stack(
+        StackNode::new(
+            FlowDirection::Vertical,
+            vec![BlockNode::Paragraph(
+                ParagraphNode::new(
+                    vec![
+                        InlineNode::Text(TextRun::new("Overlay Block", styles.overlay_title)),
+                        InlineNode::Text(TextRun::new(
+                            "\nThis card is anchored by AnchorKey and rendered as an independent block batch. Resize the window to reflow paragraphs without rerunning prepare.",
+                            styles.overlay_body,
+                        )),
+                    ],
+                    ParagraphStyle {
+                        block: BlockStyle {
+                            background: Some(PANEL_ACCENT_BG),
+                            padding: Edges::all(18.0).expect("padding must be valid"),
+                            clip: ClipMode::Rect,
+                            z_index: 1,
+                            max_width: Some(320.0),
+                            ..BlockStyle::default()
+                        },
+                        ..ParagraphStyle::default()
+                    },
+                )
+                .expect("overlay paragraph must be valid"),
+            )],
+            BlockStyle::default(),
+        )
+        .expect("overlay stack must be valid"),
     )
-    .expect("demo root block must be valid")
-}
-
-fn build_overlay_block(styles: &DemoStyles) -> Block {
-    Block::new(
-        unit_rect("demo overlay rect"),
-        18.0,
-        Some(PANEL_ACCENT_BG),
-        vec![
-            Span::new("Overlay Block", styles.overlay_title),
-            Span::new(
-                "\nThis block has its own clip rect and z-order. Resize the window to reflow text without rerunning prepare.",
-                styles.overlay_body,
-            ),
-        ],
-        1,
-    )
-    .expect("demo overlay block must be valid")
-}
-
-fn build_path_overlay_block() -> Block {
-    Block::new(
-        unit_rect("demo path overlay rect"),
-        0.0,
-        None,
-        Vec::new(),
-        2,
-    )
-    .expect("demo path overlay block must be valid")
-}
-
-fn apply_demo_block_rects(document: &mut Document, viewport: [f32; 2]) {
-    let width = viewport[0].max(320.0);
-    let height = viewport[1].max(240.0);
-    let overlay_width = width.clamp(220.0, 360.0);
-    let overlay_height = height.clamp(120.0, 180.0);
-    let overlay_x = (width - overlay_width - 32.0).max(24.0);
-    let overlay_y = (height * 0.42)
-        .min(height - overlay_height - 24.0)
-        .max(24.0);
-
-    set_block_rect(
-        document,
-        0,
-        BlockRect::new(0.0, 0.0, width, height).expect("demo root rect must be valid"),
-        "demo root",
-    );
-    set_block_rect(
-        document,
-        1,
-        BlockRect::new(overlay_x, overlay_y, overlay_width, overlay_height)
-            .expect("demo overlay rect must be valid"),
-        "demo overlay",
-    );
-    set_block_rect(
-        document,
-        2,
-        BlockRect::new(0.0, 0.0, width, height).expect("demo path overlay rect must be valid"),
-        "demo path overlay",
-    );
-    set_block_background(document, 0, Some(PAGE_BG), "demo root");
-    set_block_background(document, 1, Some(PANEL_ACCENT_BG), "demo overlay");
-    set_block_background(document, 2, None, "demo path overlay");
-}
-
-fn set_block_rect(document: &mut Document, block_index: usize, rect: BlockRect, label: &str) {
-    document
-        .set_block_rect(block_index, rect)
-        .unwrap_or_else(|_| panic!("{label} block must exist"));
-}
-
-fn set_block_background(
-    document: &mut Document,
-    block_index: usize,
-    background: Option<[f32; 4]>,
-    label: &str,
-) {
-    document
-        .set_block_background_color(block_index, background)
-        .unwrap_or_else(|_| panic!("{label} background must be valid"));
-}
-
-fn unit_rect(label: &str) -> BlockRect {
-    BlockRect::new(0.0, 0.0, 1.0, 1.0).unwrap_or_else(|_| panic!("{label} must be valid"))
 }
 
 fn demo_smoke_image_data() -> Arc<ImageData> {
@@ -306,7 +269,10 @@ fn build_demo_smoke_rgba() -> Vec<u8> {
     rgba
 }
 
-fn build_star_path(center: [f32; 2], outer_radius: f32, inner_radius: f32) -> PathCmd {
+fn build_star_verbs(size: f32) -> Vec<PathVerb> {
+    let center = [size * 0.5, size * 0.5];
+    let outer_radius = size * 0.5;
+    let inner_radius = outer_radius * 0.46;
     let mut verbs = Vec::with_capacity(11);
     for point_index in 0..10 {
         let angle = -PI * 0.5 + point_index as f32 * (PI / 5.0);
@@ -326,16 +292,5 @@ fn build_star_path(center: [f32; 2], outer_radius: f32, inner_radius: f32) -> Pa
         }
     }
     verbs.push(PathVerb::Close);
-
-    PathCmd::new(
-        verbs,
-        Some(STAR_FILL),
-        Some(StrokeStyle::new(
-            STAR_STROKE,
-            2.0,
-            LineCap::Round,
-            LineJoin::Round,
-        )),
-        RenderLayer::Overlay,
-    )
+    verbs
 }

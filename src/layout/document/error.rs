@@ -8,5 +8,13 @@ pub(crate) enum DocumentError {
     InvalidColor,
     InvalidFontSize,
     InvalidLetterSpacing,
+    InvalidEdges,
+    InvalidIntrinsicSize,
+    InvalidLineHeight,
+    InvalidBorderWidth,
+    InvalidAnchorKey,
+    DuplicateAnchorKey { key: String },
+    UnknownOverlayTarget { key: String },
+    RootOverlay,
     MissingBlock { block_index: usize },
 }
