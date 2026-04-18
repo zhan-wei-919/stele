@@ -14,6 +14,7 @@ use crate::layout::layout_tree::{
     LayoutBlockContent as TreeLayoutBlockContent, LayoutConstraints, LayoutEmbedKind,
     LayoutRect as TreeLayoutRect, LayoutRun as TreeLayoutRun,
 };
+use crate::layout::tree::{BorderStyle, LocalPaintCommand, PathStroke};
 use crate::renderer::instance::{GlyphInstance, RectInstance};
 use crate::scene::{BlockDataArena, BlockId, SceneBufferInner, SceneFrameMetadata};
 
@@ -193,12 +194,17 @@ fn compose_tree_block<'a>(
                             );
                         }
                         TreeLayoutRun::Atom(run) => match &run.payload {
-                            LayoutAtomPayload::Chip {
-                                background,
-                                glyphs: chip_glyphs,
-                            } => {
-                                if let Some(color) = background {
-                                    push_rect_instance(&mut rects, run.rect, *color, scale_factor);
+                            LayoutAtomPayload::Chip { glyphs: chip_glyphs } => {
+                                if let Some(color) = run.background {
+                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
+                                }
+                                if let Some(border) = run.border {
+                                    push_border_instances(
+                                        &mut rects,
+                                        run.rect,
+                                        border,
+                                        scale_factor,
+                                    );
                                 }
                                 for glyph in chip_glyphs {
                                     let key = glyph.glyph_key(scale_factor);
@@ -211,6 +217,17 @@ fn compose_tree_block<'a>(
                                 }
                             }
                             LayoutAtomPayload::Icon { glyph } => {
+                                if let Some(color) = run.background {
+                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
+                                }
+                                if let Some(border) = run.border {
+                                    push_border_instances(
+                                        &mut rects,
+                                        run.rect,
+                                        border,
+                                        scale_factor,
+                                    );
+                                }
                                 let key = glyph.glyph_key(scale_factor);
                                 let region = logical_atlas.get_or_insert(key, rasterizer);
                                 glyphs.push(GlyphInstance::from_positioned_glyph(
@@ -220,14 +237,47 @@ fn compose_tree_block<'a>(
                                 ));
                             }
                             LayoutAtomPayload::Image { data_ref } => {
-                                images.push(ImageCmd::new(
-                                    [run.rect.x(), run.rect.y()],
-                                    [run.rect.width(), run.rect.height()],
-                                    data_ref.clone(),
-                                    RenderLayer::Foreground,
-                                ));
+                                if let Some(color) = run.background {
+                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
+                                }
+                                if let Some(border) = run.border {
+                                    push_border_instances(
+                                        &mut rects,
+                                        run.rect,
+                                        border,
+                                        scale_factor,
+                                    );
+                                }
+                                if !run.content_rect.is_empty() {
+                                    images.push(ImageCmd::new(
+                                        [run.content_rect.x(), run.content_rect.y()],
+                                        [run.content_rect.width(), run.content_rect.height()],
+                                        data_ref.clone(),
+                                        RenderLayer::Foreground,
+                                    ));
+                                }
                             }
-                            LayoutAtomPayload::Custom => {}
+                            LayoutAtomPayload::Custom { paint } => {
+                                if let Some(color) = run.background {
+                                    push_rect_instance(&mut rects, run.rect, color, scale_factor);
+                                }
+                                if let Some(border) = run.border {
+                                    push_border_instances(
+                                        &mut rects,
+                                        run.rect,
+                                        border,
+                                        scale_factor,
+                                    );
+                                }
+                                append_local_paint_translated(
+                                    &mut rects,
+                                    &mut paths,
+                                    &mut images,
+                                    paint,
+                                    [run.content_rect.x(), run.content_rect.y()],
+                                    scale_factor,
+                                );
+                            }
                         },
                     }
                 }
@@ -257,22 +307,22 @@ fn compose_tree_block<'a>(
                 } else {
                     1.0
                 };
-                let width_scale = ((scale_x + scale_y) * 0.5).max(0.0);
                 paths.push(PathCmd::new(
                     transform_path_verbs(verbs, embed.rect, embed.intrinsic_size),
                     *fill,
-                    stroke.map(|stroke| {
-                        StrokeStyle::new(
-                            stroke.color,
-                            (stroke.width * width_scale).max(1.0),
-                            stroke.line_cap,
-                            stroke.line_join,
-                        )
-                    }),
+                    stroke.map(|stroke| scale_stroke(stroke, scale_x, scale_y)),
                     RenderLayer::Foreground,
                 ));
             }
-            LayoutEmbedKind::Custom => {}
+            LayoutEmbedKind::Custom { paint } => append_local_paint_scaled(
+                &mut rects,
+                &mut paths,
+                &mut images,
+                paint,
+                embed.rect,
+                embed.intrinsic_size,
+                scale_factor,
+            ),
         },
     }
 
@@ -315,18 +365,81 @@ fn push_rect_instance(
     color: [f32; 4],
     scale_factor: f32,
 ) {
+    push_rect_instance_with_layer(rects, rect, color, RenderLayer::Background, scale_factor);
+}
+
+fn push_rect_instance_with_layer(
+    rects: &mut Vec<RectInstance>,
+    rect: TreeLayoutRect,
+    color: [f32; 4],
+    layer: RenderLayer,
+    scale_factor: f32,
+) {
     if rect.is_empty() {
         return;
     }
     rects.push(RectInstance::from_rect(
-        RectCmd::new(
-            [rect.x(), rect.y()],
-            [rect.width(), rect.height()],
-            color,
-            RenderLayer::Background,
-        ),
+        RectCmd::new([rect.x(), rect.y()], [rect.width(), rect.height()], color, layer),
         scale_factor,
     ));
+}
+
+fn push_border_instances(
+    rects: &mut Vec<RectInstance>,
+    rect: TreeLayoutRect,
+    border: BorderStyle,
+    scale_factor: f32,
+) {
+    let width = border
+        .width
+        .min(rect.width() * 0.5)
+        .min(rect.height() * 0.5);
+    if width <= 0.0 {
+        return;
+    }
+
+    push_rect_instance_with_layer(
+        rects,
+        TreeLayoutRect::new(rect.x(), rect.y(), rect.width(), width),
+        border.color,
+        RenderLayer::Content,
+        scale_factor,
+    );
+    push_rect_instance_with_layer(
+        rects,
+        TreeLayoutRect::new(
+            rect.x(),
+            rect.y() + rect.height() - width,
+            rect.width(),
+            width,
+        ),
+        border.color,
+        RenderLayer::Content,
+        scale_factor,
+    );
+
+    let inner_height = (rect.height() - width * 2.0).max(0.0);
+    if inner_height > 0.0 {
+        push_rect_instance_with_layer(
+            rects,
+            TreeLayoutRect::new(rect.x(), rect.y() + width, width, inner_height),
+            border.color,
+            RenderLayer::Content,
+            scale_factor,
+        );
+        push_rect_instance_with_layer(
+            rects,
+            TreeLayoutRect::new(
+                rect.x() + rect.width() - width,
+                rect.y() + width,
+                width,
+                inner_height,
+            ),
+            border.color,
+            RenderLayer::Content,
+            scale_factor,
+        );
+    }
 }
 
 fn transform_path_verbs(
@@ -348,6 +461,122 @@ fn transform_path_verbs(
         .iter()
         .map(|verb| transform_path_verb(verb, rect.x(), rect.y(), scale_x, scale_y))
         .collect()
+}
+
+fn append_local_paint_translated(
+    rects: &mut Vec<RectInstance>,
+    paths: &mut Vec<PathCmd>,
+    images: &mut Vec<ImageCmd>,
+    paint: &[LocalPaintCommand],
+    origin: [f32; 2],
+    scale_factor: f32,
+) {
+    append_local_paint_with_transform(
+        rects,
+        paths,
+        images,
+        paint,
+        origin,
+        [1.0, 1.0],
+        scale_factor,
+    );
+}
+
+fn append_local_paint_scaled(
+    rects: &mut Vec<RectInstance>,
+    paths: &mut Vec<PathCmd>,
+    images: &mut Vec<ImageCmd>,
+    paint: &[LocalPaintCommand],
+    rect: TreeLayoutRect,
+    intrinsic_size: [f32; 2],
+    scale_factor: f32,
+) {
+    let scale_x = if intrinsic_size[0] > 0.0 {
+        rect.width() / intrinsic_size[0]
+    } else {
+        1.0
+    };
+    let scale_y = if intrinsic_size[1] > 0.0 {
+        rect.height() / intrinsic_size[1]
+    } else {
+        1.0
+    };
+    append_local_paint_with_transform(
+        rects,
+        paths,
+        images,
+        paint,
+        [rect.x(), rect.y()],
+        [scale_x, scale_y],
+        scale_factor,
+    );
+}
+
+fn append_local_paint_with_transform(
+    rects: &mut Vec<RectInstance>,
+    paths: &mut Vec<PathCmd>,
+    images: &mut Vec<ImageCmd>,
+    paint: &[LocalPaintCommand],
+    origin: [f32; 2],
+    scale: [f32; 2],
+    scale_factor: f32,
+) {
+    for command in paint {
+        match command {
+            LocalPaintCommand::Rect { pos, size, color } => {
+                push_rect_instance_with_layer(
+                    rects,
+                    TreeLayoutRect::new(
+                        origin[0] + pos[0] * scale[0],
+                        origin[1] + pos[1] * scale[1],
+                        size[0] * scale[0],
+                        size[1] * scale[1],
+                    ),
+                    *color,
+                    RenderLayer::Content,
+                    scale_factor,
+                );
+            }
+            LocalPaintCommand::Path { verbs, fill, stroke } => {
+                paths.push(PathCmd::new(
+                    verbs
+                        .iter()
+                        .map(|verb| {
+                            transform_path_verb(verb, origin[0], origin[1], scale[0], scale[1])
+                        })
+                        .collect(),
+                    *fill,
+                    stroke.map(|stroke| scale_stroke(stroke, scale[0], scale[1])),
+                    RenderLayer::Content,
+                ));
+            }
+            LocalPaintCommand::Image {
+                pos,
+                size,
+                data_ref,
+            } => {
+                let transformed_size = [size[0] * scale[0], size[1] * scale[1]];
+                if transformed_size[0] > 0.0 && transformed_size[1] > 0.0 {
+                    images.push(ImageCmd::new(
+                        [origin[0] + pos[0] * scale[0], origin[1] + pos[1] * scale[1]],
+                        transformed_size,
+                        data_ref.clone(),
+                        RenderLayer::Content,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn scale_stroke(stroke: PathStroke, scale_x: f32, scale_y: f32) -> StrokeStyle {
+    let width_scale = ((scale_x + scale_y) * 0.5).max(0.0);
+    StrokeStyle::new(
+        stroke.color,
+        (stroke.width * width_scale).max(1.0),
+        stroke.line_cap,
+        stroke.line_join,
+    )
 }
 
 fn transform_path_verb(verb: &PathVerb, x: f32, y: f32, scale_x: f32, scale_y: f32) -> PathVerb {
@@ -441,8 +670,9 @@ mod tests {
     use crate::font::{FontDiscovery, FreeTypeRasterizer};
     use crate::layout::prepare_tree::prepare_tree;
     use crate::layout::tree::{
-        BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, DocumentTree, FlowDirection,
-        StackNode,
+        Align, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, BorderStyle, DocumentTree,
+        Edges, FlowDirection, InlineAtom, InlineAtomKind, InlineAtomStyle, InlineNode,
+        LocalPaintCommand, ParagraphNode, ParagraphStyle, StackNode, TextRun, TextStyle,
     };
     use crate::renderer::subpixel::detect_subpixel_layout;
     use crate::scene::{BlockDataArena, BlockId};
@@ -586,7 +816,10 @@ mod tests {
                             }),
                             intrinsic_size: [64.0, 64.0],
                         },
-                        BlockStyle::default(),
+                        BlockStyle {
+                            align_self: Align::Start,
+                            ..BlockStyle::default()
+                        },
                     )
                     .expect("embed must be valid"),
                 )],
@@ -646,6 +879,147 @@ mod tests {
         assert_ne!(before, after);
     }
 
+    #[test]
+    fn background_only_custom_atom_materializes_a_paragraph_batch() {
+        let owner = Bump::new();
+        let atom = InlineAtom::new(
+            InlineAtomKind::Custom {
+                measured_size: [8.0, 8.0],
+                paint: Arc::<[LocalPaintCommand]>::from(Vec::<LocalPaintCommand>::new()),
+            },
+            InlineAtomStyle {
+                background: Some([0.2, 0.4, 0.8, 1.0]),
+                ..InlineAtomStyle::default()
+            },
+        )
+        .expect("atom must be valid");
+        let tree = tree_with_paragraph_atom(atom);
+
+        let scene = compose_scene(&owner, tree);
+        assert_eq!(scene.blocks().len(), 1);
+        let batch = &scene.blocks()[0];
+        assert_eq!(batch.rects().len(), 1);
+        assert!(batch.paths().is_empty());
+        assert!(batch.images().is_empty());
+        assert!(batch.glyphs().is_empty());
+    }
+
+    #[test]
+    fn image_atom_uses_content_rect_for_payload_and_emits_background_and_border() {
+        let owner = Bump::new();
+        let atom = InlineAtom::new(
+            InlineAtomKind::Image {
+                data_ref: Arc::new(ImageData::new(vec![255; 10 * 6 * 4], 10, 6)),
+            },
+            InlineAtomStyle {
+                padding: Edges::all(2.0).expect("padding must be valid"),
+                background: Some([0.1, 0.2, 0.3, 1.0]),
+                border: Some(
+                    BorderStyle::new([0.9, 0.8, 0.2, 1.0], 3.0).expect("border must be valid"),
+                ),
+                ..InlineAtomStyle::default()
+            },
+        )
+        .expect("atom must be valid");
+        let tree = tree_with_paragraph_atom(atom);
+
+        let scene = compose_scene(&owner, tree);
+        let batch = scene
+            .blocks()
+            .iter()
+            .find(|batch| !batch.images().is_empty())
+            .expect("scene must contain the atom image");
+        assert_eq!(batch.rects().len(), 5);
+        assert_eq!(batch.images().len(), 1);
+        assert_close(batch.images()[0].pos()[0], 5.0);
+        assert_close(batch.images()[0].pos()[1], 5.0);
+        assert_close(batch.images()[0].size()[0], 10.0);
+        assert_close(batch.images()[0].size()[1], 6.0);
+    }
+
+    #[test]
+    fn custom_atom_lowers_local_rect_path_and_image_commands() {
+        let owner = Bump::new();
+        let atom = InlineAtom::new(
+            InlineAtomKind::Custom {
+                measured_size: [12.0, 12.0],
+                paint: Arc::from(vec![
+                    LocalPaintCommand::Rect {
+                        pos: [1.0, 2.0],
+                        size: [3.0, 4.0],
+                        color: [0.9, 0.4, 0.2, 1.0],
+                    },
+                    LocalPaintCommand::Path {
+                        verbs: vec![
+                            PathVerb::MoveTo { to: [0.0, 0.0] },
+                            PathVerb::LineTo { to: [6.0, 0.0] },
+                            PathVerb::LineTo { to: [3.0, 6.0] },
+                            PathVerb::Close,
+                        ],
+                        fill: Some([0.2, 0.8, 0.4, 1.0]),
+                        stroke: None,
+                    },
+                    LocalPaintCommand::Image {
+                        pos: [4.0, 5.0],
+                        size: [2.0, 3.0],
+                        data_ref: Arc::new(ImageData::new(vec![255; 4], 1, 1)),
+                    },
+                ]),
+            },
+            InlineAtomStyle::default(),
+        )
+        .expect("atom must be valid");
+        let tree = tree_with_paragraph_atom(atom);
+
+        let scene = compose_scene(&owner, tree);
+        assert_eq!(scene.blocks().len(), 1);
+        let batch = &scene.blocks()[0];
+        assert_eq!(batch.rects().len(), 1);
+        assert_eq!(batch.paths().len(), 1);
+        assert_eq!(batch.images().len(), 1);
+    }
+
+    #[test]
+    fn custom_embed_scales_local_rect_commands_into_embed_rect() {
+        let owner = Bump::new();
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::Embed(
+                    BlockEmbedNode::new(
+                        BlockEmbedKind::Custom {
+                            intrinsic_size: [10.0, 10.0],
+                            paint: Arc::from(vec![LocalPaintCommand::Rect {
+                                pos: [1.0, 2.0],
+                                size: [3.0, 4.0],
+                                color: [0.7, 0.3, 0.9, 1.0],
+                            }]),
+                        },
+                        BlockStyle {
+                            align_self: Align::Start,
+                            min_width: Some(20.0),
+                            min_height: Some(30.0),
+                            ..BlockStyle::default()
+                        },
+                    )
+                    .expect("embed must be valid"),
+                )],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+
+        let scene = compose_scene(&owner, tree);
+        assert_eq!(scene.blocks().len(), 1);
+        let batch = &scene.blocks()[0];
+        assert_eq!(batch.rects().len(), 1);
+        assert_close(batch.rects()[0].pos[0], 2.0);
+        assert_close(batch.rects()[0].pos[1], 6.0);
+        assert_close(batch.rects()[0].size[0], 6.0);
+        assert_close(batch.rects()[0].size[1], 12.0);
+    }
+
     fn sample_block<'a>(owner: &'a Bump, block_id: BlockId, z_order: u32) -> BlockDataArena<'a> {
         BlockDataArena::new_in(
             owner,
@@ -687,5 +1061,56 @@ mod tests {
         let font_discovery = FontDiscovery::new().expect("failed to discover system fonts");
         FreeTypeRasterizer::new(font_discovery, detect_subpixel_layout())
             .expect("failed to initialize FreeType rasterizer")
+    }
+
+    fn tree_with_paragraph_atom(atom: InlineAtom) -> DocumentTree {
+        let text_style =
+            TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::Paragraph(
+                    ParagraphNode::new(
+                        vec![
+                            InlineNode::Text(TextRun::new("", text_style)),
+                            InlineNode::Atom(atom),
+                        ],
+                        ParagraphStyle::default(),
+                    )
+                    .expect("paragraph must be valid"),
+                )],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid")
+    }
+
+    fn compose_scene<'a>(
+        owner: &'a Bump,
+        tree: DocumentTree,
+    ) -> crate::scene::SceneBufferInner<'a> {
+        let rasterizer = build_rasterizer_for_test();
+        let prepared_tree = prepare_tree(&tree, &rasterizer);
+        let model = Model::new(tree);
+        let layout_cache = LayoutCache::new(prepared_tree);
+        let mut logical_atlas = LogicalAtlas::new(1.0);
+        Composer.compose_into_buffer(
+            owner,
+            &model,
+            &layout_cache,
+            &mut logical_atlas,
+            &rasterizer,
+            ViewportState::new(120, 90, 1.0, 7, None),
+            false,
+            512,
+        )
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "expected {expected}, got {actual}"
+        );
     }
 }

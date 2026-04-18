@@ -3,12 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::draw_list::{ImageData, LineCap, LineJoin, PathVerb};
+use crate::draw_list::{ImageData, PathVerb};
 use crate::layout::document::DocumentError;
 
+use super::render::{LocalPaintCommand, PathStroke};
 use super::style::{BlockStyle, InlineAtomStyle, ParagraphStyle};
 use super::text_style::TextStyle;
 use super::validation::validate_dimension;
+use super::validate_local_paint_commands;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct NodeId(u64);
@@ -212,6 +214,7 @@ pub(crate) enum InlineAtomKind {
     },
     Custom {
         measured_size: [f32; 2],
+        paint: Arc<[LocalPaintCommand]>,
     },
 }
 
@@ -220,9 +223,13 @@ impl InlineAtomKind {
         match self {
             Self::Chip { .. } | Self::Image { .. } => Ok(()),
             Self::Icon { size, .. } => validate_dimension(*size, false),
-            Self::Custom { measured_size } => {
+            Self::Custom {
+                measured_size,
+                paint,
+            } => {
                 validate_dimension(measured_size[0], false)?;
-                validate_dimension(measured_size[1], false)
+                validate_dimension(measured_size[1], false)?;
+                validate_local_paint_commands(paint)
             }
         }
     }
@@ -266,6 +273,7 @@ pub(crate) enum BlockEmbedKind {
     },
     Custom {
         intrinsic_size: [f32; 2],
+        paint: Arc<[LocalPaintCommand]>,
     },
 }
 
@@ -274,19 +282,15 @@ impl BlockEmbedKind {
         let intrinsic_size = match self {
             Self::Image { intrinsic_size, .. }
             | Self::Path { intrinsic_size, .. }
-            | Self::Custom { intrinsic_size } => intrinsic_size,
+            | Self::Custom { intrinsic_size, .. } => intrinsic_size,
         };
         validate_dimension(intrinsic_size[0], false)?;
-        validate_dimension(intrinsic_size[1], false)
+        validate_dimension(intrinsic_size[1], false)?;
+        if let Self::Custom { paint, .. } = self {
+            validate_local_paint_commands(paint)?;
+        }
+        Ok(())
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PathStroke {
-    pub(crate) color: [f32; 4],
-    pub(crate) width: f32,
-    pub(crate) line_cap: LineCap,
-    pub(crate) line_join: LineJoin,
 }
 
 #[derive(Clone, Debug)]
@@ -424,12 +428,15 @@ fn validate_overlay_targets(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::draw_list::PathVerb;
     use super::{
-        AnchorKey, BlockNode, DocumentTree, FlowDirection, OverlayAnchor, OverlayNode,
-        ParagraphNode, StackNode, TextRun,
+        AnchorKey, BlockNode, DocumentTree, FlowDirection, InlineAtom, InlineAtomKind,
+        LocalPaintCommand, OverlayAnchor, OverlayNode, ParagraphNode, StackNode, TextRun,
     };
     use crate::layout::document::DocumentError;
-    use crate::layout::tree::style::ParagraphStyle;
+    use crate::layout::tree::style::{InlineAtomStyle, ParagraphStyle};
     use crate::layout::tree::text_style::TextStyle;
 
     fn body_style() -> TextStyle {
@@ -518,5 +525,26 @@ mod tests {
         );
 
         DocumentTree::new(root).expect("overlay target must resolve");
+    }
+
+    #[test]
+    fn rejects_custom_atom_paint_without_fill_or_stroke() {
+        let atom = InlineAtom::new(
+            InlineAtomKind::Custom {
+                measured_size: [8.0, 8.0],
+                paint: Arc::from(vec![LocalPaintCommand::Path {
+                    verbs: vec![
+                        PathVerb::MoveTo { to: [0.0, 0.0] },
+                        PathVerb::LineTo { to: [8.0, 0.0] },
+                        PathVerb::Close,
+                    ],
+                    fill: None,
+                    stroke: None,
+                }]),
+            },
+            InlineAtomStyle::default(),
+        );
+
+        assert!(matches!(atom, Err(DocumentError::InvalidLocalPaint)));
     }
 }

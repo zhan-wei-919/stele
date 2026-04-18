@@ -5,7 +5,9 @@ use std::sync::Arc;
 use crate::draw_list::ImageData;
 use crate::layout::line_break::BreakOpportunity;
 use crate::layout::prepare::PreparedGlyph;
-use crate::layout::tree::{AtomBaseline, InlineAtomStyle, NodeId, ParagraphStyle};
+use crate::layout::tree::{
+    AtomBaseline, InlineAtomStyle, LocalPaintCommand, NodeId, ParagraphStyle,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedParagraph {
@@ -37,17 +39,16 @@ impl PreparedInlineAtom {
 
 #[derive(Clone, Debug)]
 pub(crate) enum PreparedAtomPayload {
-    Chip {
-        background: Option<[f32; 4]>,
-        measured_text: Vec<PreparedGlyph>,
-    },
+    Chip { measured_text: Vec<PreparedGlyph> },
     Icon {
         glyph: PreparedGlyph,
     },
     Image {
         data_ref: Arc<ImageData>,
     },
-    Custom,
+    Custom {
+        paint: Arc<[LocalPaintCommand]>,
+    },
 }
 
 #[derive(Clone, Debug)]

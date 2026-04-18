@@ -10,6 +10,7 @@ pub(crate) enum DocumentError {
     InvalidIntrinsicSize,
     InvalidLineHeight,
     InvalidBorderWidth,
+    InvalidLocalPaint,
     InvalidAnchorKey,
     DuplicateAnchorKey { key: String },
     UnknownOverlayTarget { key: String },

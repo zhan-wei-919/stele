@@ -8,8 +8,8 @@ use crate::font::{FontSelection, FreeTypeRasterizer, LineMetrics, MeasuredGlyph}
 use crate::layout::line_break::{collect_breaks, BreakOpportunity};
 use crate::layout::prepare::PreparedGlyph;
 use crate::layout::tree::{
-    BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, InlineAtom, InlineAtomKind,
-    InlineNode, OverlayNode, ParagraphNode, StackNode, TextStyle,
+    BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, InlineAtom, InlineAtomKind, InlineNode,
+    OverlayNode, ParagraphNode, StackNode, TextStyle,
 };
 
 use super::embed::{PreparedEmbed, PreparedEmbedPayload};
@@ -214,6 +214,7 @@ fn prepare_inline_atom(
     atom: &InlineAtom,
     rasterizer: &FreeTypeRasterizer,
 ) -> PreparedInlineAtom {
+    let border_width = atom.style.border.map_or(0.0, |border| border.width);
     match &atom.kind {
         InlineAtomKind::Chip { label, text_style } => {
             let font_selection = rasterizer.resolve_font(
@@ -248,15 +249,12 @@ fn prepare_inline_atom(
                 .sum::<f32>();
             PreparedInlineAtom {
                 intrinsic_size: [
-                    label_width + atom.style.padding.horizontal(),
-                    metrics.line_height + atom.style.padding.vertical(),
+                    label_width + atom.style.padding.horizontal() + border_width * 2.0,
+                    metrics.line_height + atom.style.padding.vertical() + border_width * 2.0,
                 ],
                 baseline: atom.style.baseline,
                 style: atom.style,
-                payload: PreparedAtomPayload::Chip {
-                    background: atom.style.background,
-                    measured_text,
-                },
+                payload: PreparedAtomPayload::Chip { measured_text },
             }
         }
         InlineAtomKind::Icon {
@@ -282,8 +280,8 @@ fn prepare_inline_atom(
             };
             PreparedInlineAtom {
                 intrinsic_size: [
-                    glyph.advance + atom.style.padding.horizontal(),
-                    metrics.line_height + atom.style.padding.vertical(),
+                    glyph.advance + atom.style.padding.horizontal() + border_width * 2.0,
+                    metrics.line_height + atom.style.padding.vertical() + border_width * 2.0,
                 ],
                 baseline: atom.style.baseline,
                 style: atom.style,
@@ -292,8 +290,8 @@ fn prepare_inline_atom(
         }
         InlineAtomKind::Image { data_ref } => PreparedInlineAtom {
             intrinsic_size: [
-                data_ref.width() as f32 + atom.style.padding.horizontal(),
-                data_ref.height() as f32 + atom.style.padding.vertical(),
+                data_ref.width() as f32 + atom.style.padding.horizontal() + border_width * 2.0,
+                data_ref.height() as f32 + atom.style.padding.vertical() + border_width * 2.0,
             ],
             baseline: atom.style.baseline,
             style: atom.style,
@@ -301,14 +299,19 @@ fn prepare_inline_atom(
                 data_ref: data_ref.clone(),
             },
         },
-        InlineAtomKind::Custom { measured_size } => PreparedInlineAtom {
+        InlineAtomKind::Custom {
+            measured_size,
+            paint,
+        } => PreparedInlineAtom {
             intrinsic_size: [
-                measured_size[0] + atom.style.padding.horizontal(),
-                measured_size[1] + atom.style.padding.vertical(),
+                measured_size[0] + atom.style.padding.horizontal() + border_width * 2.0,
+                measured_size[1] + atom.style.padding.vertical() + border_width * 2.0,
             ],
             baseline: atom.style.baseline,
             style: atom.style,
-            payload: PreparedAtomPayload::Custom,
+            payload: PreparedAtomPayload::Custom {
+                paint: paint.clone(),
+            },
         },
     }
 }
@@ -341,11 +344,16 @@ fn prepare_embed(embed: &BlockEmbedNode) -> PreparedEmbed {
                 stroke: *stroke,
             },
         },
-        BlockEmbedKind::Custom { intrinsic_size } => PreparedEmbed {
+        BlockEmbedKind::Custom {
+            intrinsic_size,
+            paint,
+        } => PreparedEmbed {
             node_id: embed.node_id,
             intrinsic_size: *intrinsic_size,
             style: embed.style,
-            payload: PreparedEmbedPayload::Custom,
+            payload: PreparedEmbedPayload::Custom {
+                paint: paint.clone(),
+            },
         },
     }
 }

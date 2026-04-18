@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::draw_list::ImageData;
 use crate::draw_list::PathVerb;
-use crate::layout::tree::{BlockStyle, NodeId, PathStroke};
+use crate::layout::tree::{BlockStyle, LocalPaintCommand, NodeId, PathStroke};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedEmbed {
@@ -24,5 +24,7 @@ pub(crate) enum PreparedEmbedPayload {
         fill: Option<[f32; 4]>,
         stroke: Option<PathStroke>,
     },
-    Custom,
+    Custom {
+        paint: Arc<[LocalPaintCommand]>,
+    },
 }

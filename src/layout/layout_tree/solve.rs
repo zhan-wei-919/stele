@@ -10,7 +10,7 @@ use crate::layout::prepare_tree::{
 };
 use crate::layout::tree::{Align, BlockStyle, ClipMode, OverlayAnchor};
 
-use super::paragraph::layout_paragraph;
+use super::paragraph::{layout_paragraph, measure_paragraph_content_width};
 use super::types::{
     LayoutBlock, LayoutBlockContent, LayoutConstraints, LayoutEmbed, LayoutEmbedKind, LayoutRect,
     LayoutTree,
@@ -46,6 +46,22 @@ struct SolvedBlock {
     outer_size: [f32; 2],
 }
 
+#[derive(Clone, Copy)]
+enum ChildWidthMode {
+    Default,
+    VerticalFitContent,
+    VerticalStretch,
+}
+
+struct MeasuredChild<'a> {
+    child: &'a PreparedBlockNode,
+    style: BlockStyle,
+    available_width: f32,
+    collapsed_top_margin: f32,
+    width_mode: ChildWidthMode,
+    outer_size: [f32; 2],
+}
+
 /// Solves the prepared rich-text tree into concrete layout geometry.
 pub(crate) fn layout_tree(prepared: &PreparedTree, constraints: LayoutConstraints) -> LayoutTree {
     let viewport_rect = constraints.viewport_rect();
@@ -62,6 +78,7 @@ pub(crate) fn layout_tree(prepared: &PreparedTree, constraints: LayoutConstraint
         viewport_rect,
         &mut context,
         true,
+        ChildWidthMode::Default,
     )
     .block;
 
@@ -89,6 +106,7 @@ pub(crate) fn layout_tree(prepared: &PreparedTree, constraints: LayoutConstraint
             declaration_clip,
             &mut context,
             false,
+            ChildWidthMode::Default,
         )
         .block;
         block.doc_order = doc_order;
@@ -112,6 +130,7 @@ fn layout_flow_block<'a>(
     inherited_clip: LayoutRect,
     context: &mut SolveContext<'a>,
     record_anchors: bool,
+    width_mode: ChildWidthMode,
 ) -> SolvedBlock {
     context.block_count += 1;
     match node {
@@ -122,6 +141,7 @@ fn layout_flow_block<'a>(
             inherited_clip,
             context,
             record_anchors,
+            width_mode,
         ),
         PreparedBlockNode::Paragraph(paragraph) => layout_leaf_paragraph(
             paragraph,
@@ -130,6 +150,7 @@ fn layout_flow_block<'a>(
             inherited_clip,
             context,
             record_anchors,
+            width_mode,
         ),
         PreparedBlockNode::Embed(embed) => layout_leaf_embed(
             embed,
@@ -138,6 +159,7 @@ fn layout_flow_block<'a>(
             inherited_clip,
             context,
             record_anchors,
+            width_mode,
         ),
         PreparedBlockNode::Overlay(overlay) => {
             layout_overlay_placeholder(overlay, inherited_clip, context)
@@ -152,12 +174,13 @@ fn layout_stack<'a>(
     inherited_clip: LayoutRect,
     context: &mut SolveContext<'a>,
     record_anchors: bool,
+    _width_mode: ChildWidthMode,
 ) -> SolvedBlock {
     let style = stack.style;
     let width_limit = width_limit(style, available_width);
     let content_available_width = (width_limit - style.padding.horizontal()).max(0.0);
     let overlay_start = context.overlays.len();
-    let mut children = Vec::new();
+    let mut measured_children = Vec::new();
     let mut pending_overlays = Vec::new();
     let mut content_width: f32 = 0.0;
     let mut content_height: f32 = 0.0;
@@ -192,35 +215,30 @@ fn layout_stack<'a>(
                 (content_available_width - cursor_x - child_style.margin.horizontal()).max(0.0)
             }
         };
-        let child_origin = [
-            origin[0] + style.padding.left + cursor_x + child_style.margin.left,
-            origin[1] + style.padding.top + cursor_y + collapsed_top_margin,
-        ];
-        let solved_child = layout_flow_block(
-            child,
-            child_origin,
-            child_available_width,
-            inherited_clip,
-            context,
-            record_anchors,
-        );
-        let child_outer_width = solved_child.outer_size[0];
-        let child_outer_height = solved_child.outer_size[1];
+        let width_mode = child_width_mode(stack.direction, child_style.align_self);
+        let child_outer_size = measure_flow_block(child, child_available_width, width_mode);
         match stack.direction {
             crate::layout::tree::FlowDirection::Vertical => {
-                cursor_y += collapsed_top_margin + solved_child.block.rect.height();
+                cursor_y += collapsed_top_margin + (child_outer_size[1] - child_style.margin.vertical());
                 prev_bottom_margin = child_style.margin.bottom;
-                content_width = content_width.max(child_outer_width);
+                content_width = content_width.max(child_outer_size[0]);
                 content_height = cursor_y + prev_bottom_margin;
             }
             crate::layout::tree::FlowDirection::Horizontal => {
-                cursor_x += child_outer_width;
+                cursor_x += child_outer_size[0];
                 content_width = cursor_x;
-                content_height = content_height.max(child_outer_height);
+                content_height = content_height.max(child_outer_size[1]);
             }
         }
         has_flow_child = true;
-        children.push(solved_child.block);
+        measured_children.push(MeasuredChild {
+            child,
+            style: child_style,
+            available_width: child_available_width,
+            collapsed_top_margin,
+            width_mode,
+            outer_size: child_outer_size,
+        });
     }
 
     let width = resolve_width(
@@ -231,11 +249,51 @@ fn layout_stack<'a>(
     let height = resolve_height(style, content_height + style.padding.vertical());
     let rect = LayoutRect::new(origin[0], origin[1], width, height);
     let clip_rect = effective_clip(rect, inherited_clip, style.clip);
+    let content_box_width = (width - style.padding.horizontal()).max(0.0);
+    let content_box_height = (height - style.padding.vertical()).max(0.0);
+    let mut children = Vec::with_capacity(measured_children.len());
+    cursor_x = 0.0;
+    cursor_y = 0.0;
+    for measured in measured_children {
+        let cross_offset = match stack.direction {
+            crate::layout::tree::FlowDirection::Vertical => {
+                cross_axis_offset(measured.style.align_self, content_box_width, measured.outer_size[0])
+            }
+            crate::layout::tree::FlowDirection::Horizontal => {
+                cross_axis_offset(measured.style.align_self, content_box_height, measured.outer_size[1])
+            }
+        };
+        let child_origin = match stack.direction {
+            crate::layout::tree::FlowDirection::Vertical => [
+                origin[0] + style.padding.left + cross_offset + measured.style.margin.left,
+                origin[1] + style.padding.top + cursor_y + measured.collapsed_top_margin,
+            ],
+            crate::layout::tree::FlowDirection::Horizontal => [
+                origin[0] + style.padding.left + cursor_x + measured.style.margin.left,
+                origin[1] + style.padding.top + cross_offset + measured.style.margin.top,
+            ],
+        };
+        let solved_child = layout_flow_block(
+            measured.child,
+            child_origin,
+            measured.available_width,
+            clip_rect,
+            context,
+            record_anchors,
+            measured.width_mode,
+        );
+        match stack.direction {
+            crate::layout::tree::FlowDirection::Vertical => {
+                cursor_y += measured.collapsed_top_margin + solved_child.block.rect.height();
+            }
+            crate::layout::tree::FlowDirection::Horizontal => {
+                cursor_x += solved_child.outer_size[0];
+            }
+        }
+        children.push(solved_child.block);
+    }
     for overlay in &mut context.overlays[overlay_start..] {
         overlay.declaration_clip = overlay.declaration_clip.intersect(clip_rect);
-    }
-    for child in &mut children {
-        clamp_subtree_clip(child, clip_rect);
     }
     for overlay in pending_overlays {
         context.overlays.push(DeferredOverlay {
@@ -280,9 +338,10 @@ fn layout_leaf_paragraph<'a>(
     inherited_clip: LayoutRect,
     context: &mut SolveContext<'a>,
     record_anchors: bool,
+    width_mode: ChildWidthMode,
 ) -> SolvedBlock {
     let style = paragraph.style.block;
-    let width = resolve_width(style, available_width, available_width);
+    let width = resolve_paragraph_width(paragraph, available_width, width_mode);
     let content_rect = LayoutRect::new(
         origin[0] + style.padding.left,
         origin[1] + style.padding.top,
@@ -325,15 +384,16 @@ fn layout_leaf_paragraph<'a>(
 fn layout_leaf_embed<'a>(
     embed: &'a PreparedEmbed,
     origin: [f32; 2],
-    _available_width: f32,
+    available_width: f32,
     inherited_clip: LayoutRect,
     context: &mut SolveContext<'a>,
     record_anchors: bool,
+    width_mode: ChildWidthMode,
 ) -> SolvedBlock {
     let style = embed.style;
     let intrinsic_width = embed.intrinsic_size[0] + style.padding.horizontal();
     let intrinsic_height = embed.intrinsic_size[1] + style.padding.vertical();
-    let width = resolve_intrinsic_width(style, intrinsic_width);
+    let width = resolve_embed_width(style, available_width, intrinsic_width, width_mode);
     let height = resolve_height(style, intrinsic_height);
     let rect = LayoutRect::new(origin[0], origin[1], width, height);
     let content_rect = LayoutRect::new(
@@ -356,7 +416,9 @@ fn layout_leaf_embed<'a>(
             fill: *fill,
             stroke: *stroke,
         },
-        PreparedEmbedPayload::Custom => LayoutEmbedKind::Custom,
+        PreparedEmbedPayload::Custom { paint } => LayoutEmbedKind::Custom {
+            paint: paint.clone(),
+        },
     };
     let block = LayoutBlock {
         node_id: embed.node_id,
@@ -416,15 +478,6 @@ fn layout_overlay_placeholder<'a>(
     }
 }
 
-fn clamp_subtree_clip(block: &mut LayoutBlock, clip_rect: LayoutRect) {
-    block.clip_rect = block.clip_rect.intersect(clip_rect);
-    if let LayoutBlockContent::Stack { children } = &mut block.content {
-        for child in children {
-            clamp_subtree_clip(child, clip_rect);
-        }
-    }
-}
-
 fn resolve_overlay_target(
     anchor: &OverlayAnchor,
     prepared: &PreparedTree,
@@ -456,6 +509,124 @@ fn effective_clip(rect: LayoutRect, inherited_clip: LayoutRect, clip_mode: ClipM
     }
 }
 
+fn measure_flow_block(
+    node: &PreparedBlockNode,
+    available_width: f32,
+    width_mode: ChildWidthMode,
+) -> [f32; 2] {
+    match node {
+        PreparedBlockNode::Stack(stack) => measure_stack(stack, available_width),
+        PreparedBlockNode::Paragraph(paragraph) => {
+            measure_leaf_paragraph(paragraph, available_width, width_mode)
+        }
+        PreparedBlockNode::Embed(embed) => measure_leaf_embed(embed, available_width, width_mode),
+        PreparedBlockNode::Overlay(_) => [0.0, 0.0],
+    }
+}
+
+fn measure_stack(stack: &PreparedStack, available_width: f32) -> [f32; 2] {
+    let style = stack.style;
+    let width_limit = width_limit(style, available_width);
+    let content_available_width = (width_limit - style.padding.horizontal()).max(0.0);
+    let mut content_width: f32 = 0.0;
+    let mut content_height: f32 = 0.0;
+    let mut cursor_x: f32 = 0.0;
+    let mut cursor_y: f32 = 0.0;
+    let mut prev_bottom_margin: f32 = 0.0;
+    let mut has_flow_child = false;
+
+    for child in &stack.children {
+        if matches!(child, PreparedBlockNode::Overlay(_)) {
+            continue;
+        }
+        let child_style = block_style(child);
+        let collapsed_top_margin = if matches!(
+            stack.direction,
+            crate::layout::tree::FlowDirection::Vertical
+        ) {
+            if has_flow_child {
+                prev_bottom_margin.max(child_style.margin.top)
+            } else {
+                child_style.margin.top
+            }
+        } else {
+            0.0
+        };
+        let child_available_width = match stack.direction {
+            crate::layout::tree::FlowDirection::Vertical => {
+                (content_available_width - child_style.margin.horizontal()).max(0.0)
+            }
+            crate::layout::tree::FlowDirection::Horizontal => {
+                (content_available_width - cursor_x - child_style.margin.horizontal()).max(0.0)
+            }
+        };
+        let width_mode = child_width_mode(stack.direction, child_style.align_self);
+        let child_outer_size = measure_flow_block(child, child_available_width, width_mode);
+        match stack.direction {
+            crate::layout::tree::FlowDirection::Vertical => {
+                cursor_y += collapsed_top_margin + (child_outer_size[1] - child_style.margin.vertical());
+                prev_bottom_margin = child_style.margin.bottom;
+                content_width = content_width.max(child_outer_size[0]);
+                content_height = cursor_y + prev_bottom_margin;
+            }
+            crate::layout::tree::FlowDirection::Horizontal => {
+                cursor_x += child_outer_size[0];
+                content_width = cursor_x;
+                content_height = content_height.max(child_outer_size[1]);
+            }
+        }
+        has_flow_child = true;
+    }
+
+    let width = resolve_width(
+        style,
+        available_width,
+        content_width + style.padding.horizontal(),
+    );
+    let height = resolve_height(style, content_height + style.padding.vertical());
+    [
+        width + style.margin.horizontal(),
+        height + style.margin.vertical(),
+    ]
+}
+
+fn measure_leaf_paragraph(
+    paragraph: &PreparedParagraph,
+    available_width: f32,
+    width_mode: ChildWidthMode,
+) -> [f32; 2] {
+    let style = paragraph.style.block;
+    let width = resolve_paragraph_width(paragraph, available_width, width_mode);
+    let content_rect = LayoutRect::new(
+        0.0,
+        0.0,
+        (width - style.padding.horizontal()).max(0.0),
+        0.0,
+    );
+    let content_height = layout_paragraph(paragraph, content_rect).rect.height();
+    let height = resolve_height(style, content_height + style.padding.vertical());
+    [
+        width + style.margin.horizontal(),
+        height + style.margin.vertical(),
+    ]
+}
+
+fn measure_leaf_embed(
+    embed: &PreparedEmbed,
+    available_width: f32,
+    width_mode: ChildWidthMode,
+) -> [f32; 2] {
+    let style = embed.style;
+    let intrinsic_width = embed.intrinsic_size[0] + style.padding.horizontal();
+    let intrinsic_height = embed.intrinsic_size[1] + style.padding.vertical();
+    let width = resolve_embed_width(style, available_width, intrinsic_width, width_mode);
+    let height = resolve_height(style, intrinsic_height);
+    [
+        width + style.margin.horizontal(),
+        height + style.margin.vertical(),
+    ]
+}
+
 fn block_style(node: &PreparedBlockNode) -> BlockStyle {
     match node {
         PreparedBlockNode::Stack(stack) => stack.style,
@@ -478,21 +649,68 @@ fn resolve_width(style: BlockStyle, available_width: f32, content_width: f32) ->
     } else {
         content_width.min(limit)
     };
-    let width = style
-        .min_width
-        .map_or(base, |min_width| base.max(min_width));
+    let min_width = style.min_width.map_or(0.0, |min_width| min_width.min(limit));
+    let width = base.max(min_width);
     width.max(0.0)
 }
 
+fn resolve_paragraph_width(
+    paragraph: &PreparedParagraph,
+    available_width: f32,
+    width_mode: ChildWidthMode,
+) -> f32 {
+    let style = paragraph.style.block;
+    let content_width = if matches!(width_mode, ChildWidthMode::VerticalFitContent) {
+        let width_limit = width_limit(style, available_width);
+        let available_content_width = (width_limit - style.padding.horizontal()).max(0.0);
+        measure_paragraph_content_width(paragraph, available_content_width)
+            + style.padding.horizontal()
+    } else {
+        available_width
+    };
+    resolve_width(style, available_width, content_width)
+}
+
+fn resolve_embed_width(
+    style: BlockStyle,
+    available_width: f32,
+    intrinsic_width: f32,
+    width_mode: ChildWidthMode,
+) -> f32 {
+    match width_mode {
+        ChildWidthMode::VerticalStretch => resolve_width(style, available_width, available_width),
+        ChildWidthMode::Default | ChildWidthMode::VerticalFitContent => {
+            resolve_intrinsic_width(style, intrinsic_width)
+        }
+    }
+}
+
 fn resolve_intrinsic_width(style: BlockStyle, intrinsic_width: f32) -> f32 {
+    let parent_limit = width_limit(style, f32::INFINITY);
     let mut width = intrinsic_width.max(0.0);
     if let Some(min_width) = style.min_width {
-        width = width.max(min_width);
+        width = width.max(min_width.min(parent_limit));
     }
     if let Some(max_width) = style.max_width {
         width = width.min(max_width);
     }
     width
+}
+
+fn child_width_mode(
+    direction: crate::layout::tree::FlowDirection,
+    align_self: Align,
+) -> ChildWidthMode {
+    match direction {
+        crate::layout::tree::FlowDirection::Vertical => {
+            if align_self == Align::Stretch {
+                ChildWidthMode::VerticalStretch
+            } else {
+                ChildWidthMode::VerticalFitContent
+            }
+        }
+        crate::layout::tree::FlowDirection::Horizontal => ChildWidthMode::Default,
+    }
 }
 
 fn resolve_height(style: BlockStyle, content_height: f32) -> f32 {
@@ -503,6 +721,15 @@ fn resolve_height(style: BlockStyle, content_height: f32) -> f32 {
         height = height.min(max_height);
     }
     height.max(0.0)
+}
+
+fn cross_axis_offset(align: Align, available_cross_size: f32, child_outer_cross_size: f32) -> f32 {
+    let free = (available_cross_size - child_outer_cross_size).max(0.0);
+    match align {
+        Align::Start | Align::Stretch => 0.0,
+        Align::Center => free * 0.5,
+        Align::End => free,
+    }
 }
 
 fn lift_subtree_above_z(block: &mut LayoutBlock, min_z_order: u32) {
@@ -566,14 +793,27 @@ fn block_materializes(block: &LayoutBlock) -> bool {
                             !run.glyphs.is_empty() || !run.decoration_rects.is_empty()
                         }
                         super::types::LayoutRun::Atom(run) => {
-                            !matches!(run.payload, super::types::LayoutAtomPayload::Custom)
+                            run.background.is_some()
+                                || run.border.is_some()
+                                || match &run.payload {
+                                    super::types::LayoutAtomPayload::Chip { glyphs } => {
+                                        !glyphs.is_empty()
+                                    }
+                                    super::types::LayoutAtomPayload::Icon { .. }
+                                    | super::types::LayoutAtomPayload::Image { .. } => true,
+                                    super::types::LayoutAtomPayload::Custom { paint } => {
+                                        !paint.is_empty()
+                                    }
+                                }
                         }
                     })
                 })
         }
-        LayoutBlockContent::Embed(embed) => {
-            block.background.is_some() || !matches!(embed.kind, LayoutEmbedKind::Custom)
-        }
+        LayoutBlockContent::Embed(embed) => block.background.is_some()
+            || match &embed.kind {
+                LayoutEmbedKind::Custom { paint } => !paint.is_empty(),
+                LayoutEmbedKind::Image { .. } | LayoutEmbedKind::Path { .. } => true,
+            },
     }
 }
 
@@ -584,8 +824,8 @@ mod tests {
     use crate::draw_list::ImageData;
     use crate::layout::prepare_tree::prepare_tree;
     use crate::layout::tree::{
-        AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, ClipMode, DocumentTree,
-        Edges, FlowDirection, InlineNode, OverlayAnchor, OverlayNode, ParagraphNode,
+        Align, AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, ClipMode,
+        DocumentTree, Edges, FlowDirection, InlineNode, OverlayAnchor, OverlayNode, ParagraphNode,
         ParagraphStyle, StackNode, TextRun, TextStyle,
     };
 
@@ -644,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_uses_intrinsic_width_instead_of_stretching_to_container() {
+    fn vertical_stack_stretch_embed_fills_available_width() {
         let tree = DocumentTree::new(BlockNode::Stack(
             StackNode::new(
                 FlowDirection::Vertical,
@@ -655,6 +895,39 @@ mod tests {
                             intrinsic_size: [24.0, 12.0],
                         },
                         BlockStyle::default(),
+                    )
+                    .expect("embed must be valid"),
+                )],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+
+        let prepared = prepare_tree(&tree, &rasterizer());
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0, [200.0, 100.0]));
+        let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
+            panic!("root must be stack");
+        };
+        assert_eq!(children.len(), 1);
+        assert!((children[0].rect.width() - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn vertical_stack_non_stretch_embed_keeps_intrinsic_width() {
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::Embed(
+                    BlockEmbedNode::new(
+                        BlockEmbedKind::Image {
+                            data_ref: Arc::new(ImageData::new(vec![255; 4], 1, 1)),
+                            intrinsic_size: [24.0, 12.0],
+                        },
+                        BlockStyle {
+                            align_self: Align::Start,
+                            ..BlockStyle::default()
+                        },
                     )
                     .expect("embed must be valid"),
                 )],
@@ -918,5 +1191,132 @@ mod tests {
         };
         assert!(paragraph.lines.len() > 1);
         assert!(paragraph.rect.height() > 0.0);
+    }
+
+    #[test]
+    fn vertical_stack_non_stretch_paragraphs_gain_real_cross_axis_offsets() {
+        let style = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let make_paragraph = |align_self| {
+            BlockNode::Paragraph(
+                ParagraphNode::new(
+                    vec![InlineNode::Text(TextRun::new("short", style))],
+                    ParagraphStyle {
+                        block: BlockStyle {
+                            align_self,
+                            ..BlockStyle::default()
+                        },
+                        ..ParagraphStyle::default()
+                    },
+                )
+                .expect("paragraph must be valid"),
+            )
+        };
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![
+                    make_paragraph(Align::Start),
+                    make_paragraph(Align::Center),
+                    make_paragraph(Align::End),
+                ],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+
+        let prepared = prepare_tree(&tree, &rasterizer());
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(120.0, [120.0, 120.0]));
+        let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
+            panic!("root must be stack");
+        };
+        assert_eq!(children.len(), 3);
+        assert!(children.iter().all(|child| child.rect.width() < laid_out.root.rect.width()));
+        assert!((children[0].rect.x() - 0.0).abs() < 0.01);
+        assert!(children[1].rect.x() > children[0].rect.x());
+        assert!(children[2].rect.x() > children[1].rect.x());
+    }
+
+    #[test]
+    fn vertical_stack_non_stretch_paragraph_min_width_is_clamped_by_parent_width() {
+        let style = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::Paragraph(
+                    ParagraphNode::new(
+                        vec![InlineNode::Text(TextRun::new("short", style))],
+                        ParagraphStyle {
+                            block: BlockStyle {
+                                align_self: Align::End,
+                                min_width: Some(120.0),
+                                ..BlockStyle::default()
+                            },
+                            ..ParagraphStyle::default()
+                        },
+                    )
+                    .expect("paragraph must be valid"),
+                )],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+
+        let prepared = prepare_tree(&tree, &rasterizer());
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(80.0, [80.0, 120.0]));
+        let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
+            panic!("root must be stack");
+        };
+        assert_eq!(children.len(), 1);
+        assert!((children[0].rect.width() - 80.0).abs() < 0.01);
+        assert!((children[0].rect.x() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn horizontal_stack_end_alignment_moves_child_to_bottom_edge() {
+        let image = Arc::new(ImageData::new(vec![255; 4], 1, 1));
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Horizontal,
+                vec![
+                    BlockNode::Embed(
+                        BlockEmbedNode::new(
+                            BlockEmbedKind::Image {
+                                data_ref: image.clone(),
+                                intrinsic_size: [10.0, 40.0],
+                            },
+                            BlockStyle::default(),
+                        )
+                        .expect("embed must be valid"),
+                    ),
+                    BlockNode::Embed(
+                        BlockEmbedNode::new(
+                            BlockEmbedKind::Image {
+                                data_ref: image,
+                                intrinsic_size: [10.0, 10.0],
+                            },
+                            BlockStyle {
+                                align_self: Align::End,
+                                ..BlockStyle::default()
+                            },
+                        )
+                        .expect("embed must be valid"),
+                    ),
+                ],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+
+        let prepared = prepare_tree(&tree, &rasterizer());
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(120.0, [120.0, 120.0]));
+        let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
+            panic!("root must be stack");
+        };
+        assert_eq!(children.len(), 2);
+        assert!((children[0].rect.y() - 0.0).abs() < 0.01);
+        assert!((children[1].rect.y() - 30.0).abs() < 0.01);
     }
 }

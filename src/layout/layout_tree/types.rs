@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::draw_list::{ImageData, PathVerb, PositionedGlyph, RectCmd};
-use crate::layout::tree::{NodeId, PathStroke};
+use crate::layout::tree::{BorderStyle, LocalPaintCommand, NodeId, PathStroke};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LayoutRect {
@@ -145,22 +145,24 @@ pub(crate) struct LayoutTextRun {
 #[derive(Clone, Debug)]
 pub(crate) struct LayoutAtomRun {
     pub(crate) rect: LayoutRect,
+    pub(crate) content_rect: LayoutRect,
+    pub(crate) background: Option<[f32; 4]>,
+    pub(crate) border: Option<BorderStyle>,
     pub(crate) payload: LayoutAtomPayload,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum LayoutAtomPayload {
-    Chip {
-        background: Option<[f32; 4]>,
-        glyphs: Vec<PositionedGlyph>,
-    },
+    Chip { glyphs: Vec<PositionedGlyph> },
     Icon {
         glyph: PositionedGlyph,
     },
     Image {
         data_ref: Arc<ImageData>,
     },
-    Custom,
+    Custom {
+        paint: Arc<[LocalPaintCommand]>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -180,5 +182,7 @@ pub(crate) enum LayoutEmbedKind {
         fill: Option<[f32; 4]>,
         stroke: Option<PathStroke>,
     },
-    Custom,
+    Custom {
+        paint: Arc<[LocalPaintCommand]>,
+    },
 }

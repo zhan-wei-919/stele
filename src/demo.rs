@@ -7,9 +7,10 @@ use crate::font::FreeTypeRasterizer;
 use crate::layout::prepare_tree::prepare_tree;
 use crate::layout::tree::{
     Align, AnchorKey, AtomBaseline, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle,
-    ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind, InlineAtomStyle,
-    InlineNode, LineHeight, OverlayAnchor, OverlayNode, ParagraphNode, ParagraphStyle, PathStroke,
-    StackNode, TextRun, TextStyle, WrapMode,
+    BorderStyle, ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind,
+    InlineAtomStyle, InlineNode, LineHeight, LocalPaintCommand, OverlayAnchor, OverlayNode,
+    ParagraphNode, ParagraphStyle, PathStroke, StackNode, TextAlign, TextRun, TextStyle,
+    WrapMode,
 };
 use crate::store::{Model, Store, StoreBootstrap, StoreDelegate, ViewportState};
 
@@ -120,6 +121,7 @@ fn build_content_column(
             build_hero_section(styles),
             build_summary_section(styles, wide_layout),
             build_inline_showcase_section(styles),
+            build_alignment_section(styles),
             build_quote_and_list_section(styles),
             build_baseline_section(styles),
             build_code_section(styles, code_anchor),
@@ -291,14 +293,17 @@ fn build_inline_showcase_section(styles: &DemoStyles) -> BlockNode {
                     text("strikethrough", styles.deleted),
                     text("。同一段里还能插入 ", styles.body),
                     chip("chip atom", styles.badge),
-                    text(" 以及 inline image ", styles.body),
+                    text("、带 background/border 的 inline image ", styles.body),
                     image_atom(
                         demo_inline_image_data(),
                         AtomBaseline::AlphabeticAlignedToLine,
                         Some(CODE_INLINE_BG),
+                        Some(border(TEXT_LINK, 1.5)),
                     ),
+                    text("，以及 local paint 驱动的 custom atom ", styles.body),
+                    custom_atom(),
                     text(
-                        "，所以拿它拼 markdown 的 callout、emoji 替身或者 badge 都比较直接。",
+                        "，所以拿它拼 markdown 的 callout、emoji 替身或者状态标记都比较直接。",
                         styles.body,
                     ),
                 ],
@@ -327,6 +332,145 @@ fn build_inline_showcase_section(styles: &DemoStyles) -> BlockNode {
                         ..BlockStyle::default()
                     },
                     ..ParagraphStyle::default()
+                },
+            ),
+        ],
+        BlockStyle {
+            background: Some(SURFACE_BG),
+            clip: ClipMode::Rect,
+            padding: edges(22.0, 20.0, 22.0, 20.0),
+            margin: edges(0.0, 18.0, 0.0, 0.0),
+            ..BlockStyle::default()
+        },
+    )
+}
+
+fn build_alignment_section(styles: &DemoStyles) -> BlockNode {
+    stack(
+        FlowDirection::Vertical,
+        vec![
+            paragraph(
+                vec![
+                    text("## ", styles.overline),
+                    text("Alignment And Width", styles.heading),
+                ],
+                ParagraphStyle::default(),
+            ),
+            paragraph(
+                vec![text(
+                    "Short line pinned to the right edge of the paragraph content box.",
+                    styles.body,
+                )],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        background: Some(SURFACE_BG_SUBTLE),
+                        clip: ClipMode::Rect,
+                        padding: edges(16.0, 14.0, 16.0, 14.0),
+                        margin: edges(0.0, 12.0, 0.0, 0.0),
+                        ..BlockStyle::default()
+                    },
+                    text_align: TextAlign::End,
+                    ..ParagraphStyle::default()
+                },
+            ),
+            paragraph(
+                vec![text(
+                    "Centered headline inside a full-width paragraph card.",
+                    styles.body,
+                )],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        background: Some(SURFACE_BG_SUBTLE),
+                        clip: ClipMode::Rect,
+                        padding: edges(16.0, 14.0, 16.0, 14.0),
+                        margin: edges(0.0, 10.0, 0.0, 0.0),
+                        ..BlockStyle::default()
+                    },
+                    text_align: TextAlign::Center,
+                    ..ParagraphStyle::default()
+                },
+            ),
+            paragraph(
+                vec![text(
+                    "Justify now expands wrapped interior lines across normal break opportunities, so the paragraph block reads like a real document column instead of leaving ragged gaps on every intermediate line.",
+                    styles.body,
+                )],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        background: Some(SURFACE_BG_SUBTLE),
+                        clip: ClipMode::Rect,
+                        padding: edges(16.0, 14.0, 16.0, 14.0),
+                        margin: edges(0.0, 10.0, 0.0, 0.0),
+                        ..BlockStyle::default()
+                    },
+                    text_align: TextAlign::Justify,
+                    ..ParagraphStyle::default()
+                },
+            ),
+            paragraph(
+                vec![text(
+                    "The block stack below uses fit-content paragraph widths plus cross-axis placement, so Start / Center / End are visible without introducing fake fixed widths.",
+                    styles.caption,
+                )],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        margin: edges(0.0, 12.0, 0.0, 0.0),
+                        ..BlockStyle::default()
+                    },
+                    ..ParagraphStyle::default()
+                },
+            ),
+            stack(
+                FlowDirection::Vertical,
+                vec![
+                    paragraph(
+                        vec![text("align_self = Start", styles.caption)],
+                        ParagraphStyle {
+                            block: BlockStyle {
+                                align_self: Align::Start,
+                                background: Some(SURFACE_BG_STRONG),
+                                clip: ClipMode::Rect,
+                                padding: edges(14.0, 10.0, 14.0, 10.0),
+                                margin: edges(0.0, 0.0, 0.0, 8.0),
+                                ..BlockStyle::default()
+                            },
+                            ..ParagraphStyle::default()
+                        },
+                    ),
+                    paragraph(
+                        vec![text("align_self = Center", styles.caption)],
+                        ParagraphStyle {
+                            block: BlockStyle {
+                                align_self: Align::Center,
+                                background: Some(SURFACE_BG_STRONG),
+                                clip: ClipMode::Rect,
+                                padding: edges(14.0, 10.0, 14.0, 10.0),
+                                margin: edges(0.0, 0.0, 0.0, 8.0),
+                                ..BlockStyle::default()
+                            },
+                            ..ParagraphStyle::default()
+                        },
+                    ),
+                    paragraph(
+                        vec![text("align_self = End", styles.caption)],
+                        ParagraphStyle {
+                            block: BlockStyle {
+                                align_self: Align::End,
+                                background: Some(SURFACE_BG_STRONG),
+                                clip: ClipMode::Rect,
+                                padding: edges(14.0, 10.0, 14.0, 10.0),
+                                ..BlockStyle::default()
+                            },
+                            ..ParagraphStyle::default()
+                        },
+                    ),
+                ],
+                BlockStyle {
+                    background: Some(SURFACE_BG_SUBTLE),
+                    clip: ClipMode::Rect,
+                    padding: edges(16.0, 16.0, 16.0, 16.0),
+                    margin: edges(0.0, 10.0, 0.0, 0.0),
+                    ..BlockStyle::default()
                 },
             ),
         ],
@@ -409,24 +553,28 @@ fn build_baseline_section(styles: &DemoStyles) -> BlockNode {
                         demo_inline_image_data(),
                         AtomBaseline::AlphabeticAlignedToLine,
                         Some(SURFACE_BG_SUBTLE),
+                        None,
                     ),
                     text("  Top ", styles.body),
                     image_atom(
                         demo_inline_image_data(),
                         AtomBaseline::Top,
                         Some(SURFACE_BG_SUBTLE),
+                        None,
                     ),
                     text("  Middle ", styles.body),
                     image_atom(
                         demo_inline_image_data(),
                         AtomBaseline::MiddleOfLine,
                         Some(SURFACE_BG_SUBTLE),
+                        None,
                     ),
                     text("  Bottom ", styles.body),
                     image_atom(
                         demo_inline_image_data(),
                         AtomBaseline::Bottom,
                         Some(SURFACE_BG_SUBTLE),
+                        None,
                     ),
                     text(
                         " 同一行会先求公共 baseline，再把不同 baseline 策略的 atom 回填到行内。",
@@ -530,6 +678,7 @@ fn build_media_section(styles: &DemoStyles, wide_layout: bool) -> BlockNode {
                 vec![
                     build_image_panel(styles, wide_layout),
                     build_chart_panel(styles, wide_layout),
+                    build_custom_panel(styles, wide_layout),
                 ],
                 BlockStyle {
                     margin: edges(0.0, 12.0, 0.0, 0.0),
@@ -548,11 +697,7 @@ fn build_media_section(styles: &DemoStyles, wide_layout: bool) -> BlockNode {
 }
 
 fn build_image_panel(styles: &DemoStyles, wide_layout: bool) -> BlockNode {
-    let margin = if wide_layout {
-        edges(0.0, 0.0, 16.0, 14.0)
-    } else {
-        edges(0.0, 0.0, 0.0, 14.0)
-    };
+    let margin = panel_margin(wide_layout, false);
 
     stack(
         FlowDirection::Vertical,
@@ -600,11 +745,7 @@ fn build_image_panel(styles: &DemoStyles, wide_layout: bool) -> BlockNode {
 }
 
 fn build_chart_panel(styles: &DemoStyles, wide_layout: bool) -> BlockNode {
-    let margin = if wide_layout {
-        edges(0.0, 0.0, 0.0, 14.0)
-    } else {
-        edges(0.0, 0.0, 0.0, 0.0)
-    };
+    let margin = panel_margin(wide_layout, false);
 
     stack(
         FlowDirection::Vertical,
@@ -648,6 +789,50 @@ fn build_chart_panel(styles: &DemoStyles, wide_layout: bool) -> BlockNode {
             clip: ClipMode::Rect,
             padding: edges(16.0, 16.0, 16.0, 16.0),
             margin,
+            align_self: Align::Start,
+            min_width: Some(280.0),
+            min_height: Some(252.0),
+            ..BlockStyle::default()
+        },
+    )
+}
+
+fn build_custom_panel(styles: &DemoStyles, wide_layout: bool) -> BlockNode {
+    stack(
+        FlowDirection::Vertical,
+        vec![
+            embed(
+                BlockEmbedKind::Custom {
+                    intrinsic_size: [248.0, 136.0],
+                    paint: build_custom_embed_paint(),
+                },
+                BlockStyle {
+                    background: Some(IMAGE_FRAME_BG),
+                    clip: ClipMode::Rect,
+                    padding: edges(12.0, 12.0, 12.0, 12.0),
+                    align_self: Align::Stretch,
+                    ..BlockStyle::default()
+                },
+            ),
+            paragraph(
+                vec![text(
+                    "Custom embed 把 local rect / path / image 直接降到现有 scene primitives；这里故意保留 Stretch，让 payload 随卡片宽度缩放。",
+                    styles.caption,
+                )],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        margin: edges(0.0, 12.0, 0.0, 0.0),
+                        ..BlockStyle::default()
+                    },
+                    ..ParagraphStyle::default()
+                },
+            ),
+        ],
+        BlockStyle {
+            background: Some(SURFACE_BG_SUBTLE),
+            clip: ClipMode::Rect,
+            padding: edges(16.0, 16.0, 16.0, 16.0),
+            margin: panel_margin(wide_layout, true),
             align_self: Align::Start,
             min_width: Some(280.0),
             min_height: Some(252.0),
@@ -808,6 +993,7 @@ fn image_atom(
     data_ref: Arc<ImageData>,
     baseline: AtomBaseline,
     background: Option<[f32; 4]>,
+    border: Option<BorderStyle>,
 ) -> InlineNode {
     InlineNode::Atom(
         InlineAtom::new(
@@ -817,10 +1003,50 @@ fn image_atom(
                 padding: edges(2.0, 2.0, 2.0, 2.0),
                 baseline,
                 background,
+                border,
                 ..InlineAtomStyle::default()
             },
         )
         .expect("image atom must be valid"),
+    )
+}
+
+fn custom_atom() -> InlineNode {
+    InlineNode::Atom(
+        InlineAtom::new(
+            InlineAtomKind::Custom {
+                measured_size: [16.0, 16.0],
+                paint: Arc::from(vec![
+                    LocalPaintCommand::Rect {
+                        pos: [2.0, 6.0],
+                        size: [12.0, 4.0],
+                        color: TEXT_SUCCESS,
+                    },
+                    LocalPaintCommand::Path {
+                        verbs: vec![
+                            PathVerb::MoveTo { to: [1.0, 8.0] },
+                            PathVerb::LineTo { to: [6.0, 13.0] },
+                            PathVerb::LineTo { to: [15.0, 2.0] },
+                        ],
+                        fill: None,
+                        stroke: Some(PathStroke {
+                            color: TEXT_LINK,
+                            width: 2.0,
+                            line_cap: LineCap::Round,
+                            line_join: LineJoin::Round,
+                        }),
+                    },
+                ]),
+            },
+            InlineAtomStyle {
+                margin: edges(4.0, 0.0, 4.0, 0.0),
+                padding: edges(4.0, 4.0, 4.0, 4.0),
+                background: Some(SURFACE_BG_SUBTLE),
+                border: Some(border(TEXT_ACCENT, 1.0)),
+                ..InlineAtomStyle::default()
+            },
+        )
+        .expect("custom atom must be valid"),
     )
 }
 
@@ -852,6 +1078,20 @@ fn edges(left: f32, top: f32, right: f32, bottom: f32) -> Edges {
 
 fn all_edges(value: f32) -> Edges {
     Edges::all(value).expect("demo edges must be valid")
+}
+
+fn border(color: [f32; 4], width: f32) -> BorderStyle {
+    BorderStyle::new(color, width).expect("demo border must be valid")
+}
+
+fn panel_margin(wide_layout: bool, is_last: bool) -> Edges {
+    if wide_layout && !is_last {
+        edges(0.0, 0.0, 16.0, 14.0)
+    } else if !wide_layout && !is_last {
+        edges(0.0, 0.0, 0.0, 14.0)
+    } else {
+        edges(0.0, 0.0, 0.0, 0.0)
+    }
 }
 
 fn demo_inline_image_data() -> Arc<ImageData> {
@@ -970,4 +1210,56 @@ fn build_chart_verbs(size: [f32; 2]) -> Vec<PathVerb> {
     });
     verbs.push(PathVerb::Close);
     verbs
+}
+
+fn build_custom_embed_paint() -> Arc<[LocalPaintCommand]> {
+    Arc::from(vec![
+        LocalPaintCommand::Rect {
+            pos: [0.0, 0.0],
+            size: [248.0, 136.0],
+            color: [0.09, 0.13, 0.18, 1.0],
+        },
+        LocalPaintCommand::Rect {
+            pos: [18.0, 18.0],
+            size: [84.0, 12.0],
+            color: TEXT_ACCENT,
+        },
+        LocalPaintCommand::Rect {
+            pos: [18.0, 42.0],
+            size: [152.0, 8.0],
+            color: TEXT_MUTED,
+        },
+        LocalPaintCommand::Rect {
+            pos: [18.0, 58.0],
+            size: [128.0, 8.0],
+            color: TEXT_SUBTLE,
+        },
+        LocalPaintCommand::Rect {
+            pos: [18.0, 92.0],
+            size: [76.0, 24.0],
+            color: CHIP_BG,
+        },
+        LocalPaintCommand::Path {
+            verbs: vec![
+                PathVerb::MoveTo { to: [18.0, 110.0] },
+                PathVerb::LineTo { to: [54.0, 84.0] },
+                PathVerb::LineTo { to: [94.0, 98.0] },
+                PathVerb::LineTo { to: [136.0, 64.0] },
+                PathVerb::LineTo { to: [182.0, 88.0] },
+                PathVerb::LineTo { to: [226.0, 44.0] },
+            ],
+            fill: None,
+            stroke: Some(PathStroke {
+                color: TEXT_LINK,
+                width: 4.0,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+            }),
+        },
+        LocalPaintCommand::Image {
+            pos: [188.0, 16.0],
+            size: [40.0, 40.0],
+            data_ref: demo_inline_image_data(),
+        },
+    ])
 }
