@@ -4,6 +4,8 @@
 
 use std::time::Instant;
 
+use bumpalo::Bump;
+
 #[path = "../src/draw_list/mod.rs"]
 mod draw_list;
 #[path = "../src/event/mod.rs"]
@@ -21,7 +23,7 @@ use event::handlers::KeyboardInput;
 use event::{EventRouter, RouteAction, ViewportSnapshot};
 use io::{
     Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButtonKind, MouseEvent,
-    MouseEventKind, MouseScroll, SceneFrame, ScenePayload, ViewUpdate, ViewUpdateDriver, WakeEvent,
+    MouseEventKind, MouseScroll, SceneFrame, ViewUpdate, ViewUpdateDriver, WakeEvent,
 };
 use tokio::sync::mpsc;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -44,29 +46,22 @@ fn async_side_exports_remain_available_for_future_mounts() {
     let _ = std::mem::size_of::<Option<renderer::Renderer<'static>>>();
     let _ = std::mem::size_of::<Option<io::AtlasPatch>>();
     let _ = std::mem::size_of::<Option<io::AtlasUpdate>>();
-    let _ = std::mem::size_of::<Option<io::BlockOp>>();
     let _ = std::mem::size_of::<Option<io::IoHandle>>();
     let _ = std::mem::size_of::<Option<io::IoRuntime>>();
     let _ = std::mem::size_of::<Option<io::SceneFrame>>();
     let _ = std::mem::size_of::<Option<io::ViewUpdate>>();
     let _ = std::mem::size_of::<Option<ViewUpdateDriver>>();
     let _ = std::mem::size_of::<Option<WakeEvent>>();
+    let _ = std::mem::size_of::<Option<scene::SceneProtocolState>>();
 }
 
 #[test]
 fn drain_limit_preserves_overflow_for_the_next_wake() {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(4);
     let mut driver = ViewUpdateDriver::new(rx);
     for revision in [1, 2, 3] {
-        tx.send(ViewUpdate::Scene(SceneFrame::new(
-            revision,
-            None,
-            ScenePayload::ReplaceAll {
-                block_order: Vec::new(),
-                block_batches: Vec::new(),
-            },
-        )))
-        .expect("view update send must succeed");
+        tx.blocking_send(ViewUpdate::Scene(empty_scene_frame(revision)))
+            .expect("view update send must succeed");
     }
 
     let first = driver.on_wake(2);
@@ -418,47 +413,83 @@ fn resize_events_send_monotonic_viewport_revisions() {
     let (mut router, mut action_rx) = build_router();
     let viewport = ViewportSnapshot::new(PhysicalSize::new(1280, 720), 2.0);
 
+    let first_started = Instant::now();
     let first = router.dispatch(&WindowEvent::Resized(PhysicalSize::new(800, 600)), viewport);
-    assert_eq!(
-        first,
+    let first_finished = Instant::now();
+    let first_event_time = match first {
         RouteAction::Resize(event::handlers::ViewportUpdate {
-            size: PhysicalSize::new(800, 600),
-            scale_factor: 2.0,
-            viewport_revision: 1,
-        })
-    );
-    assert_eq!(
-        action_rx
-            .try_recv()
-            .expect("resize action must be forwarded"),
-        Action::Resize {
-            width: 800,
-            height: 600,
-            scale_factor: 2.0,
-            viewport_revision: 1,
+            size,
+            scale_factor,
+            viewport_revision,
+            event_time,
+        }) => {
+            assert_eq!(size, PhysicalSize::new(800, 600));
+            assert_eq!(scale_factor, 2.0);
+            assert_eq!(viewport_revision, 1);
+            assert!(event_time >= first_started);
+            assert!(event_time <= first_finished);
+            event_time
         }
-    );
+        _ => panic!("expected resize route action"),
+    };
+    match action_rx
+        .try_recv()
+        .expect("resize action must be forwarded")
+    {
+        Action::Resize {
+            width,
+            height,
+            scale_factor,
+            viewport_revision,
+            event_time,
+        } => {
+            assert_eq!(width, 800);
+            assert_eq!(height, 600);
+            assert_eq!(scale_factor, 2.0);
+            assert_eq!(viewport_revision, 1);
+            assert_eq!(event_time, first_event_time);
+        }
+        _ => panic!("expected resize action"),
+    }
 
+    let second_started = Instant::now();
     let second = router.dispatch(&WindowEvent::Resized(PhysicalSize::new(900, 700)), viewport);
-    assert_eq!(
-        second,
+    let second_finished = Instant::now();
+    let second_event_time = match second {
         RouteAction::Resize(event::handlers::ViewportUpdate {
-            size: PhysicalSize::new(900, 700),
-            scale_factor: 2.0,
-            viewport_revision: 2,
-        })
-    );
-    assert_eq!(
-        action_rx
-            .try_recv()
-            .expect("second resize action must be forwarded"),
-        Action::Resize {
-            width: 900,
-            height: 700,
-            scale_factor: 2.0,
-            viewport_revision: 2,
+            size,
+            scale_factor,
+            viewport_revision,
+            event_time,
+        }) => {
+            assert_eq!(size, PhysicalSize::new(900, 700));
+            assert_eq!(scale_factor, 2.0);
+            assert_eq!(viewport_revision, 2);
+            assert!(event_time >= second_started);
+            assert!(event_time <= second_finished);
+            event_time
         }
-    );
+        _ => panic!("expected second resize route action"),
+    };
+    match action_rx
+        .try_recv()
+        .expect("second resize action must be forwarded")
+    {
+        Action::Resize {
+            width,
+            height,
+            scale_factor,
+            viewport_revision,
+            event_time,
+        } => {
+            assert_eq!(width, 900);
+            assert_eq!(height, 700);
+            assert_eq!(scale_factor, 2.0);
+            assert_eq!(viewport_revision, 2);
+            assert_eq!(event_time, second_event_time);
+        }
+        _ => panic!("expected second resize action"),
+    }
 }
 
 #[test]
@@ -479,9 +510,22 @@ fn close_requested_routes_shutdown_action() {
 
 fn scene_revision(update: &ViewUpdate) -> u64 {
     match update {
-        ViewUpdate::Scene(scene_frame) => scene_frame.viewport_revision,
+        ViewUpdate::Scene(scene_frame) => scene_frame.metadata().viewport_revision,
         ViewUpdate::Atlas(_) => panic!("expected scene update in driver test"),
     }
+}
+
+fn empty_scene_frame(viewport_revision: u64) -> SceneFrame {
+    let metadata = scene::SceneFrameMetadata {
+        viewport_revision,
+        required_atlas_generation: None,
+        clear_tessellation_cache: false,
+        resize_started_at: None,
+    };
+    let scene_buffer = scene::SceneBuffer::new(Bump::with_capacity(4096), |owner| {
+        scene::SceneBufferInner::empty_in(owner, metadata)
+    });
+    SceneFrame::new(Box::new(scene_buffer))
 }
 
 fn expect_mouse_event(action: Action, before: Instant, after: Instant) -> MouseEvent {

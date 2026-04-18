@@ -5,9 +5,8 @@ mod driver;
 mod runtime;
 
 pub(crate) use channel::{
-    Action, AtlasPatch, AtlasUpdate, BlockOp, InputEvent, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButtonKind, MouseEvent, MouseEventKind, MouseScroll, SceneFrame,
-    ScenePayload, ViewUpdate, WakeEvent,
+    Action, AtlasPatch, AtlasUpdate, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButtonKind, MouseEvent, MouseEventKind, MouseScroll, SceneFrame, ViewUpdate, WakeEvent,
 };
 pub(crate) use driver::ViewUpdateDriver;
-pub(crate) use runtime::{IoHandle, IoRuntime};
+pub(crate) use runtime::{IoHandle, IoRuntime, WakeHandle};

@@ -105,6 +105,7 @@ pub(crate) struct ViewportUpdate {
     pub(crate) size: PhysicalSize<u32>,
     pub(crate) scale_factor: f32,
     pub(crate) viewport_revision: u64,
+    pub(crate) event_time: Instant,
 }
 
 /// Handles keyboard input and forwards it through the shared action channel.
@@ -245,16 +246,19 @@ impl ViewportHandler {
 
     fn send_resize_action(&mut self, size: PhysicalSize<u32>, scale_factor: f32) -> ViewportUpdate {
         self.next_viewport_revision += 1;
+        let event_time = Instant::now();
         let update = ViewportUpdate {
             size,
             scale_factor,
             viewport_revision: self.next_viewport_revision,
+            event_time,
         };
         let action = Action::Resize {
             width: size.width,
             height: size.height,
             scale_factor,
             viewport_revision: update.viewport_revision,
+            event_time,
         };
         if self.action_tx.send(action).is_err() {
             warn!("event.handler.send_failed handler=viewport");

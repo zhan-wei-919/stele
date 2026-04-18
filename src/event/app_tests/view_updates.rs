@@ -1,9 +1,11 @@
+use std::time::Instant;
+
 use winit::dpi::PhysicalSize;
 
-use super::support::{build_app, sample_batch, sample_patch};
+use super::support::{build_app, sample_patch, sample_scene_buffer, sample_scene_frame};
 use crate::event::handlers::ViewportUpdate;
 use crate::event::RouteAction;
-use crate::io::{AtlasUpdate, SceneFrame, ScenePayload, ViewUpdate};
+use crate::io::{AtlasUpdate, ViewUpdate};
 use crate::scene::BlockId;
 
 #[test]
@@ -11,7 +13,7 @@ fn wake_applies_atlas_update_and_scene_frame_and_rebuilds_once() {
     let mut harness = build_app();
     harness
         .view_update_tx
-        .send(ViewUpdate::Atlas({
+        .blocking_send(ViewUpdate::Atlas({
             let mut atlas_update = AtlasUpdate::new(0);
             atlas_update.requested_atlas_size = Some(4096);
             atlas_update.patches.push(sample_patch());
@@ -20,27 +22,26 @@ fn wake_applies_atlas_update_and_scene_frame_and_rebuilds_once() {
         .expect("atlas update send must succeed");
     harness
         .view_update_tx
-        .send(ViewUpdate::Scene({
-            let mut scene_frame = SceneFrame::new(
-                1,
-                Some(0),
-                ScenePayload::ReplaceAll {
-                    block_order: vec![BlockId::new(7)],
-                    block_batches: vec![(BlockId::new(7), sample_batch(99))],
-                },
-            );
-            scene_frame.clear_tessellation_cache = true;
-            scene_frame
-        }))
+        .blocking_send(ViewUpdate::Scene(sample_scene_frame(
+            1,
+            Some(0),
+            &[7],
+            true,
+        )))
         .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
     assert!(!should_exit);
-    assert_eq!(harness.app.view_state.blocks().len(), 1);
-    assert_eq!(harness.app.view_state.block_order(), &[BlockId::new(7)]);
-    assert_eq!(harness.app.view_state.applied_viewport_revision(), 1);
-    assert_eq!(harness.app.view_state.ready_atlas_generation(), Some(0));
+    let current = harness
+        .app
+        .current_scene_buffer
+        .as_ref()
+        .expect("current scene buffer must exist");
+    assert_eq!(current.blocks().len(), 1);
+    assert_eq!(current.order(), &[BlockId::new(7)]);
+    assert_eq!(harness.app.scene_protocol.applied_viewport_revision(), 1);
+    assert_eq!(harness.app.scene_protocol.ready_atlas_generation(), Some(0));
     let renderer_log = harness.renderer_log.lock().expect("renderer log must lock");
     assert_eq!(renderer_log.recreate_atlas_sizes, vec![4096]);
     assert_eq!(renderer_log.clear_tessellation_calls, 1);
@@ -60,23 +61,19 @@ fn wake_applies_atlas_update_and_scene_frame_and_rebuilds_once() {
 #[test]
 fn stale_scene_frame_is_dropped_before_apply() {
     let mut harness = build_app();
-    harness.app.view_state.set_requested_viewport_revision(2);
+    harness
+        .app
+        .scene_protocol
+        .set_requested_viewport_revision(2);
     harness
         .view_update_tx
-        .send(ViewUpdate::Scene(SceneFrame::new(
-            1,
-            None,
-            ScenePayload::ReplaceAll {
-                block_order: vec![BlockId::new(7)],
-                block_batches: vec![(BlockId::new(7), sample_batch(99))],
-            },
-        )))
+        .blocking_send(ViewUpdate::Scene(sample_scene_frame(1, None, &[7], false)))
         .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
     assert!(!should_exit);
-    assert!(harness.app.view_state.blocks().is_empty());
+    assert!(harness.app.current_scene_buffer.is_none());
     assert!(harness
         .renderer_log
         .lock()
@@ -94,26 +91,20 @@ fn stale_scene_frame_is_dropped_after_newer_resize_arrives() {
             size: PhysicalSize::new(1024, 768),
             scale_factor: 2.0,
             viewport_revision: 2,
+            event_time: Instant::now(),
         }));
 
     harness
         .view_update_tx
-        .send(ViewUpdate::Scene(SceneFrame::new(
-            1,
-            None,
-            ScenePayload::ReplaceAll {
-                block_order: vec![BlockId::new(7)],
-                block_batches: vec![(BlockId::new(7), sample_batch(99))],
-            },
-        )))
+        .blocking_send(ViewUpdate::Scene(sample_scene_frame(1, None, &[7], false)))
         .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
     assert!(!should_exit);
-    assert!(harness.app.view_state.blocks().is_empty());
-    assert_eq!(harness.app.view_state.applied_viewport_revision(), 0);
-    assert_eq!(harness.app.view_state.requested_viewport_revision(), 2);
+    assert!(harness.app.current_scene_buffer.is_none());
+    assert_eq!(harness.app.scene_protocol.applied_viewport_revision(), 0);
+    assert_eq!(harness.app.scene_protocol.requested_viewport_revision(), 2);
     assert!(harness
         .renderer_log
         .lock()
@@ -125,36 +116,30 @@ fn stale_scene_frame_is_dropped_after_newer_resize_arrives() {
 #[test]
 fn newer_viewport_revision_replace_all_clears_old_scene_before_apply() {
     let mut harness = build_app();
+    harness.app.current_scene_buffer = Some(sample_scene_buffer(1, None, &[7], false, None));
+    harness.app.scene_protocol.set_applied_viewport_revision(1);
     harness
         .app
-        .view_state
-        .set_block_order(vec![BlockId::new(7)]);
-    harness
-        .app
-        .view_state
-        .replace_block(BlockId::new(7), sample_batch(99));
-    harness.app.view_state.set_applied_viewport_revision(1);
-    harness.app.view_state.set_requested_viewport_revision(2);
+        .scene_protocol
+        .set_requested_viewport_revision(2);
 
     harness
         .view_update_tx
-        .send(ViewUpdate::Scene(SceneFrame::new(
-            2,
-            None,
-            ScenePayload::ReplaceAll {
-                block_order: Vec::new(),
-                block_batches: Vec::new(),
-            },
-        )))
+        .blocking_send(ViewUpdate::Scene(sample_scene_frame(2, None, &[], false)))
         .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
     assert!(!should_exit);
-    assert!(harness.app.view_state.blocks().is_empty());
-    assert!(harness.app.view_state.block_order().is_empty());
-    assert_eq!(harness.app.view_state.applied_viewport_revision(), 2);
-    assert_eq!(harness.app.view_state.requested_viewport_revision(), 2);
+    let current = harness
+        .app
+        .current_scene_buffer
+        .as_ref()
+        .expect("current scene buffer must exist");
+    assert!(current.blocks().is_empty());
+    assert!(current.order().is_empty());
+    assert_eq!(harness.app.scene_protocol.applied_viewport_revision(), 2);
+    assert_eq!(harness.app.scene_protocol.requested_viewport_revision(), 2);
     assert_eq!(
         harness
             .renderer_log
@@ -174,25 +159,24 @@ fn scene_frame_waits_for_required_atlas_generation_before_apply() {
             size: PhysicalSize::new(1024, 768),
             scale_factor: 2.0,
             viewport_revision: 1,
+            event_time: Instant::now(),
         }));
 
     harness
         .view_update_tx
-        .send(ViewUpdate::Scene(SceneFrame::new(
+        .blocking_send(ViewUpdate::Scene(sample_scene_frame(
             1,
             Some(1),
-            ScenePayload::ReplaceAll {
-                block_order: vec![BlockId::new(9)],
-                block_batches: vec![(BlockId::new(9), sample_batch(90))],
-            },
+            &[9],
+            false,
         )))
         .expect("scene frame send must succeed");
 
     let should_exit = harness.app.on_wake();
 
     assert!(!should_exit);
-    assert!(harness.app.view_state.blocks().is_empty());
-    assert!(harness.app.view_state.pending_scene_frame().is_some());
+    assert!(harness.app.current_scene_buffer.is_none());
+    assert!(harness.app.scene_protocol.pending_scene_buffer().is_some());
     assert!(harness
         .renderer_log
         .lock()
@@ -202,7 +186,7 @@ fn scene_frame_waits_for_required_atlas_generation_before_apply() {
 
     harness
         .view_update_tx
-        .send(ViewUpdate::Atlas({
+        .blocking_send(ViewUpdate::Atlas({
             let mut atlas_update = AtlasUpdate::new(1);
             atlas_update.patches.push(sample_patch());
             atlas_update
@@ -212,16 +196,17 @@ fn scene_frame_waits_for_required_atlas_generation_before_apply() {
     let should_exit = harness.app.on_wake();
 
     assert!(!should_exit);
-    assert_eq!(harness.app.view_state.block_order(), &[BlockId::new(9)]);
-    assert_eq!(harness.app.view_state.blocks().len(), 1);
-    assert!(harness
+    let current = harness
         .app
-        .view_state
-        .blocks()
-        .contains_key(&BlockId::new(9)));
-    assert_eq!(harness.app.view_state.requested_viewport_revision(), 1);
-    assert_eq!(harness.app.view_state.applied_viewport_revision(), 1);
-    assert!(harness.app.view_state.pending_scene_frame().is_none());
+        .current_scene_buffer
+        .as_ref()
+        .expect("current scene buffer must exist");
+    assert_eq!(current.order(), &[BlockId::new(9)]);
+    assert_eq!(current.blocks().len(), 1);
+    assert_eq!(current.blocks()[0].block_id(), BlockId::new(9));
+    assert_eq!(harness.app.scene_protocol.requested_viewport_revision(), 1);
+    assert_eq!(harness.app.scene_protocol.applied_viewport_revision(), 1);
+    assert!(harness.app.scene_protocol.pending_scene_buffer().is_none());
     assert_eq!(
         harness
             .renderer_log

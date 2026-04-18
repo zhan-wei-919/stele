@@ -1,5 +1,7 @@
 //! Reducer that updates store-owned model state from incoming actions.
 
+use log::warn;
+
 use crate::io::Action;
 
 use super::delegate::StoreDelegate;
@@ -33,8 +35,26 @@ impl Reducer {
                 height,
                 scale_factor,
                 viewport_revision,
+                event_time,
             } => {
-                *viewport = ViewportState::new(*width, *height, *scale_factor, *viewport_revision);
+                if *scale_factor <= 0.0 {
+                    debug_assert!(
+                        *scale_factor > 0.0,
+                        "viewport scale factor must stay positive"
+                    );
+                    warn!(
+                        "store.invalid_scale_factor scale_factor={} viewport_revision={}",
+                        scale_factor, viewport_revision
+                    );
+                    return ReduceOutcome::NoChange;
+                }
+                *viewport = ViewportState::new(
+                    *width,
+                    *height,
+                    *scale_factor,
+                    *viewport_revision,
+                    Some(*event_time),
+                );
                 delegate.resize(model, viewport.logical_size());
                 ReduceOutcome::Changed
             }

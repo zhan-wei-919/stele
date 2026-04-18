@@ -1,14 +1,13 @@
+//! View-thread scene and atlas application for the latest-wins scene protocol.
+
+use std::time::Duration;
+
 use log::{info, warn};
 
-use crate::io::{AtlasUpdate, BlockOp, SceneFrame, ScenePayload};
+use crate::io::{AtlasUpdate, SceneFrame};
+use crate::scene::SceneBuffer;
 
 use super::{AppRenderer, AppRuntime, AppWindow, SteleApp};
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ApplyStats {
-    replaced_blocks: usize,
-    removed_blocks: usize,
-}
 
 impl<Rt, Win, Rend> SteleApp<Rt, Win, Rend>
 where
@@ -30,82 +29,92 @@ where
         for patch in &update.patches {
             renderer.write_atlas_patch(patch);
         }
-        self.view_state
+        self.scene_protocol
             .set_ready_atlas_generation(update.generation);
     }
 
-    /// Scene frames may outrun atlas uploads because atlas generation is no longer tied to
-    /// viewport revision. We keep only the newest still-requested frame and retry it after
-    /// every atlas update so live resize stays latest-only without dropping required glyph data.
     pub(super) fn handle_scene_frame(&mut self, scene_frame: SceneFrame) -> bool {
-        if self.scene_frame_is_stale(&scene_frame) {
+        let scene_buffer = scene_frame.into_buffer();
+        if self.scene_buffer_is_stale(scene_buffer.as_ref()) {
+            self.retire_scene_buffer(scene_buffer, "stale_revision");
             return false;
         }
-        if !self.scene_frame_atlas_ready(&scene_frame) {
-            self.view_state.set_pending_scene_frame(scene_frame);
+        if !self.scene_buffer_atlas_ready(scene_buffer.as_ref()) {
+            self.park_scene_buffer(scene_buffer);
             return false;
         }
 
-        self.apply_scene_frame(scene_frame)
+        if let Some(pending_scene_buffer) = self.scene_protocol.take_pending_scene_buffer() {
+            self.retire_scene_buffer(pending_scene_buffer, "replaced_by_newer");
+        }
+        self.promote_scene_buffer(scene_buffer)
     }
 
-    pub(super) fn apply_pending_scene_frame_if_ready(&mut self) -> bool {
+    pub(super) fn apply_pending_scene_buffer_if_ready(&mut self) -> bool {
         let should_apply = self
-            .view_state
-            .pending_scene_frame()
-            .map(|scene_frame| self.scene_frame_atlas_ready(scene_frame))
+            .scene_protocol
+            .pending_scene_buffer()
+            .map(|scene_buffer| self.scene_buffer_atlas_ready(scene_buffer))
             .unwrap_or(false);
         if !should_apply {
             return false;
         }
 
-        let scene_frame = self
-            .view_state
-            .take_pending_scene_frame()
-            .expect("pending scene frame must exist after readiness check");
-        self.apply_scene_frame(scene_frame)
+        let scene_buffer = self
+            .scene_protocol
+            .take_pending_scene_buffer()
+            .expect("pending scene buffer must exist after readiness check");
+        if self.scene_buffer_is_stale(scene_buffer.as_ref()) {
+            self.retire_scene_buffer(scene_buffer, "stale_revision");
+            return false;
+        }
+        self.promote_scene_buffer(scene_buffer)
     }
 
-    fn apply_scene_frame(&mut self, scene_frame: SceneFrame) -> bool {
-        if self.scene_frame_is_stale(&scene_frame) {
+    fn promote_scene_buffer(&mut self, scene_buffer: Box<SceneBuffer>) -> bool {
+        let metadata = scene_buffer.metadata();
+        if !self.clear_tessellation_cache_if_needed(metadata.clear_tessellation_cache) {
             return false;
         }
-        if !self.clear_tessellation_cache_if_needed(scene_frame.clear_tessellation_cache) {
-            return false;
+        if let Some(stale_pending) = self
+            .scene_protocol
+            .set_applied_viewport_revision(metadata.viewport_revision)
+        {
+            self.retire_scene_buffer(stale_pending, "stale_revision");
         }
-
-        let required_atlas_generation = scene_frame.required_atlas_generation;
-        let viewport_revision = scene_frame.viewport_revision;
-        let Some(stats) = self.apply_scene_payload(scene_frame.payload, viewport_revision) else {
-            return false;
-        };
-        self.finish_scene_frame_apply(viewport_revision);
+        if let Some(old_current) = self.current_scene_buffer.replace(scene_buffer) {
+            self.retire_scene_buffer(old_current, "replaced_by_newer");
+        }
+        self.warn_if_end_to_end_latency_exceeded(metadata);
         info!(
-            "view.apply viewport_revision={} replaced_blocks={} removed_blocks={} required_atlas_generation={:?}",
-            viewport_revision,
-            stats.replaced_blocks,
-            stats.removed_blocks,
-            required_atlas_generation
+            "view.apply viewport_revision={} blocks={} required_atlas_generation={:?}",
+            metadata.viewport_revision,
+            self.current_scene_buffer
+                .as_ref()
+                .map(|buffer| buffer.blocks().len())
+                .unwrap_or(0),
+            metadata.required_atlas_generation
         );
         true
     }
 
     fn atlas_update_is_stale(&self, update: &AtlasUpdate) -> bool {
-        self.view_state
+        self.scene_protocol
             .ready_atlas_generation()
             .map(|ready| update.generation < ready)
             .unwrap_or(false)
     }
 
-    fn scene_frame_is_stale(&self, scene_frame: &SceneFrame) -> bool {
-        scene_frame.viewport_revision < self.view_state.requested_viewport_revision()
+    fn scene_buffer_is_stale(&self, scene_buffer: &SceneBuffer) -> bool {
+        scene_buffer.metadata().viewport_revision
+            < self.scene_protocol.requested_viewport_revision()
     }
 
-    fn scene_frame_atlas_ready(&self, scene_frame: &SceneFrame) -> bool {
-        match scene_frame.required_atlas_generation {
+    fn scene_buffer_atlas_ready(&self, scene_buffer: &SceneBuffer) -> bool {
+        match scene_buffer.metadata().required_atlas_generation {
             None => true,
             Some(required_generation) => self
-                .view_state
+                .scene_protocol
                 .ready_atlas_generation()
                 .map(|ready_generation| ready_generation >= required_generation)
                 .unwrap_or(false),
@@ -124,76 +133,43 @@ where
         true
     }
 
-    fn apply_scene_payload(
-        &mut self,
-        payload: ScenePayload,
-        viewport_revision: u64,
-    ) -> Option<ApplyStats> {
-        match payload {
-            ScenePayload::ReplaceAll {
-                block_order,
-                block_batches,
-            } => Some(self.apply_replace_all(block_order, block_batches)),
-            ScenePayload::Diff {
-                block_order,
-                block_ops,
-            } => self.apply_diff_payload(viewport_revision, block_order, block_ops),
+    fn park_scene_buffer(&mut self, scene_buffer: Box<SceneBuffer>) {
+        let metadata = scene_buffer.metadata();
+        info!(
+            "view.park viewport_revision={} waiting_for_atlas_generation={}",
+            metadata.viewport_revision,
+            metadata.required_atlas_generation.unwrap_or(0)
+        );
+        if let Some(retired_scene_buffer) = self
+            .scene_protocol
+            .replace_pending_scene_buffer(scene_buffer)
+        {
+            let reason = if retired_scene_buffer.metadata().viewport_revision
+                < self.scene_protocol.requested_viewport_revision()
+            {
+                "stale_revision"
+            } else {
+                "replaced_by_newer"
+            };
+            self.retire_scene_buffer(retired_scene_buffer, reason);
         }
     }
 
-    fn apply_replace_all(
-        &mut self,
-        block_order: Vec<crate::scene::BlockId>,
-        block_batches: Vec<(crate::scene::BlockId, crate::scene::BlockSceneBatch)>,
-    ) -> ApplyStats {
-        let mut stats = ApplyStats::default();
-        self.view_state.clear_scene();
-        self.view_state.set_block_order(block_order);
-        for (block_id, batch) in block_batches {
-            self.view_state.replace_block(block_id, batch);
-            stats.replaced_blocks += 1;
-        }
-        stats
-    }
+    fn warn_if_end_to_end_latency_exceeded(&self, metadata: crate::scene::SceneFrameMetadata) {
+        let Some(resize_started_at) = metadata.resize_started_at else {
+            return;
+        };
 
-    fn apply_diff_payload(
-        &mut self,
-        viewport_revision: u64,
-        block_order: Option<Vec<crate::scene::BlockId>>,
-        block_ops: Vec<BlockOp>,
-    ) -> Option<ApplyStats> {
-        if viewport_revision > self.view_state.applied_viewport_revision() {
-            warn!(
-                "view.drop_non_self_contained_scene_frame viewport_revision={} applied_viewport_revision={}",
-                viewport_revision,
-                self.view_state.applied_viewport_revision()
-            );
-            return None;
+        let elapsed = resize_started_at.elapsed();
+        if elapsed <= Duration::from_millis(u64::from(self.scene_config.end_to_end_latency_ms)) {
+            return;
         }
 
-        if let Some(block_order) = block_order {
-            self.view_state.set_block_order(block_order);
-        }
-
-        let mut stats = ApplyStats::default();
-        for op in block_ops {
-            match op {
-                BlockOp::Replace { block_id, batch } => {
-                    self.view_state.replace_block(block_id, batch);
-                    stats.replaced_blocks += 1;
-                }
-                BlockOp::Remove { block_id } => {
-                    self.view_state.remove_block(block_id);
-                    stats.removed_blocks += 1;
-                }
-            }
-        }
-        Some(stats)
-    }
-
-    fn finish_scene_frame_apply(&mut self, viewport_revision: u64) {
-        self.view_state
-            .set_applied_viewport_revision(viewport_revision);
-        self.view_state.clear_pending_scene_frame();
+        warn!(
+            "scene.budget_exceeded phase=end_to_end elapsed_us={} limit_ms={} viewport_revision={}",
+            elapsed.as_micros(),
+            self.scene_config.end_to_end_latency_ms,
+            metadata.viewport_revision
+        );
     }
 }

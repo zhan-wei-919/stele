@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use bumpalo::Bump;
 use tokio::sync::mpsc;
 use winit::dpi::PhysicalSize;
 use winit::window::WindowId;
@@ -10,7 +11,11 @@ use crate::draw_list::ClipRect;
 use crate::event::EventRouter;
 use crate::io::{Action, AtlasPatch, ViewUpdate, ViewUpdateDriver};
 use crate::renderer::atlas::AtlasRegion;
-use crate::scene::{BlockSceneBatch, ViewState};
+use crate::scene::{
+    BlockDataArena, BlockId, SceneBuffer, SceneBufferInner, SceneConfig, SceneFrameMetadata,
+    ScenePipeline,
+};
+pub(super) use crate::test_support::log_capture::LogCapture;
 
 #[derive(Debug, Default)]
 pub(super) struct RuntimeLog {
@@ -103,6 +108,7 @@ pub(super) struct RendererLog {
 #[derive(Clone, Debug, Default)]
 pub(super) struct FakeRenderer {
     pub(super) log: Arc<Mutex<RendererLog>>,
+    rebuild_delay: Arc<Mutex<Duration>>,
 }
 
 impl AppRenderer for FakeRenderer {
@@ -140,12 +146,16 @@ impl AppRenderer for FakeRenderer {
             .atlas_patch_writes += 1;
     }
 
-    fn rebuild_from_view_state(&mut self, view_state: &ViewState) {
+    fn rebuild_from_scene_buffer(&mut self, scene_buffer: &SceneBuffer) {
+        let rebuild_delay = *self.rebuild_delay.lock().expect("renderer delay must lock");
+        if !rebuild_delay.is_zero() {
+            std::thread::sleep(rebuild_delay);
+        }
         self.log
             .lock()
             .expect("renderer log must lock")
             .rebuild_block_counts
-            .push(view_state.blocks().len());
+            .push(scene_buffer.blocks().len());
     }
 }
 
@@ -156,21 +166,36 @@ pub(super) struct Harness {
     pub(super) runtime_log: Arc<Mutex<RuntimeLog>>,
     pub(super) window_log: Arc<Mutex<WindowLog>>,
     pub(super) renderer_log: Arc<Mutex<RendererLog>>,
-    pub(super) view_update_tx: mpsc::UnboundedSender<ViewUpdate>,
+    pub(super) view_update_tx: mpsc::Sender<ViewUpdate>,
+    pub(super) return_rx: mpsc::Receiver<Bump>,
+    rebuild_delay: Arc<Mutex<Duration>>,
 }
 
 pub(super) fn build_app() -> Harness {
+    build_app_with_scene_config(SceneConfig::default())
+}
+
+pub(super) fn build_app_with_scene_config(scene_config: SceneConfig) -> Harness {
     let runtime = FakeRuntime::default();
     let runtime_log = runtime.log.clone();
     let (action_tx, _action_rx) = mpsc::unbounded_channel::<Action>();
     let router = EventRouter::new(action_tx);
-    let (view_update_tx, view_update_rx) = mpsc::unbounded_channel();
+    let (view_update_tx, view_update_rx) = mpsc::channel(4);
     let view_update_driver = ViewUpdateDriver::new(view_update_rx);
-    let mut app = SteleApp::new(runtime, view_update_driver, router);
+    let (return_tx, return_rx) = mpsc::channel(3);
+    let scene_pipeline = ScenePipeline::new(return_tx);
+    let mut app = SteleApp::new(
+        runtime,
+        view_update_driver,
+        router,
+        scene_pipeline,
+        scene_config,
+    );
 
     let (window, window_log) = FakeWindow::new();
     let renderer = FakeRenderer::default();
     let renderer_log = renderer.log.clone();
+    let rebuild_delay = renderer.rebuild_delay.clone();
     app.attach_surface(window, renderer);
 
     Harness {
@@ -179,18 +204,79 @@ pub(super) fn build_app() -> Harness {
         window_log,
         renderer_log,
         view_update_tx,
+        return_rx,
+        rebuild_delay,
     }
 }
 
-pub(super) fn sample_batch(fingerprint: u64) -> BlockSceneBatch {
-    BlockSceneBatch::new(
+impl Harness {
+    pub(super) fn set_rebuild_delay(&self, rebuild_delay: Duration) {
+        *self.rebuild_delay.lock().expect("renderer delay must lock") = rebuild_delay;
+    }
+}
+
+pub(super) fn sample_scene_frame(
+    viewport_revision: u64,
+    required_atlas_generation: Option<u64>,
+    block_ids: &[u64],
+    clear_tessellation_cache: bool,
+) -> crate::io::SceneFrame {
+    sample_scene_frame_with_resize_started_at(
+        viewport_revision,
+        required_atlas_generation,
+        block_ids,
+        clear_tessellation_cache,
+        None,
+    )
+}
+
+pub(super) fn sample_scene_frame_with_resize_started_at(
+    viewport_revision: u64,
+    required_atlas_generation: Option<u64>,
+    block_ids: &[u64],
+    clear_tessellation_cache: bool,
+    resize_started_at: Option<Instant>,
+) -> crate::io::SceneFrame {
+    crate::io::SceneFrame::new(sample_scene_buffer(
+        viewport_revision,
+        required_atlas_generation,
+        block_ids,
+        clear_tessellation_cache,
+        resize_started_at,
+    ))
+}
+
+pub(super) fn sample_scene_buffer(
+    viewport_revision: u64,
+    required_atlas_generation: Option<u64>,
+    block_ids: &[u64],
+    clear_tessellation_cache: bool,
+    resize_started_at: Option<Instant>,
+) -> Box<SceneBuffer> {
+    let metadata = SceneFrameMetadata {
+        viewport_revision,
+        required_atlas_generation,
+        clear_tessellation_cache,
+        resize_started_at,
+    };
+    let buffer = SceneBuffer::new(Bump::with_capacity(4096), |owner| {
+        let mut scene = SceneBufferInner::empty_in(owner, metadata);
+        for block_id in block_ids {
+            scene.order_mut().push(BlockId::new(*block_id));
+            scene.blocks_mut().push(sample_block(owner, *block_id));
+        }
+        scene
+    });
+    Box::new(buffer)
+}
+
+fn sample_block<'a>(owner: &'a Bump, block_id: u64) -> BlockDataArena<'a> {
+    BlockDataArena::new_in(
+        owner,
+        BlockId::new(block_id),
         ClipRect::new(0.0, 0.0, 100.0, 80.0),
         0,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        fingerprint,
+        block_id,
     )
 }
 

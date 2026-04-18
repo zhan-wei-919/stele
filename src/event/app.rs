@@ -16,7 +16,7 @@ mod updates;
 use crate::event::{EventRouter, RouteAction, ViewportSnapshot};
 use crate::io::{IoRuntime, ViewUpdate, ViewUpdateDriver};
 use crate::renderer::Renderer;
-use crate::scene::ViewState;
+use crate::scene::{SceneBuffer, SceneConfig, ScenePipeline, SceneProtocolState};
 pub(crate) use support::{AppRenderer, AppRuntime, AppWindow};
 
 const MAX_VIEW_UPDATE_DRAIN: usize = 4096;
@@ -36,9 +36,12 @@ where
     window_id: Option<WindowId>,
     renderer: Option<Rend>,
     io_runtime: Option<Rt>,
-    view_update_driver: ViewUpdateDriver,
+    view_update_driver: Option<ViewUpdateDriver>,
     router: Option<EventRouter>,
-    view_state: ViewState,
+    scene_pipeline: Option<ScenePipeline>,
+    scene_protocol: SceneProtocolState,
+    current_scene_buffer: Option<Box<SceneBuffer>>,
+    scene_config: SceneConfig,
     store_bootstrap: Option<StoreBootstrap<Rt>>,
     shutting_down: bool,
 }
@@ -54,15 +57,20 @@ where
         io_runtime: Rt,
         view_update_driver: ViewUpdateDriver,
         router: EventRouter,
+        scene_pipeline: ScenePipeline,
+        scene_config: SceneConfig,
     ) -> Self {
         Self {
             window: None,
             window_id: None,
             renderer: None,
             io_runtime: Some(io_runtime),
-            view_update_driver,
+            view_update_driver: Some(view_update_driver),
             router: Some(router),
-            view_state: ViewState::new(),
+            scene_pipeline: Some(scene_pipeline),
+            scene_protocol: SceneProtocolState::new(),
+            current_scene_buffer: None,
+            scene_config,
             store_bootstrap: None,
             shutting_down: false,
         }
@@ -137,28 +145,31 @@ where
 
     /// Handles one async-to-winit wake and reports whether shutdown began.
     pub(crate) fn on_wake(&mut self) -> bool {
-        let outcome = self.view_update_driver.on_wake(MAX_VIEW_UPDATE_DRAIN);
+        let Some(view_update_driver) = self.view_update_driver.as_mut() else {
+            return false;
+        };
+        let outcome = view_update_driver.on_wake(MAX_VIEW_UPDATE_DRAIN);
         info!("view.wake drained={}", outcome.drained);
 
         if outcome.disconnected {
             return self.begin_shutdown();
         }
 
-        let mut applied_any = false;
+        let mut rebuild_needed = false;
         for update in outcome.updates {
             match update {
                 ViewUpdate::Atlas(atlas_update) => {
                     self.apply_atlas_update(atlas_update);
-                    applied_any |= self.apply_pending_scene_frame_if_ready();
+                    rebuild_needed |= self.apply_pending_scene_buffer_if_ready();
                 }
                 ViewUpdate::Scene(scene_frame) => {
-                    applied_any |= self.handle_scene_frame(scene_frame);
+                    rebuild_needed |= self.handle_scene_frame(scene_frame);
                 }
             }
         }
 
-        if applied_any {
-            self.rebuild_view_state();
+        if rebuild_needed {
+            self.rebuild_current_scene();
         }
 
         if outcome.wake_again {
@@ -176,6 +187,7 @@ where
 
     /// Shuts the runtime down during app exit.
     pub(crate) fn on_exit(&mut self) {
+        self.drop_scene_transport();
         self.shutdown_runtime();
     }
 
@@ -186,6 +198,13 @@ where
         }
 
         self.shutting_down = true;
+        if let Some(current_scene_buffer) = self.current_scene_buffer.take() {
+            self.retire_scene_buffer(current_scene_buffer, "shutdown");
+        }
+        if let Some(pending_scene_buffer) = self.scene_protocol.take_pending_scene_buffer() {
+            self.retire_scene_buffer(pending_scene_buffer, "shutdown");
+        }
+        self.drop_scene_transport();
         self.renderer = None;
         self.window = None;
         self.window_id = None;
@@ -216,8 +235,12 @@ where
             return;
         };
         renderer.resize_surface(size, scale_factor);
-        self.view_state
-            .set_requested_viewport_revision(viewport_revision);
+        if let Some(stale_pending) = self
+            .scene_protocol
+            .set_requested_viewport_revision(viewport_revision)
+        {
+            self.retire_scene_buffer(stale_pending, "stale_revision");
+        }
 
         if size.width > 0 && size.height > 0 {
             if let Some(window) = self.window.as_ref() {
@@ -226,11 +249,23 @@ where
         }
     }
 
-    fn rebuild_view_state(&mut self) {
+    fn rebuild_current_scene(&mut self) {
+        let Some(scene_buffer) = self.current_scene_buffer.as_deref() else {
+            return;
+        };
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        renderer.rebuild_from_view_state(&self.view_state);
+        let rebuild_started = std::time::Instant::now();
+        renderer.rebuild_from_scene_buffer(scene_buffer);
+        let elapsed = rebuild_started.elapsed();
+        if elapsed > duration_budget(self.scene_config.rebuild_budget_ms) {
+            warn!(
+                "scene.budget_exceeded phase=rebuild elapsed_us={} limit_ms={}",
+                elapsed.as_micros(),
+                self.scene_config.rebuild_budget_ms
+            );
+        }
 
         let Some(window) = self.window.as_ref() else {
             return;
@@ -246,6 +281,22 @@ where
             io_runtime.shutdown(RUNTIME_SHUTDOWN_TIMEOUT);
         }
     }
+
+    fn drop_scene_transport(&mut self) {
+        self.view_update_driver = None;
+        self.scene_pipeline = None;
+    }
+
+    fn retire_scene_buffer(&self, scene_buffer: Box<SceneBuffer>, reason: &'static str) {
+        info!("view.retire reason={reason}");
+        if let Some(scene_pipeline) = self.scene_pipeline.as_ref() {
+            scene_pipeline.retire(scene_buffer);
+        }
+    }
+}
+
+fn duration_budget(limit_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(limit_ms))
 }
 
 #[cfg(test)]

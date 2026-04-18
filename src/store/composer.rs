@@ -1,34 +1,38 @@
-//! Store-side full-scene composition from layout output into render-ready block batches.
+//! Store-side full-scene composition from layout output into arena-backed scene buffers.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use bumpalo::Bump;
 use bytemuck::cast_slice;
+use log::warn;
 
 use crate::draw_list::{ClipRect, ImageCmd, PathCmd};
 use crate::font::FreeTypeRasterizer;
 use crate::layout::layout_document;
 use crate::renderer::instance::{GlyphInstance, RectInstance};
-use crate::scene::{BlockId, BlockSceneBatch};
+use crate::scene::{BlockDataArena, SceneBufferInner, SceneFrameMetadata};
 
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
-use super::types::{SceneSnapshot, ViewportState};
+use super::types::ViewportState;
 
-/// Stateless composer from logical layout output to render-ready block batches.
+/// Stateless composer from logical layout output to one render-ready scene buffer.
 pub(crate) struct Composer;
 
 impl Composer {
-    /// Recomputes the full scene snapshot for the current model and viewport.
-    pub(crate) fn compose_snapshot(
+    /// Recomputes the full scene payload into one arena-backed scene buffer.
+    pub(crate) fn compose_into_buffer<'a>(
         &self,
+        owner: &'a Bump,
         model: &Model,
         layout_cache: &LayoutCache,
         logical_atlas: &mut LogicalAtlas,
         rasterizer: &FreeTypeRasterizer,
         viewport: ViewportState,
-    ) -> SceneSnapshot {
+        clear_tessellation_cache: bool,
+        max_blocks_per_scene: usize,
+    ) -> SceneBufferInner<'a> {
         let mut entries = layout_document(model.document(), layout_cache.prepared_blocks())
             .into_iter()
             .map(|layout_block| {
@@ -45,6 +49,7 @@ impl Composer {
                     .cloned()
                     .unwrap_or_default();
                 compose_block(
+                    owner,
                     layout_block,
                     logical_atlas,
                     rasterizer,
@@ -56,38 +61,53 @@ impl Composer {
             .collect::<Vec<_>>();
 
         sort_entries_by_z_order(&mut entries);
-        let required_atlas_generation = entries
-            .iter()
-            .any(|(_, batch)| !batch.glyphs().is_empty())
-            .then_some(logical_atlas.generation);
-        let order = entries.iter().map(|(block_id, _)| *block_id).collect();
-        let blocks = entries.into_iter().collect::<HashMap<_, _>>();
-
-        SceneSnapshot {
-            viewport_revision: viewport.viewport_revision,
-            required_atlas_generation,
-            order,
-            blocks,
+        if entries.len() > max_blocks_per_scene {
+            warn!(
+                "store.scene_block_limit_exceeded blocks={} limit={}",
+                entries.len(),
+                max_blocks_per_scene
+            );
         }
+        debug_assert!(
+            entries.len() <= max_blocks_per_scene,
+            "scene block count exceeded the configured limit"
+        );
+
+        let metadata = SceneFrameMetadata {
+            viewport_revision: viewport.viewport_revision,
+            required_atlas_generation: entries
+                .iter()
+                .any(|block| !block.glyphs().is_empty())
+                .then_some(logical_atlas.generation),
+            clear_tessellation_cache,
+            resize_started_at: viewport.resize_started_at,
+        };
+        let mut scene = SceneBufferInner::empty_in(owner, metadata);
+        for block in entries {
+            scene.order_mut().push(block.block_id());
+            scene.blocks_mut().push(block);
+        }
+        scene
     }
 }
 
-fn sort_entries_by_z_order(entries: &mut [(BlockId, BlockSceneBatch)]) {
+fn sort_entries_by_z_order(entries: &mut [BlockDataArena<'_>]) {
     // Keep the sort key to z-order only. This works because prepare/layout already emit
     // blocks in current document order, and Rust's `sort_by_key` is stable, so blocks
     // that share a z-order keep the upstream document order instead of falling back to
     // stable ids or creation order.
-    entries.sort_by_key(|(_, batch)| batch.z_order());
+    entries.sort_by_key(BlockDataArena::z_order);
 }
 
-fn compose_block(
+fn compose_block<'a>(
+    owner: &'a Bump,
     layout_block: crate::layout::LayoutBlock,
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
     paths: Vec<PathCmd>,
     images: Vec<ImageCmd>,
-) -> (BlockId, BlockSceneBatch) {
+) -> BlockDataArena<'a> {
     let mut glyphs = Vec::new();
     let mut rects = Vec::new();
 
@@ -131,18 +151,18 @@ fn compose_block(
         (!glyphs.is_empty()).then_some(logical_atlas.generation),
     );
 
-    (
+    let mut block = BlockDataArena::new_in(
+        owner,
         layout_block.block_id,
-        BlockSceneBatch::new(
-            clip_rect,
-            layout_block.z_order,
-            glyphs,
-            rects,
-            paths,
-            images,
-            fingerprint,
-        ),
-    )
+        clip_rect,
+        layout_block.z_order,
+        fingerprint,
+    );
+    block.glyphs_mut().extend(glyphs);
+    block.rects_mut().extend(rects);
+    block.paths_mut().extend(paths);
+    block.images_mut().extend(images);
+    block
 }
 
 fn fingerprint_batch(
@@ -206,6 +226,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use bumpalo::Bump;
+
     use super::sort_entries_by_z_order;
     use super::Composer;
     use crate::draw_list::{
@@ -215,7 +237,7 @@ mod tests {
     use crate::font::{FontDiscovery, FreeTypeRasterizer};
     use crate::layout::{Block, BlockRect, Document, PreparedBlock};
     use crate::renderer::subpixel::detect_subpixel_layout;
-    use crate::scene::{BlockId, BlockSceneBatch};
+    use crate::scene::{BlockDataArena, BlockId};
     use crate::store::logical_atlas::LogicalAtlas;
     use crate::store::{BlockDrawCommands, Model, ViewportState};
 
@@ -223,18 +245,19 @@ mod tests {
 
     #[test]
     fn stable_z_order_sort_preserves_upstream_document_order_within_a_layer() {
+        let owner = Bump::new();
         let mut entries = vec![
-            (BlockId::new(30), sample_batch(1)),
-            (BlockId::new(99), sample_batch(0)),
-            (BlockId::new(10), sample_batch(0)),
-            (BlockId::new(40), sample_batch(1)),
+            sample_block(&owner, BlockId::new(30), 1),
+            sample_block(&owner, BlockId::new(99), 0),
+            sample_block(&owner, BlockId::new(10), 0),
+            sample_block(&owner, BlockId::new(40), 1),
         ];
 
         sort_entries_by_z_order(&mut entries);
 
         let order = entries
             .into_iter()
-            .map(|(block_id, _)| block_id)
+            .map(|block| block.block_id())
             .collect::<Vec<_>>();
         assert_eq!(
             order,
@@ -331,7 +354,8 @@ mod tests {
     }
 
     #[test]
-    fn compose_snapshot_attaches_paths_to_block_batch() {
+    fn compose_into_buffer_attaches_paths_to_block_batch() {
+        let owner = Bump::new();
         let clip_rect = BlockRect::new(0.0, 0.0, 120.0, 90.0).expect("rect must be valid");
         let block = Block::new(clip_rect, 0.0, None, Vec::new(), 0).expect("block must be valid");
         let document = Document::new(vec![block]);
@@ -352,18 +376,22 @@ mod tests {
         }]);
         let rasterizer = build_rasterizer_for_test();
         let mut logical_atlas = LogicalAtlas::new(1.0);
-        let snapshot = Composer.compose_snapshot(
+        let scene = Composer.compose_into_buffer(
+            &owner,
             &model,
             &layout_cache,
             &mut logical_atlas,
             &rasterizer,
-            ViewportState::new(120, 90, 1.0, 7),
+            ViewportState::new(120, 90, 1.0, 7, None),
+            false,
+            512,
         );
 
-        let batch = snapshot
-            .blocks
-            .get(&BlockId::new(0))
-            .expect("snapshot must contain the block batch");
+        let batch = scene
+            .blocks()
+            .iter()
+            .find(|batch| batch.block_id() == BlockId::new(0))
+            .expect("scene must contain the block batch");
         assert_eq!(batch.paths().len(), 1);
         assert_eq!(batch.paths()[0].content_hash(), path.content_hash());
         assert_eq!(batch.paths()[0].layer(), path.layer());
@@ -393,14 +421,12 @@ mod tests {
         assert_ne!(before, after);
     }
 
-    fn sample_batch(z_order: u32) -> BlockSceneBatch {
-        BlockSceneBatch::new(
+    fn sample_block<'a>(owner: &'a Bump, block_id: BlockId, z_order: u32) -> BlockDataArena<'a> {
+        BlockDataArena::new_in(
+            owner,
+            block_id,
             ClipRect::new(0.0, 0.0, 100.0, 80.0),
             z_order,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             z_order as u64,
         )
     }

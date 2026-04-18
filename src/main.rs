@@ -9,6 +9,8 @@ mod layout;
 mod renderer;
 mod scene;
 mod store;
+#[cfg(test)]
+mod test_support;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use self::event::EventRouter;
 use self::font::{FontDiscovery, FreeTypeRasterizer};
 use self::io::{IoRuntime, ViewUpdateDriver, WakeEvent};
 use self::renderer::Renderer;
+use self::scene::SceneConfig;
 use self::store::{run_store, ViewportState};
 use pollster::block_on;
 use winit::application::ApplicationHandler;
@@ -32,20 +35,29 @@ const WINDOW_HEIGHT: f64 = 640.0;
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
+    let scene_config =
+        SceneConfig::load_or_default("config.toml").map_err(|error| format!("{error}"))?;
     let event_loop = EventLoop::<WakeEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
-    let (mut io_runtime, io_handle) = IoRuntime::new(proxy)?;
+    let (mut io_runtime, io_handle, scene_pool, scene_pipeline) =
+        IoRuntime::new(proxy, scene_config.clone())?;
     let view_update_driver = ViewUpdateDriver::new(io_runtime.take_view_update_rx());
     let router = EventRouter::new(io_runtime.action_tx());
 
-    let mut app = DesktopApp::new(io_runtime, view_update_driver, router);
+    let mut app = DesktopApp::new(
+        io_runtime,
+        view_update_driver,
+        router,
+        scene_pipeline,
+        scene_config.clone(),
+    );
     app.install_store_bootstrap(Box::new(move |runtime: &IoRuntime, size, scale_factor| {
         let rasterizer = build_rasterizer();
         let store = demo::build_store(
             rasterizer,
-            ViewportState::new(size.width, size.height, scale_factor, 0),
+            ViewportState::new(size.width, size.height, scale_factor, 0, None),
         );
-        runtime.spawn_task(run_store(store, io_handle));
+        runtime.spawn_task(run_store(store, io_handle, scene_pool));
     }));
     event_loop.run_app(&mut app)?;
     Ok(())

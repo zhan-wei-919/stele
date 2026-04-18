@@ -1,8 +1,6 @@
-//! Store-owned viewport and snapshot types.
+//! Store-owned viewport and phase types.
 
-use std::collections::HashMap;
-
-use crate::scene::{BlockId, BlockSceneBatch};
+use std::time::Instant;
 
 /// Physical viewport input used by the store for layout and diff invalidation.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -11,11 +9,18 @@ pub(crate) struct ViewportState {
     pub(crate) height: u32,
     pub(crate) scale_factor: f32,
     pub(crate) viewport_revision: u64,
+    pub(crate) resize_started_at: Option<Instant>,
 }
 
 impl ViewportState {
     /// Creates a validated viewport snapshot.
-    pub(crate) fn new(width: u32, height: u32, scale_factor: f32, viewport_revision: u64) -> Self {
+    pub(crate) fn new(
+        width: u32,
+        height: u32,
+        scale_factor: f32,
+        viewport_revision: u64,
+        resize_started_at: Option<Instant>,
+    ) -> Self {
         debug_assert!(
             scale_factor > 0.0,
             "viewport scale factor must stay positive"
@@ -25,6 +30,7 @@ impl ViewportState {
             height,
             scale_factor,
             viewport_revision,
+            resize_started_at,
         }
     }
 
@@ -48,26 +54,4 @@ pub(crate) enum StorePhase {
     Reducing,
     Laying,
     ComposingSnapshot,
-    DiffingSnapshot,
-}
-
-/// Full render-ready scene snapshot owned by the async store.
-#[derive(Clone, Debug)]
-pub(crate) struct SceneSnapshot {
-    pub(crate) viewport_revision: u64,
-    pub(crate) required_atlas_generation: Option<u64>,
-    pub(crate) order: Vec<BlockId>,
-    pub(crate) blocks: HashMap<BlockId, BlockSceneBatch>,
-}
-
-impl SceneSnapshot {
-    /// Creates an empty baseline snapshot for diff bootstrap.
-    pub(crate) fn empty(viewport_revision: u64) -> Self {
-        Self {
-            viewport_revision,
-            required_atlas_generation: None,
-            order: Vec::new(),
-            blocks: HashMap::new(),
-        }
-    }
 }

@@ -17,7 +17,7 @@ use super::super::tessellation::TessellationCache;
 use super::bind_group::{create_glyph_bind_group, create_glyph_bind_group_layout};
 use super::buffer::{create_index_buffer, create_vertex_buffer};
 use crate::draw_list::ClipRect;
-use crate::scene::ViewState;
+use crate::scene::SceneBuffer;
 
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -228,9 +228,9 @@ impl<'window> Renderer<'window> {
         self.atlas.write_region(&self.queue, region, pixels);
     }
 
-    /// Rebuilds GPU buffers and block ranges from the latest view-owned scene cache.
-    pub fn rebuild_from_view_state(&mut self, view_state: &ViewState) {
-        self.rebuild_gpu_data(view_state);
+    /// Rebuilds GPU buffers and block ranges from the latest current scene buffer.
+    pub fn rebuild_from_scene_buffer(&mut self, scene_buffer: &SceneBuffer) {
+        self.rebuild_gpu_data(scene_buffer);
     }
 
     pub(super) fn reconfigure_surface(&self) {

@@ -1,9 +1,13 @@
+use std::time::Instant;
+
 use winit::dpi::PhysicalSize;
 
 use super::super::RUNTIME_SHUTDOWN_TIMEOUT;
-use super::support::build_app;
+use super::support::{build_app, sample_scene_frame};
 use crate::event::handlers::ViewportUpdate;
 use crate::event::RouteAction;
+use crate::io::ViewUpdate;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
 #[test]
 fn resize_action_updates_renderer_and_requests_redraw() {
@@ -15,6 +19,7 @@ fn resize_action_updates_renderer_and_requests_redraw() {
             size: PhysicalSize::new(800, 600),
             scale_factor: 2.0,
             viewport_revision: 1,
+            event_time: Instant::now(),
         }));
 
     assert!(!should_exit);
@@ -34,8 +39,8 @@ fn resize_action_updates_renderer_and_requests_redraw() {
             .redraw_requests,
         1
     );
-    assert_eq!(harness.app.view_state.requested_viewport_revision(), 1);
-    assert_eq!(harness.app.view_state.applied_viewport_revision(), 0);
+    assert_eq!(harness.app.scene_protocol.requested_viewport_revision(), 1);
+    assert_eq!(harness.app.scene_protocol.applied_viewport_revision(), 0);
 }
 
 #[test]
@@ -82,5 +87,39 @@ fn close_action_clears_state_and_shuts_down_runtime() {
             .expect("runtime log must lock")
             .shutdown_timeouts,
         vec![RUNTIME_SHUTDOWN_TIMEOUT]
+    );
+}
+
+#[test]
+fn close_action_drops_view_update_receiver() {
+    let mut harness = build_app();
+
+    let should_exit = harness.app.apply_route_action(RouteAction::CloseRequested);
+
+    assert!(should_exit);
+    assert!(
+        matches!(
+            harness
+                .view_update_tx
+                .try_send(ViewUpdate::Scene(sample_scene_frame(1, None, &[7], false))),
+            Err(TrySendError::Closed(_))
+        ),
+        "shutdown should drop view_update_rx so scene sends observe a closed channel",
+    );
+}
+
+#[test]
+fn close_action_drops_return_sender() {
+    let mut harness = build_app();
+
+    let should_exit = harness.app.apply_route_action(RouteAction::CloseRequested);
+
+    assert!(should_exit);
+    assert!(
+        matches!(
+            harness.return_rx.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ),
+        "shutdown should drop return_tx so the composer-side return channel disconnects",
     );
 }

@@ -4,7 +4,7 @@ use std::ops::{BitOr, BitOrAssign};
 use std::time::Instant;
 
 use crate::renderer::atlas::AtlasRegion;
-use crate::scene::{BlockId, BlockSceneBatch};
+use crate::scene::{SceneBuffer, SceneFrameMetadata};
 
 /// Wake-up event delivered through the winit event-loop proxy.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -182,6 +182,7 @@ pub(crate) enum Action {
         height: u32,
         scale_factor: f32,
         viewport_revision: u64,
+        event_time: Instant,
     },
     Shutdown,
 }
@@ -200,71 +201,33 @@ impl AtlasPatch {
     }
 }
 
-/// Block-level scene cache mutation.
-#[derive(Clone, Debug)]
-pub(crate) enum BlockOp {
-    Replace {
-        block_id: BlockId,
-        batch: BlockSceneBatch,
-    },
-    Remove {
-        block_id: BlockId,
-    },
-}
-
-/// Incremental scene payload emitted by the async store toward the view.
-#[derive(Clone, Debug)]
-pub(crate) enum ScenePayload {
-    ReplaceAll {
-        block_order: Vec<BlockId>,
-        block_batches: Vec<(BlockId, BlockSceneBatch)>,
-    },
-    Diff {
-        block_order: Option<Vec<BlockId>>,
-        block_ops: Vec<BlockOp>,
-    },
-}
-
-impl ScenePayload {
-    /// Returns whether the payload carries no externally visible scene change.
-    pub(crate) fn is_empty(&self) -> bool {
-        match self {
-            Self::ReplaceAll { .. } => false,
-            Self::Diff {
-                block_order,
-                block_ops,
-            } => block_order.is_none() && block_ops.is_empty(),
-        }
-    }
-}
-
 /// Scene frame emitted by the async store toward the view.
-#[derive(Clone, Debug)]
 pub(crate) struct SceneFrame {
-    pub(crate) viewport_revision: u64,
-    pub(crate) required_atlas_generation: Option<u64>,
-    pub(crate) clear_tessellation_cache: bool,
-    pub(crate) payload: ScenePayload,
+    buffer: Box<SceneBuffer>,
 }
 
 impl SceneFrame {
-    /// Creates one scene frame associated with one viewport revision.
-    pub(crate) fn new(
-        viewport_revision: u64,
-        required_atlas_generation: Option<u64>,
-        payload: ScenePayload,
-    ) -> Self {
-        Self {
-            viewport_revision,
-            required_atlas_generation,
-            clear_tessellation_cache: false,
-            payload,
-        }
+    /// Wraps one self-contained scene buffer for transport to the view thread.
+    pub(crate) fn new(buffer: Box<SceneBuffer>) -> Self {
+        Self { buffer }
     }
 
-    /// Returns whether the frame carries no externally visible scene change.
-    pub(crate) fn is_empty(&self) -> bool {
-        !self.clear_tessellation_cache && self.payload.is_empty()
+    /// Consumes the frame and returns its scene buffer ownership.
+    pub(crate) fn into_buffer(self) -> Box<SceneBuffer> {
+        self.buffer
+    }
+
+    /// Returns the scene metadata without exposing ownership.
+    pub(crate) fn metadata(&self) -> SceneFrameMetadata {
+        self.buffer.metadata()
+    }
+}
+
+impl std::fmt::Debug for SceneFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SceneFrame")
+            .field("metadata", &self.metadata())
+            .finish()
     }
 }
 
@@ -288,7 +251,7 @@ impl AtlasUpdate {
 }
 
 /// Unified async-to-view payload. Atlas and scene lifecycles are independent.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum ViewUpdate {
     Atlas(AtlasUpdate),
     Scene(SceneFrame),

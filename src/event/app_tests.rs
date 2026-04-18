@@ -1,3 +1,5 @@
+#[path = "app_tests/latency.rs"]
+mod latency;
 #[path = "app_tests/lifecycle.rs"]
 mod lifecycle;
 #[path = "app_tests/perf.rs"]

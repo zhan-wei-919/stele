@@ -1,0 +1,19 @@
+error[E0599]: no method named `clone` found for struct `SceneBuffer` in the current scope
+  --> tests/compile_fail/scene_buffer_no_clone.rs:37:31
+   |
+37 |       let _clone = scene_buffer.clone();
+   |                                 ^^^^^ method not found in `SceneBuffer`
+   |
+  ::: tests/compile_fail/../../src/scene/buffer.rs
+   |
+   | / self_cell! {
+   | |     /// Self-contained scene buffer whose dependent payload borrows one reusable bump arena.
+   | |     pub(crate) struct SceneBuffer {
+   | |         owner: bumpalo::Bump,
+...  |
+   | | }
+   | |_- method `clone` not found for this struct
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `clone`, perhaps you need to implement it:
+           candidate #1: `Clone`

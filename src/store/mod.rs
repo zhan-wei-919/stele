@@ -1,8 +1,7 @@
-//! Async Redux-style store that owns model, layout, logical atlas, and snapshot diffing.
+//! Async store that owns model, layout, logical atlas, and full-scene composition.
 
 mod composer;
 mod delegate;
-mod diff;
 mod logical_atlas;
 mod model;
 mod reducer;

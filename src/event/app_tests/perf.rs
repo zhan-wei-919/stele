@@ -1,27 +1,19 @@
 use std::time::Instant;
 
-use super::support::{build_app, sample_batch};
+use super::support::{build_app, sample_scene_frame};
 use crate::event::RouteAction;
-use crate::io::{SceneFrame, ScenePayload, ViewUpdate};
-use crate::scene::BlockId;
+use crate::io::ViewUpdate;
 
 #[test]
 #[ignore = "manual perf smoke test"]
 fn reports_view_dispatch_to_render_perf() {
     let mut harness = build_app();
-    let scene_frame = SceneFrame::new(
-        1,
-        None,
-        ScenePayload::ReplaceAll {
-            block_order: vec![BlockId::new(7)],
-            block_batches: vec![(BlockId::new(7), sample_batch(99))],
-        },
-    );
+    let scene_frame = sample_scene_frame(1, None, &[7], false);
 
     let dispatch_started = Instant::now();
     harness
         .view_update_tx
-        .send(ViewUpdate::Scene(scene_frame))
+        .blocking_send(ViewUpdate::Scene(scene_frame))
         .expect("scene frame send must succeed");
 
     assert!(!harness.app.on_wake());

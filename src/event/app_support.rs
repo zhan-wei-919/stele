@@ -7,7 +7,7 @@ use winit::window::{Window, WindowId};
 
 use crate::io::{AtlasPatch, IoRuntime};
 use crate::renderer::Renderer;
-use crate::scene::ViewState;
+use crate::scene::SceneBuffer;
 
 /// Operations `SteleApp` needs from the async runtime owner.
 pub(crate) trait AppRuntime {
@@ -85,8 +85,8 @@ pub(crate) trait AppRenderer {
     /// Writes one atlas patch into the physical atlas texture.
     fn write_atlas_patch(&mut self, patch: &AtlasPatch);
 
-    /// Rebuilds GPU buffers from the latest view-owned scene cache.
-    fn rebuild_from_view_state(&mut self, view_state: &ViewState);
+    /// Rebuilds GPU buffers from the latest current scene buffer.
+    fn rebuild_from_scene_buffer(&mut self, scene_buffer: &SceneBuffer);
 }
 
 impl AppRenderer for Renderer<'static> {
@@ -110,7 +110,7 @@ impl AppRenderer for Renderer<'static> {
         Renderer::write_atlas_patch(self, patch.region, &patch.pixels);
     }
 
-    fn rebuild_from_view_state(&mut self, view_state: &ViewState) {
-        Renderer::rebuild_from_view_state(self, view_state);
+    fn rebuild_from_scene_buffer(&mut self, scene_buffer: &SceneBuffer) {
+        Renderer::rebuild_from_scene_buffer(self, scene_buffer);
     }
 }
