@@ -51,7 +51,7 @@ impl RectCmd {
     /// Returns the layer bucket that should contain this rectangle.
     ///
     /// This stays on the API surface even though the current renderer only consumes rectangle geometry.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn layer(&self) -> RenderLayer {
         self.layer
     }

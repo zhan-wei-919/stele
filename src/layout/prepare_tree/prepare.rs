@@ -8,15 +8,13 @@ use crate::font::{FontSelection, FreeTypeRasterizer, LineMetrics, MeasuredGlyph}
 use crate::layout::line_break::{collect_breaks, BreakOpportunity};
 use crate::layout::prepare::PreparedGlyph;
 use crate::layout::tree::{
-    BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, FlowDirection, InlineAtom,
-    InlineAtomKind, InlineNode, OverlayNode, ParagraphNode, StackNode, TextStyle,
+    BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, InlineAtom, InlineAtomKind,
+    InlineNode, OverlayNode, ParagraphNode, StackNode, TextStyle,
 };
 
-use super::super::tree::{AnchorKey, NodeId};
 use super::embed::{PreparedEmbed, PreparedEmbedPayload};
 use super::paragraph::{
-    PreparedAtomPayload, PreparedInline, PreparedInlineAtom, PreparedInlineText, PreparedParagraph,
-    PreparedParagraphItem,
+    PreparedAtomPayload, PreparedInlineAtom, PreparedParagraph, PreparedParagraphItem,
 };
 use super::{PreparedBlockNode, PreparedOverlay, PreparedStack, PreparedTree};
 
@@ -30,8 +28,6 @@ struct PrepareStats {
     paragraph_count: usize,
     atom_count: usize,
     embed_count: usize,
-    default_ascent: f32,
-    default_line_height: f32,
 }
 
 /// Measures the full rich-text tree once and returns the cached cold-path data.
@@ -39,11 +35,7 @@ pub(crate) fn prepare_tree(
     document: &DocumentTree,
     rasterizer: &FreeTypeRasterizer,
 ) -> PreparedTree {
-    let mut stats = PrepareStats {
-        default_ascent: fallback_line_metrics(DEFAULT_FONT_SIZE).ascent,
-        default_line_height: fallback_line_metrics(DEFAULT_FONT_SIZE).line_height,
-        ..PrepareStats::default()
-    };
+    let mut stats = PrepareStats::default();
     let root = prepare_block(document.root(), rasterizer, &mut stats);
     info!(
         "layout.tree.prepare node_count={} paragraph_count={} atom_count={} embed_count={}",
@@ -52,8 +44,6 @@ pub(crate) fn prepare_tree(
     PreparedTree {
         root,
         anchor_index: document.anchor_index().clone(),
-        default_ascent: stats.default_ascent,
-        default_line_height: stats.default_line_height,
     }
 }
 
@@ -88,7 +78,6 @@ fn prepare_stack(
 ) -> PreparedStack {
     PreparedStack {
         node_id: stack.node_id,
-        anchor_key: stack.anchor_key.clone(),
         direction: stack.direction,
         children: stack
             .children
@@ -116,7 +105,7 @@ fn prepare_paragraph(
     rasterizer: &FreeTypeRasterizer,
     stats: &mut PrepareStats,
 ) -> PreparedParagraph {
-    let mut pending_inlines = Vec::with_capacity(paragraph.inlines.len());
+    let mut atoms = Vec::new();
     let mut staged_items = Vec::new();
     let mut full_text = String::new();
     let mut default_ascent = fallback_line_metrics(DEFAULT_FONT_SIZE).ascent;
@@ -135,24 +124,21 @@ fn prepare_paragraph(
                     &mut default_ascent,
                     &mut default_line_height,
                 );
-                pending_inlines.push(PendingInline::Text {
-                    run_index: inline_index,
-                    style: text.style,
-                    glyph_count: glyphs,
-                });
+                debug_assert!(glyphs <= text.text.chars().filter(|ch| *ch != '\n').count());
             }
             InlineNode::Atom(atom) => {
                 stats.atom_count += 1;
-                let prepared_atom = prepare_inline_atom(inline_index, atom, rasterizer);
+                let atom_index = atoms.len();
+                let prepared_atom = prepare_inline_atom(atom_index, atom, rasterizer);
                 default_ascent = default_ascent.max(atom_ascent(&prepared_atom));
                 default_line_height = default_line_height
                     .max(atom_ascent(&prepared_atom) + atom_descent(&prepared_atom));
                 full_text.push(OBJECT_REPLACEMENT_CHAR);
                 staged_items.push(StagedParagraphItem::Atom {
                     byte_end: full_text.len(),
-                    atom_index: inline_index,
+                    atom_index,
                 });
-                pending_inlines.push(PendingInline::Atom(prepared_atom));
+                atoms.push(prepared_atom);
             }
         }
     }
@@ -162,22 +148,12 @@ fn prepare_paragraph(
         .into_iter()
         .map(|item| item.into_prepared(&break_map))
         .collect::<Vec<_>>();
-    let glyphs_by_run = collect_glyphs_by_run(&items);
-    let inlines = pending_inlines
-        .into_iter()
-        .map(|inline| inline.finish(&glyphs_by_run))
-        .collect::<Vec<_>>();
     let resolved_line_height = paragraph.style.line_height.resolve(default_line_height);
-
-    stats.default_ascent = stats.default_ascent.max(default_ascent);
-    stats.default_line_height = stats.default_line_height.max(resolved_line_height);
 
     PreparedParagraph {
         node_id: paragraph.node_id,
-        anchor_key: paragraph.anchor_key.clone(),
-        inlines,
+        atoms,
         items,
-        break_map,
         default_ascent,
         default_line_height: resolved_line_height,
         style: paragraph.style,
@@ -271,7 +247,6 @@ fn prepare_inline_atom(
                 .map(|glyph| glyph.advance.max(0.0))
                 .sum::<f32>();
             PreparedInlineAtom {
-                atom_index,
                 intrinsic_size: [
                     label_width + atom.style.padding.horizontal(),
                     metrics.line_height + atom.style.padding.vertical(),
@@ -279,7 +254,6 @@ fn prepare_inline_atom(
                 baseline: atom.style.baseline,
                 style: atom.style,
                 payload: PreparedAtomPayload::Chip {
-                    foreground: text_style.color(),
                     background: atom.style.background,
                     measured_text,
                 },
@@ -307,7 +281,6 @@ fn prepare_inline_atom(
                 break_after: BreakOpportunity::Forbidden,
             };
             PreparedInlineAtom {
-                atom_index,
                 intrinsic_size: [
                     glyph.advance + atom.style.padding.horizontal(),
                     metrics.line_height + atom.style.padding.vertical(),
@@ -318,7 +291,6 @@ fn prepare_inline_atom(
             }
         }
         InlineAtomKind::Image { data_ref } => PreparedInlineAtom {
-            atom_index,
             intrinsic_size: [
                 data_ref.width() as f32 + atom.style.padding.horizontal(),
                 data_ref.height() as f32 + atom.style.padding.vertical(),
@@ -330,7 +302,6 @@ fn prepare_inline_atom(
             },
         },
         InlineAtomKind::Custom { measured_size } => PreparedInlineAtom {
-            atom_index,
             intrinsic_size: [
                 measured_size[0] + atom.style.padding.horizontal(),
                 measured_size[1] + atom.style.padding.vertical(),
@@ -349,7 +320,6 @@ fn prepare_embed(embed: &BlockEmbedNode) -> PreparedEmbed {
             intrinsic_size,
         } => PreparedEmbed {
             node_id: embed.node_id,
-            anchor_key: embed.anchor_key.clone(),
             intrinsic_size: *intrinsic_size,
             style: embed.style,
             payload: PreparedEmbedPayload::Image {
@@ -363,7 +333,6 @@ fn prepare_embed(embed: &BlockEmbedNode) -> PreparedEmbed {
             intrinsic_size,
         } => PreparedEmbed {
             node_id: embed.node_id,
-            anchor_key: embed.anchor_key.clone(),
             intrinsic_size: *intrinsic_size,
             style: embed.style,
             payload: PreparedEmbedPayload::Path {
@@ -374,7 +343,6 @@ fn prepare_embed(embed: &BlockEmbedNode) -> PreparedEmbed {
         },
         BlockEmbedKind::Custom { intrinsic_size } => PreparedEmbed {
             node_id: embed.node_id,
-            anchor_key: embed.anchor_key.clone(),
             intrinsic_size: *intrinsic_size,
             style: embed.style,
             payload: PreparedEmbedPayload::Custom,
@@ -402,19 +370,6 @@ fn atom_descent(atom: &PreparedInlineAtom) -> f32 {
     }
 }
 
-fn collect_glyphs_by_run(items: &[PreparedParagraphItem]) -> HashMap<usize, Vec<PreparedGlyph>> {
-    let mut glyphs_by_run = HashMap::<usize, Vec<PreparedGlyph>>::new();
-    for item in items {
-        if let PreparedParagraphItem::Glyph(glyph) = item {
-            glyphs_by_run
-                .entry(glyph.span_index)
-                .or_default()
-                .push(glyph.clone());
-        }
-    }
-    glyphs_by_run
-}
-
 fn fallback_line_metrics(font_size: f32) -> LineMetrics {
     LineMetrics {
         ascent: font_size,
@@ -428,36 +383,6 @@ fn log_font_fallback(selection: FontSelection) {
             "layout.warn.font_fallback requested_font_id={} resolved_font_id={}",
             selection.requested_font_id, selection.resolved_font_id
         );
-    }
-}
-
-enum PendingInline {
-    Text {
-        run_index: usize,
-        style: TextStyle,
-        glyph_count: usize,
-    },
-    Atom(PreparedInlineAtom),
-}
-
-impl PendingInline {
-    fn finish(self, glyphs_by_run: &HashMap<usize, Vec<PreparedGlyph>>) -> PreparedInline {
-        match self {
-            Self::Text {
-                run_index,
-                style,
-                glyph_count,
-            } => {
-                let glyphs = glyphs_by_run.get(&run_index).cloned().unwrap_or_default();
-                debug_assert_eq!(glyphs.len(), glyph_count);
-                PreparedInline::Text(PreparedInlineText {
-                    run_index,
-                    glyphs,
-                    style,
-                })
-            }
-            Self::Atom(atom) => PreparedInline::Atom(atom),
-        }
     }
 }
 

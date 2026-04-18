@@ -50,6 +50,9 @@ pub(crate) enum ClipMode {
     Rect,
 }
 
+// The semantic tree exposes all supported alignment modes even though the demo only instantiates
+// a subset of them today.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Align {
     Start,
@@ -59,6 +62,9 @@ pub(crate) enum Align {
     Stretch,
 }
 
+// The semantic tree exposes all supported paragraph alignment modes even though the demo only
+// instantiates a subset of them today.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum TextAlign {
     #[default]
@@ -68,6 +74,9 @@ pub(crate) enum TextAlign {
     Justify,
 }
 
+// The semantic tree exposes both wrap policies even though the demo only instantiates wrapping
+// paragraphs today.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum WrapMode {
     #[default]
@@ -75,6 +84,9 @@ pub(crate) enum WrapMode {
     NoWrap,
 }
 
+// The semantic tree keeps both line-height strategies available to callers even though the demo
+// currently relies on the factor-based default.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum LineHeight {
     Factor(f32),
@@ -105,6 +117,9 @@ impl LineHeight {
     }
 }
 
+// The semantic tree supports multiple atom baseline strategies even though the demo only uses one
+// of them in production code today.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum AtomBaseline {
     #[default]

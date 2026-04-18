@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::draw_list::{ImageData, LineCap, LineJoin, PathVerb, StrokeStyle};
+use crate::draw_list::{ImageData, LineCap, LineJoin, PathVerb};
 use crate::layout::document::DocumentError;
 
 use super::style::{BlockStyle, InlineAtomStyle, ParagraphStyle};
@@ -40,6 +40,9 @@ impl AnchorKey {
     }
 }
 
+// The input tree supports both flow directions even though the demo currently instantiates only
+// vertical stacks in production code.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum FlowDirection {
     #[default]
@@ -95,15 +98,6 @@ pub(crate) enum BlockNode {
 }
 
 impl BlockNode {
-    pub(crate) fn node_id(&self) -> NodeId {
-        match self {
-            Self::Stack(node) => node.node_id,
-            Self::Paragraph(node) => node.node_id,
-            Self::Embed(node) => node.node_id,
-            Self::Overlay(node) => node.node_id,
-        }
-    }
-
     fn set_node_id(&mut self, node_id: NodeId) {
         match self {
             Self::Stack(node) => node.node_id = node_id,
@@ -198,6 +192,9 @@ impl InlineAtom {
     }
 }
 
+// The semantic tree supports multiple inline atom payloads even though the demo only instantiates
+// a subset of them in production code.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) enum InlineAtomKind {
     Chip {
@@ -252,6 +249,9 @@ impl BlockEmbedNode {
     }
 }
 
+// The semantic tree supports custom embeds even though the demo currently instantiates only image
+// and path embeds in production code.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) enum BlockEmbedKind {
     Image {
@@ -289,12 +289,6 @@ pub(crate) struct PathStroke {
     pub(crate) line_join: LineJoin,
 }
 
-impl PathStroke {
-    pub(crate) fn to_stroke_style(self) -> StrokeStyle {
-        StrokeStyle::new(self.color, self.width, self.line_cap, self.line_join)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct OverlayNode {
     pub(crate) node_id: NodeId,
@@ -312,6 +306,9 @@ impl OverlayNode {
     }
 }
 
+// Overlay anchors can target either the viewport or a block-relative anchor; the demo currently
+// instantiates only the block-relative path in production code.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) enum OverlayAnchor {
     Viewport { offset: [f32; 2] },

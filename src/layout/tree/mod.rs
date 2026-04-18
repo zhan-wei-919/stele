@@ -11,7 +11,7 @@ pub(crate) use nodes::{
     StackNode, TextRun,
 };
 pub(crate) use style::{
-    Align, AtomBaseline, BlockStyle, BorderStyle, ClipMode, Edges, InlineAtomStyle, LineHeight,
-    ParagraphStyle, TextAlign, WrapMode,
+    Align, AtomBaseline, BlockStyle, ClipMode, Edges, InlineAtomStyle, LineHeight, ParagraphStyle,
+    WrapMode,
 };
 pub(crate) use text_style::TextStyle;

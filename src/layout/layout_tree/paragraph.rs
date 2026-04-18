@@ -5,8 +5,7 @@ use crate::font::SubpixelBin;
 use crate::layout::line_break::BreakOpportunity;
 use crate::layout::prepare::PreparedGlyph;
 use crate::layout::prepare_tree::{
-    PreparedAtomPayload, PreparedInline, PreparedInlineAtom, PreparedParagraph,
-    PreparedParagraphItem,
+    PreparedAtomPayload, PreparedInlineAtom, PreparedParagraph, PreparedParagraphItem,
 };
 use crate::layout::tree::AtomBaseline;
 
@@ -213,7 +212,6 @@ fn place_lines(
             let baseline = y + ascent;
             let runs = build_runs(items, paragraph, rect.x(), y, baseline, line_height);
             let line = LayoutLine {
-                baseline,
                 line_height,
                 y,
                 runs,
@@ -362,12 +360,8 @@ fn position_glyph(glyph: &PreparedGlyph, x: f32, baseline: f32) -> PositionedGly
 
 fn paragraph_atom(paragraph: &PreparedParagraph, atom_index: usize) -> &PreparedInlineAtom {
     paragraph
-        .inlines
-        .iter()
-        .find_map(|inline| match inline {
-            PreparedInline::Atom(atom) if atom.atom_index == atom_index => Some(atom),
-            _ => None,
-        })
+        .atoms
+        .get(atom_index)
         .expect("atom referenced by paragraph items must exist")
 }
 
@@ -485,17 +479,15 @@ fn decoration_thickness(font_size: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use crate::draw_list::ImageData;
     use crate::layout::line_break::BreakOpportunity;
     use crate::layout::prepare::PreparedGlyph;
     use crate::layout::prepare_tree::{
-        PreparedAtomPayload, PreparedInline, PreparedInlineAtom, PreparedParagraph,
-        PreparedParagraphItem,
+        PreparedAtomPayload, PreparedInlineAtom, PreparedParagraph, PreparedParagraphItem,
     };
-    use crate::layout::tree::{AtomBaseline, InlineAtomStyle, ParagraphStyle, TextStyle};
+    use crate::layout::tree::{AtomBaseline, InlineAtomStyle, ParagraphStyle};
 
     use super::{layout_paragraph, LayoutRect};
 
@@ -503,31 +495,21 @@ mod tests {
     fn paragraph_layout_keeps_atom_and_text_on_shared_line() {
         let paragraph = PreparedParagraph {
             node_id: crate::layout::tree::NodeId::new(1),
-            anchor_key: None,
-            inlines: vec![
-                PreparedInline::Text(crate::layout::prepare_tree::PreparedInlineText {
-                    run_index: 0,
-                    glyphs: vec![glyph(0, 1, 10.0, 14.0)],
-                    style: TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style"),
-                }),
-                PreparedInline::Atom(PreparedInlineAtom {
-                    atom_index: 1,
-                    intrinsic_size: [12.0, 12.0],
-                    baseline: AtomBaseline::MiddleOfLine,
-                    style: InlineAtomStyle::default(),
-                    payload: PreparedAtomPayload::Image {
-                        data_ref: Arc::new(ImageData::new(vec![255; 4], 1, 1)),
-                    },
-                }),
-            ],
+            atoms: vec![PreparedInlineAtom {
+                intrinsic_size: [12.0, 12.0],
+                baseline: AtomBaseline::MiddleOfLine,
+                style: InlineAtomStyle::default(),
+                payload: PreparedAtomPayload::Image {
+                    data_ref: Arc::new(ImageData::new(vec![255; 4], 1, 1)),
+                },
+            }],
             items: vec![
                 PreparedParagraphItem::Glyph(glyph(0, 1, 10.0, 14.0)),
                 PreparedParagraphItem::Atom {
-                    atom_index: 1,
+                    atom_index: 0,
                     break_after: BreakOpportunity::Forbidden,
                 },
             ],
-            break_map: HashMap::new(),
             default_ascent: 10.0,
             default_line_height: 20.0,
             style: ParagraphStyle::default(),

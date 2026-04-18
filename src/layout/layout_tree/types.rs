@@ -55,10 +55,6 @@ impl LayoutRect {
         self.y + self.height
     }
 
-    pub(crate) fn translated(self, dx: f32, dy: f32) -> Self {
-        Self::new(self.x + dx, self.y + dy, self.width, self.height)
-    }
-
     pub(crate) fn intersect(self, other: Self) -> Self {
         let left = self.x.max(other.x);
         let top = self.y.max(other.y);
@@ -75,24 +71,14 @@ impl LayoutRect {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LayoutConstraints {
     pub(crate) max_width: f32,
-    pub(crate) max_height: Option<f32>,
-    pub(crate) scale_factor: f32,
     pub(crate) viewport: [f32; 2],
 }
 
 impl LayoutConstraints {
-    pub(crate) fn new(
-        max_width: f32,
-        max_height: Option<f32>,
-        scale_factor: f32,
-        viewport: [f32; 2],
-    ) -> Self {
+    pub(crate) fn new(max_width: f32, viewport: [f32; 2]) -> Self {
         debug_assert!(max_width.is_finite() && max_width > 0.0);
-        debug_assert!(scale_factor.is_finite() && scale_factor > 0.0);
         Self {
             max_width,
-            max_height,
-            scale_factor,
             viewport,
         }
     }
@@ -139,7 +125,6 @@ pub(crate) struct LayoutParagraph {
 
 #[derive(Clone, Debug)]
 pub(crate) struct LayoutLine {
-    pub(crate) baseline: f32,
     pub(crate) line_height: f32,
     pub(crate) y: f32,
     pub(crate) runs: Vec<LayoutRun>,

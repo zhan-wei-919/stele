@@ -86,14 +86,9 @@ fn compose_tree_entries<'a>(
     rasterizer: &FreeTypeRasterizer,
     viewport: ViewportState,
 ) -> Vec<OrderedBlock<'a>> {
-    let layout_tree = layout_tree::layout_tree(
+    let layout_tree: layout_tree::LayoutTree = layout_tree::layout_tree(
         prepared_tree,
-        LayoutConstraints::new(
-            viewport.logical_size()[0].max(1.0),
-            Some(viewport.logical_size()[1].max(1.0)),
-            viewport.scale_factor,
-            viewport.logical_size(),
-        ),
+        LayoutConstraints::new(viewport.logical_size()[0].max(1.0), viewport.logical_size()),
     );
     let mut entries = Vec::new();
     collect_tree_entries(
