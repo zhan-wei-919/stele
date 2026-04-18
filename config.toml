@@ -1,0 +1,7 @@
+# Scene runtime defaults for the triple-buffer pipeline.
+[scene]
+arena_initial_chunk_bytes = 65536
+rebuild_budget_ms = 4
+compose_budget_ms = 8
+end_to_end_latency_ms = 33
+max_blocks_per_scene = 512
