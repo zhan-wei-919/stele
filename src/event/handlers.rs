@@ -354,9 +354,24 @@ fn scroll_events_from_delta(delta: &MouseScrollDelta) -> Vec<(MouseEventKind, Mo
 }
 
 fn map_key_code(physical_key: PhysicalKey, logical_key: Key<&str>) -> KeyCode {
+    match logical_key {
+        Key::Character(_) | Key::Dead(Some(_)) => map_logical_key_code(logical_key),
+        Key::Named(NamedKey::Space) => key_code_char(' '),
+        Key::Named(named) => {
+            let code = map_named_key(named);
+            if code != KeyCode::Unknown {
+                return code;
+            }
+            map_physical_fallback_key_code(physical_key)
+        }
+        Key::Dead(None) | Key::Unidentified(_) => map_physical_fallback_key_code(physical_key),
+    }
+}
+
+fn map_physical_fallback_key_code(physical_key: PhysicalKey) -> KeyCode {
     match physical_key {
         PhysicalKey::Code(code) => map_physical_key_code(code),
-        PhysicalKey::Unidentified(_) => map_logical_key_code(logical_key),
+        PhysicalKey::Unidentified(_) => KeyCode::Unknown,
     }
 }
 
@@ -496,17 +511,9 @@ fn key_code_char_from_logical(text: &str) -> KeyCode {
 }
 
 fn key_code_char_from_scalar(ch: char) -> KeyCode {
-    // Keep key facts one-to-one with a single logical character; if lowercase expansion
-    // would produce multiple scalars, it belongs in a future text-commit path instead.
-    let mut normalized = ch.to_lowercase();
-    let Some(lower) = normalized.next() else {
-        return KeyCode::Unknown;
-    };
-    if normalized.next().is_some() {
-        return KeyCode::Unknown;
-    }
-
-    key_code_char(lower)
+    // Layer 1 preserves one logical character fact as-is. Multi-scalar commits remain
+    // reserved for the future text-commit path so key facts stay one-to-one.
+    key_code_char(ch)
 }
 
 fn map_named_key(named: NamedKey) -> KeyCode {
@@ -639,10 +646,18 @@ mod tests {
     }
 
     #[test]
-    fn key_code_mapping_is_backend_agnostic() {
+    fn key_code_mapping_preserves_logical_character_facts() {
         assert_eq!(
             map_key_code(PhysicalKey::Code(WinitKeyCode::KeyA), Key::Character("q")),
-            KeyCode::Char('a')
+            KeyCode::Char('q')
+        );
+        assert_eq!(
+            map_key_code(PhysicalKey::Code(WinitKeyCode::KeyA), Key::Character("A")),
+            KeyCode::Char('A')
+        );
+        assert_eq!(
+            map_key_code(PhysicalKey::Code(WinitKeyCode::Digit1), Key::Character("!")),
+            KeyCode::Char('!')
         );
         assert_eq!(
             map_key_code(
@@ -679,7 +694,11 @@ mod tests {
             ),
             KeyCode::Unknown
         );
-        assert_eq!(map_logical_key_code(Key::Character("İ")), KeyCode::Unknown);
+        assert_eq!(
+            map_logical_key_code(Key::Character("İ")),
+            KeyCode::Char('İ')
+        );
+        assert_eq!(map_logical_key_code(Key::Character("ss")), KeyCode::Unknown);
     }
 
     #[test]
