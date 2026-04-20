@@ -36,8 +36,7 @@ fn typed_input_actions_do_not_trigger_scene_recompute() {
     let _ = compose_and_record_state(&mut store);
     let outcome = store.handle_action(Action::Input {
         event: InputEvent::Key(KeyEvent {
-            code: KeyCode::Character(String::from("a")),
-            text: Some(String::from("a")),
+            code: KeyCode::Char('a'),
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
         }),
@@ -60,7 +59,6 @@ fn configured_scroll_input_updates_offset_and_requests_compose() {
     let outcome = store.handle_action(Action::Input {
         event: InputEvent::Key(KeyEvent {
             code: KeyCode::Down,
-            text: None,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
         }),
@@ -124,7 +122,6 @@ fn veto_filter_skips_default_scroll_mapping() {
     let outcome = store.handle_action(Action::Input {
         event: InputEvent::Key(KeyEvent {
             code: KeyCode::Down,
-            text: None,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
         }),

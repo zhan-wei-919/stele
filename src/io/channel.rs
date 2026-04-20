@@ -105,9 +105,9 @@ pub(crate) enum KeyEventKind {
 }
 
 /// Backend-agnostic key code carried by keyboard input facts.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum KeyCode {
-    Character(String),
+    Char(char),
     Enter,
     Tab,
     Escape,
@@ -131,10 +131,9 @@ pub(crate) enum KeyCode {
 }
 
 /// Backend-agnostic keyboard input fact.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct KeyEvent {
     pub(crate) code: KeyCode,
-    pub(crate) text: Option<String>,
     pub(crate) modifiers: KeyModifiers,
     pub(crate) kind: KeyEventKind,
 }
@@ -167,8 +166,14 @@ pub(crate) enum MouseEventKind {
 pub(crate) enum InputEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    // Reserved for the upcoming command-layer paste path so we can keep
+    // bulk text insertion separate from key facts once a producer is wired in.
+    #[allow(dead_code)]
+    Paste(String),
     CursorLeft,
-    FocusChanged { focused: bool },
+    FocusChanged {
+        focused: bool,
+    },
 }
 
 /// Unified input action sent from winit into the async store.

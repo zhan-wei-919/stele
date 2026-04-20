@@ -292,7 +292,6 @@ mod tests {
 
         assert_eq!(
             router.dispatch_keyboard_input(KeyboardInput::new(
-                None,
                 KeyCode::Control,
                 KeyEventKind::Press,
                 false,
@@ -307,7 +306,6 @@ mod tests {
             Action::Input {
                 event: InputEvent::Key(KeyEvent {
                     code: KeyCode::Control,
-                    text: None,
                     modifiers: KeyModifiers::CONTROL,
                     kind: KeyEventKind::Press,
                 }),
@@ -315,8 +313,7 @@ mod tests {
         );
 
         router.dispatch_keyboard_input(KeyboardInput::new(
-            None,
-            KeyCode::Character(String::from("c")),
+            KeyCode::Char('c'),
             KeyEventKind::Press,
             false,
         ));
@@ -326,8 +323,7 @@ mod tests {
                 .expect("character key must inherit control"),
             Action::Input {
                 event: InputEvent::Key(KeyEvent {
-                    code: KeyCode::Character(String::from("c")),
-                    text: None,
+                    code: KeyCode::Char('c'),
                     modifiers: KeyModifiers::CONTROL,
                     kind: KeyEventKind::Press,
                 }),
@@ -335,7 +331,6 @@ mod tests {
         );
 
         router.dispatch_keyboard_input(KeyboardInput::new(
-            None,
             KeyCode::Control,
             KeyEventKind::Release,
             false,
@@ -348,7 +343,6 @@ mod tests {
             Action::Input {
                 event: InputEvent::Key(KeyEvent {
                     code: KeyCode::Control,
-                    text: None,
                     modifiers: KeyModifiers::NONE,
                     kind: KeyEventKind::Release,
                 }),
@@ -369,8 +363,7 @@ mod tests {
             RouteAction::None
         );
         router.dispatch_keyboard_input(KeyboardInput::new(
-            None,
-            KeyCode::Character(String::from("x")),
+            KeyCode::Char('x'),
             KeyEventKind::Press,
             false,
         ));
@@ -382,8 +375,7 @@ mod tests {
                 .expect("character key must inherit modifier snapshot"),
             Action::Input {
                 event: InputEvent::Key(KeyEvent {
-                    code: KeyCode::Character(String::from("x")),
-                    text: None,
+                    code: KeyCode::Char('x'),
                     modifiers: KeyModifiers::ALT,
                     kind: KeyEventKind::Press,
                 }),

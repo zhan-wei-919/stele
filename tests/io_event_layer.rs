@@ -80,8 +80,7 @@ fn keyboard_input_is_routed_to_actions() {
     let (mut router, mut action_rx) = build_router();
 
     let action = router.dispatch_keyboard_input(KeyboardInput::new(
-        Some("a"),
-        KeyCode::Character(String::from("a")),
+        KeyCode::Char('a'),
         KeyEventKind::Press,
         false,
     ));
@@ -93,8 +92,7 @@ fn keyboard_input_is_routed_to_actions() {
             .expect("keyboard action must be forwarded"),
         Action::Input {
             event: InputEvent::Key(KeyEvent {
-                code: KeyCode::Character(String::from("a")),
-                text: Some(String::from("a")),
+                code: KeyCode::Char('a'),
                 modifiers: KeyModifiers::NONE,
                 kind: KeyEventKind::Press,
             }),
@@ -257,8 +255,7 @@ fn modifiers_are_attached_to_keyboard_and_mouse_events() {
     );
 
     router.dispatch_keyboard_input(KeyboardInput::new(
-        None,
-        KeyCode::Character(String::from("c")),
+        KeyCode::Char('c'),
         KeyEventKind::Press,
         false,
     ));
@@ -268,8 +265,7 @@ fn modifiers_are_attached_to_keyboard_and_mouse_events() {
             .expect("keyboard modifier snapshot must be attached"),
         Action::Input {
             event: InputEvent::Key(KeyEvent {
-                code: KeyCode::Character(String::from("c")),
-                text: None,
+                code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 kind: KeyEventKind::Press,
             }),

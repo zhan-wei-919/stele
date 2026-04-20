@@ -16,7 +16,6 @@ use crate::io::{
 /// Keyboard input normalized at the winit boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeyboardInput {
-    text: Option<String>,
     code: KeyCode,
     kind: KeyEventKind,
     is_synthetic: bool,
@@ -25,25 +24,17 @@ pub(crate) struct KeyboardInput {
 impl KeyboardInput {
     /// Builds normalized keyboard input from one winit key event.
     pub(crate) fn from_winit(event: &WinitKeyEvent, is_synthetic: bool) -> Self {
-        let kind = normalize_key_kind(event.state, event.repeat);
         Self {
-            text: normalize_text(event.text.as_deref(), kind),
             code: map_key_code(event.physical_key, event.logical_key.as_ref()),
-            kind,
+            kind: normalize_key_kind(event.state, event.repeat),
             is_synthetic,
         }
     }
 
     /// Builds normalized keyboard input for tests and internal callers.
     #[cfg(test)]
-    pub(crate) fn new(
-        text: Option<&str>,
-        code: KeyCode,
-        kind: KeyEventKind,
-        is_synthetic: bool,
-    ) -> Self {
+    pub(crate) fn new(code: KeyCode, kind: KeyEventKind, is_synthetic: bool) -> Self {
         Self {
-            text: normalize_text(text, kind),
             code,
             kind,
             is_synthetic,
@@ -67,17 +58,11 @@ impl KeyboardInput {
             return None;
         }
 
-        let KeyboardInput {
-            text,
-            code,
-            kind,
-            is_synthetic: _,
-        } = self;
+        let KeyboardInput { code, kind, .. } = self;
 
         Some(Action::Input {
             event: InputEvent::Key(KeyEvent {
                 code,
-                text,
                 modifiers,
                 kind,
             }),
@@ -368,18 +353,6 @@ fn scroll_events_from_delta(delta: &MouseScrollDelta) -> Vec<(MouseEventKind, Mo
     }
 }
 
-fn normalize_text(text: Option<&str>, kind: KeyEventKind) -> Option<String> {
-    if kind == KeyEventKind::Release {
-        return None;
-    }
-
-    let text = text?;
-    if text.is_empty() || text.chars().all(char::is_control) {
-        return None;
-    }
-    Some(text.to_owned())
-}
-
 fn map_key_code(physical_key: PhysicalKey, logical_key: Key<&str>) -> KeyCode {
     match physical_key {
         PhysicalKey::Code(code) => map_physical_key_code(code),
@@ -389,56 +362,56 @@ fn map_key_code(physical_key: PhysicalKey, logical_key: Key<&str>) -> KeyCode {
 
 fn map_physical_key_code(code: WinitKeyCode) -> KeyCode {
     match code {
-        WinitKeyCode::KeyA => key_code_char("a"),
-        WinitKeyCode::KeyB => key_code_char("b"),
-        WinitKeyCode::KeyC => key_code_char("c"),
-        WinitKeyCode::KeyD => key_code_char("d"),
-        WinitKeyCode::KeyE => key_code_char("e"),
-        WinitKeyCode::KeyF => key_code_char("f"),
-        WinitKeyCode::KeyG => key_code_char("g"),
-        WinitKeyCode::KeyH => key_code_char("h"),
-        WinitKeyCode::KeyI => key_code_char("i"),
-        WinitKeyCode::KeyJ => key_code_char("j"),
-        WinitKeyCode::KeyK => key_code_char("k"),
-        WinitKeyCode::KeyL => key_code_char("l"),
-        WinitKeyCode::KeyM => key_code_char("m"),
-        WinitKeyCode::KeyN => key_code_char("n"),
-        WinitKeyCode::KeyO => key_code_char("o"),
-        WinitKeyCode::KeyP => key_code_char("p"),
-        WinitKeyCode::KeyQ => key_code_char("q"),
-        WinitKeyCode::KeyR => key_code_char("r"),
-        WinitKeyCode::KeyS => key_code_char("s"),
-        WinitKeyCode::KeyT => key_code_char("t"),
-        WinitKeyCode::KeyU => key_code_char("u"),
-        WinitKeyCode::KeyV => key_code_char("v"),
-        WinitKeyCode::KeyW => key_code_char("w"),
-        WinitKeyCode::KeyX => key_code_char("x"),
-        WinitKeyCode::KeyY => key_code_char("y"),
-        WinitKeyCode::KeyZ => key_code_char("z"),
-        WinitKeyCode::Digit0 | WinitKeyCode::Numpad0 => key_code_char("0"),
-        WinitKeyCode::Digit1 | WinitKeyCode::Numpad1 => key_code_char("1"),
-        WinitKeyCode::Digit2 | WinitKeyCode::Numpad2 => key_code_char("2"),
-        WinitKeyCode::Digit3 | WinitKeyCode::Numpad3 => key_code_char("3"),
-        WinitKeyCode::Digit4 | WinitKeyCode::Numpad4 => key_code_char("4"),
-        WinitKeyCode::Digit5 | WinitKeyCode::Numpad5 => key_code_char("5"),
-        WinitKeyCode::Digit6 | WinitKeyCode::Numpad6 => key_code_char("6"),
-        WinitKeyCode::Digit7 | WinitKeyCode::Numpad7 => key_code_char("7"),
-        WinitKeyCode::Digit8 | WinitKeyCode::Numpad8 => key_code_char("8"),
-        WinitKeyCode::Digit9 | WinitKeyCode::Numpad9 => key_code_char("9"),
-        WinitKeyCode::Space => key_code_char(" "),
-        WinitKeyCode::Minus | WinitKeyCode::NumpadSubtract => key_code_char("-"),
-        WinitKeyCode::Equal | WinitKeyCode::NumpadEqual => key_code_char("="),
-        WinitKeyCode::BracketLeft => key_code_char("["),
-        WinitKeyCode::BracketRight => key_code_char("]"),
-        WinitKeyCode::Backslash | WinitKeyCode::IntlBackslash => key_code_char("\\"),
-        WinitKeyCode::Semicolon => key_code_char(";"),
-        WinitKeyCode::Quote => key_code_char("'"),
-        WinitKeyCode::Backquote => key_code_char("`"),
-        WinitKeyCode::Comma | WinitKeyCode::NumpadComma => key_code_char(","),
-        WinitKeyCode::Period | WinitKeyCode::NumpadDecimal => key_code_char("."),
-        WinitKeyCode::Slash | WinitKeyCode::NumpadDivide => key_code_char("/"),
-        WinitKeyCode::NumpadAdd => key_code_char("+"),
-        WinitKeyCode::NumpadMultiply => key_code_char("*"),
+        WinitKeyCode::KeyA => key_code_char('a'),
+        WinitKeyCode::KeyB => key_code_char('b'),
+        WinitKeyCode::KeyC => key_code_char('c'),
+        WinitKeyCode::KeyD => key_code_char('d'),
+        WinitKeyCode::KeyE => key_code_char('e'),
+        WinitKeyCode::KeyF => key_code_char('f'),
+        WinitKeyCode::KeyG => key_code_char('g'),
+        WinitKeyCode::KeyH => key_code_char('h'),
+        WinitKeyCode::KeyI => key_code_char('i'),
+        WinitKeyCode::KeyJ => key_code_char('j'),
+        WinitKeyCode::KeyK => key_code_char('k'),
+        WinitKeyCode::KeyL => key_code_char('l'),
+        WinitKeyCode::KeyM => key_code_char('m'),
+        WinitKeyCode::KeyN => key_code_char('n'),
+        WinitKeyCode::KeyO => key_code_char('o'),
+        WinitKeyCode::KeyP => key_code_char('p'),
+        WinitKeyCode::KeyQ => key_code_char('q'),
+        WinitKeyCode::KeyR => key_code_char('r'),
+        WinitKeyCode::KeyS => key_code_char('s'),
+        WinitKeyCode::KeyT => key_code_char('t'),
+        WinitKeyCode::KeyU => key_code_char('u'),
+        WinitKeyCode::KeyV => key_code_char('v'),
+        WinitKeyCode::KeyW => key_code_char('w'),
+        WinitKeyCode::KeyX => key_code_char('x'),
+        WinitKeyCode::KeyY => key_code_char('y'),
+        WinitKeyCode::KeyZ => key_code_char('z'),
+        WinitKeyCode::Digit0 | WinitKeyCode::Numpad0 => key_code_char('0'),
+        WinitKeyCode::Digit1 | WinitKeyCode::Numpad1 => key_code_char('1'),
+        WinitKeyCode::Digit2 | WinitKeyCode::Numpad2 => key_code_char('2'),
+        WinitKeyCode::Digit3 | WinitKeyCode::Numpad3 => key_code_char('3'),
+        WinitKeyCode::Digit4 | WinitKeyCode::Numpad4 => key_code_char('4'),
+        WinitKeyCode::Digit5 | WinitKeyCode::Numpad5 => key_code_char('5'),
+        WinitKeyCode::Digit6 | WinitKeyCode::Numpad6 => key_code_char('6'),
+        WinitKeyCode::Digit7 | WinitKeyCode::Numpad7 => key_code_char('7'),
+        WinitKeyCode::Digit8 | WinitKeyCode::Numpad8 => key_code_char('8'),
+        WinitKeyCode::Digit9 | WinitKeyCode::Numpad9 => key_code_char('9'),
+        WinitKeyCode::Space => key_code_char(' '),
+        WinitKeyCode::Minus | WinitKeyCode::NumpadSubtract => key_code_char('-'),
+        WinitKeyCode::Equal | WinitKeyCode::NumpadEqual => key_code_char('='),
+        WinitKeyCode::BracketLeft => key_code_char('['),
+        WinitKeyCode::BracketRight => key_code_char(']'),
+        WinitKeyCode::Backslash | WinitKeyCode::IntlBackslash => key_code_char('\\'),
+        WinitKeyCode::Semicolon => key_code_char(';'),
+        WinitKeyCode::Quote => key_code_char('\''),
+        WinitKeyCode::Backquote => key_code_char('`'),
+        WinitKeyCode::Comma | WinitKeyCode::NumpadComma => key_code_char(','),
+        WinitKeyCode::Period | WinitKeyCode::NumpadDecimal => key_code_char('.'),
+        WinitKeyCode::Slash | WinitKeyCode::NumpadDivide => key_code_char('/'),
+        WinitKeyCode::NumpadAdd => key_code_char('+'),
+        WinitKeyCode::NumpadMultiply => key_code_char('*'),
         WinitKeyCode::Enter | WinitKeyCode::NumpadEnter => KeyCode::Enter,
         WinitKeyCode::Tab => KeyCode::Tab,
         WinitKeyCode::Escape => KeyCode::Escape,
@@ -499,26 +472,41 @@ fn map_physical_key_code(code: WinitKeyCode) -> KeyCode {
 fn map_logical_key_code(key: Key<&str>) -> KeyCode {
     match key {
         Key::Character(text) => key_code_char_from_logical(text),
-        Key::Named(NamedKey::Space) => key_code_char(" "),
+        Key::Named(NamedKey::Space) => key_code_char(' '),
         Key::Named(named) => map_named_key(named),
-        Key::Dead(Some(ch)) => {
-            let normalized: String = ch.to_lowercase().collect();
-            key_code_char_from_logical(&normalized)
-        }
+        Key::Dead(Some(ch)) => key_code_char_from_scalar(ch),
         Key::Dead(None) | Key::Unidentified(_) => KeyCode::Unknown,
     }
 }
 
-fn key_code_char(text: &str) -> KeyCode {
-    KeyCode::Character(String::from(text))
+fn key_code_char(ch: char) -> KeyCode {
+    KeyCode::Char(ch)
 }
 
 fn key_code_char_from_logical(text: &str) -> KeyCode {
-    if text.is_empty() {
+    let mut chars = text.chars();
+    let Some(ch) = chars.next() else {
+        return KeyCode::Unknown;
+    };
+    if chars.next().is_some() {
         return KeyCode::Unknown;
     }
 
-    KeyCode::Character(text.chars().flat_map(char::to_lowercase).collect())
+    key_code_char_from_scalar(ch)
+}
+
+fn key_code_char_from_scalar(ch: char) -> KeyCode {
+    // Keep key facts one-to-one with a single logical character; if lowercase expansion
+    // would produce multiple scalars, it belongs in a future text-commit path instead.
+    let mut normalized = ch.to_lowercase();
+    let Some(lower) = normalized.next() else {
+        return KeyCode::Unknown;
+    };
+    if normalized.next().is_some() {
+        return KeyCode::Unknown;
+    }
+
+    key_code_char(lower)
 }
 
 fn map_named_key(named: NamedKey) -> KeyCode {
@@ -587,8 +575,8 @@ mod tests {
     use winit::keyboard::{Key, KeyCode as WinitKeyCode, ModifiersState, NamedKey, PhysicalKey};
 
     use super::{
-        key_modifiers_from_winit, map_key_code, mouse_button_kind, scroll_events_from_delta,
-        KeyboardInput,
+        key_modifiers_from_winit, map_key_code, map_logical_key_code, mouse_button_kind,
+        scroll_events_from_delta, KeyboardInput,
     };
     use crate::io::{
         Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButtonKind,
@@ -596,20 +584,14 @@ mod tests {
     };
 
     #[test]
-    fn keyboard_input_keeps_text_on_the_key_event() {
-        let input = KeyboardInput::new(
-            Some("a"),
-            KeyCode::Character(String::from("a")),
-            KeyEventKind::Press,
-            false,
-        );
+    fn keyboard_input_emits_pure_key_facts() {
+        let input = KeyboardInput::new(KeyCode::Char('a'), KeyEventKind::Press, false);
 
         assert_eq!(
             input.into_action(KeyModifiers::CONTROL),
             Some(Action::Input {
                 event: InputEvent::Key(KeyEvent {
-                    code: KeyCode::Character(String::from("a")),
-                    text: Some(String::from("a")),
+                    code: KeyCode::Char('a'),
                     modifiers: KeyModifiers::CONTROL,
                     kind: KeyEventKind::Press,
                 }),
@@ -619,31 +601,20 @@ mod tests {
 
     #[test]
     fn synthetic_keyboard_input_is_filtered_at_source() {
-        let input = KeyboardInput::new(
-            Some("a"),
-            KeyCode::Character(String::from("a")),
-            KeyEventKind::Press,
-            true,
-        );
+        let input = KeyboardInput::new(KeyCode::Char('a'), KeyEventKind::Press, true);
 
         assert_eq!(input.into_action(KeyModifiers::NONE), None);
     }
 
     #[test]
-    fn release_keyboard_input_clears_text_on_the_key_event() {
-        let input = KeyboardInput::new(
-            Some("a"),
-            KeyCode::Character(String::from("a")),
-            KeyEventKind::Release,
-            false,
-        );
+    fn release_keyboard_input_preserves_key_code_without_text_payload() {
+        let input = KeyboardInput::new(KeyCode::Char('a'), KeyEventKind::Release, false);
 
         assert_eq!(
             input.into_action(KeyModifiers::NONE),
             Some(Action::Input {
                 event: InputEvent::Key(KeyEvent {
-                    code: KeyCode::Character(String::from("a")),
-                    text: None,
+                    code: KeyCode::Char('a'),
                     modifiers: KeyModifiers::NONE,
                     kind: KeyEventKind::Release,
                 }),
@@ -652,15 +623,14 @@ mod tests {
     }
 
     #[test]
-    fn control_keys_do_not_smuggle_text_through_key_events() {
-        let input = KeyboardInput::new(Some("\r"), KeyCode::Enter, KeyEventKind::Press, false);
+    fn control_keys_stay_non_textual() {
+        let input = KeyboardInput::new(KeyCode::Enter, KeyEventKind::Press, false);
 
         assert_eq!(
             input.into_action(KeyModifiers::NONE),
             Some(Action::Input {
                 event: InputEvent::Key(KeyEvent {
                     code: KeyCode::Enter,
-                    text: None,
                     modifiers: KeyModifiers::NONE,
                     kind: KeyEventKind::Press,
                 }),
@@ -672,7 +642,7 @@ mod tests {
     fn key_code_mapping_is_backend_agnostic() {
         assert_eq!(
             map_key_code(PhysicalKey::Code(WinitKeyCode::KeyA), Key::Character("q")),
-            KeyCode::Character(String::from("a"))
+            KeyCode::Char('a')
         );
         assert_eq!(
             map_key_code(
@@ -709,6 +679,7 @@ mod tests {
             ),
             KeyCode::Unknown
         );
+        assert_eq!(map_logical_key_code(Key::Character("İ")), KeyCode::Unknown);
     }
 
     #[test]

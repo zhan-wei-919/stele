@@ -156,7 +156,6 @@ fn key_input_action(code: KeyCode) -> Action {
     Action::Input {
         event: InputEvent::Key(KeyEvent {
             code,
-            text: None,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
         }),

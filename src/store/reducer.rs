@@ -121,7 +121,7 @@ fn map_input_to_next_scroll_y(
             let delta = map_mouse_input_to_delta(mouse_event, config)?;
             Some((current_y + delta).clamp(0.0, max_scroll_y))
         }
-        InputEvent::CursorLeft | InputEvent::FocusChanged { .. } => None,
+        InputEvent::Paste(_) | InputEvent::CursorLeft | InputEvent::FocusChanged { .. } => None,
     }
 }
 
