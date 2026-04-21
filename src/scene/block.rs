@@ -3,7 +3,7 @@
 use bumpalo::collections::Vec as BumpVec;
 
 use crate::draw_list::{ClipRect, ImageCmd, PathCmd};
-use crate::renderer::instance::{GlyphInstance, RectInstance};
+use crate::scene::instance::{GlyphInstance, RectInstance};
 
 /// Stable block identifier carried across scene-buffer rebuilds.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

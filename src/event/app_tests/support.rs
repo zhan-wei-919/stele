@@ -10,7 +10,7 @@ use super::super::{AppRenderer, AppRuntime, AppWindow, SteleApp};
 use crate::draw_list::ClipRect;
 use crate::event::EventRouter;
 use crate::io::{Action, AtlasPatch, ViewUpdate, ViewUpdateDriver};
-use crate::renderer::atlas::AtlasRegion;
+use crate::scene::instance::AtlasRegion;
 use crate::scene::{
     BlockDataArena, BlockId, SceneBuffer, SceneBufferInner, SceneConfig, SceneFrameMetadata,
     ScenePipeline,

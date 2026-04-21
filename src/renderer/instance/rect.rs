@@ -1,30 +1,10 @@
-//! Rectangle instance encoding shared between the CPU draw list and WGSL shaders.
+//! wgpu vertex-buffer layout for the rectangle render pipeline.
+//!
+//! The `RectInstance` struct itself lives in `scene::instance` — it is a
+//! scene-layer product. This file owns only the GPU pipeline glue that
+//! depends on `wgpu`.
 
-use bytemuck::{Pod, Zeroable};
-
-use crate::draw_list::RectCmd;
-
-/// Per-instance data for a solid rectangle quad.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
-pub struct RectInstance {
-    pub pos: [f32; 2],
-    pub size: [f32; 2],
-    pub color: [f32; 4],
-}
-
-impl RectInstance {
-    /// Converts logical rectangle coordinates into physical pixels for the GPU.
-    pub fn from_rect(cmd: RectCmd, scale_factor: f32) -> Self {
-        let pos = cmd.pos();
-        let size = cmd.size();
-        Self {
-            pos: [pos[0] * scale_factor, pos[1] * scale_factor],
-            size: [size[0] * scale_factor, size[1] * scale_factor],
-            color: cmd.color(),
-        }
-    }
-}
+use crate::scene::instance::RectInstance;
 
 /// Returns the vertex-buffer layout expected by the rectangle render pipeline.
 pub fn rect_instance_layout() -> wgpu::VertexBufferLayout<'static> {

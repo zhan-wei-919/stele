@@ -3,7 +3,7 @@
 use std::ops::{BitOr, BitOrAssign};
 use std::time::Instant;
 
-use crate::renderer::atlas::AtlasRegion;
+use crate::scene::instance::AtlasRegion;
 use crate::scene::{SceneBuffer, SceneFrameMetadata};
 
 /// Wake-up event delivered through the winit event-loop proxy.

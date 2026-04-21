@@ -15,7 +15,7 @@ use crate::layout::layout_tree::{
     LayoutRect as TreeLayoutRect, LayoutRun as TreeLayoutRun, ScrollAnchor,
 };
 use crate::layout::tree::{BorderStyle, LocalPaintCommand, PathStroke};
-use crate::renderer::instance::{GlyphInstance, RectInstance};
+use crate::scene::instance::{GlyphInstance, RectInstance};
 use crate::scene::{BlockDataArena, BlockId, SceneBufferInner, SceneFrameMetadata};
 
 use super::logical_atlas::LogicalAtlas;

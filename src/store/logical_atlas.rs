@@ -8,7 +8,7 @@ use crate::font::{FreeTypeRasterizer, GlyphKey, RasterizedGlyph};
 use crate::io::{AtlasPatch, AtlasUpdate};
 use crate::renderer::atlas::packer::ShelfPacker;
 use crate::renderer::atlas::upload::AtlasUpload;
-use crate::renderer::atlas::AtlasRegion;
+use crate::scene::instance::AtlasRegion;
 
 const DEFAULT_ATLAS_SIZE: u32 = 2048;
 const MAX_ATLAS_SIZE: u32 = 8192;

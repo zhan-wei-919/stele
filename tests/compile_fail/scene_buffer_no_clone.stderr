@@ -1,7 +1,7 @@
 error[E0599]: no method named `clone` found for struct `SceneBuffer` in the current scope
-  --> tests/compile_fail/scene_buffer_no_clone.rs:37:31
+  --> tests/compile_fail/scene_buffer_no_clone.rs:36:31
    |
-37 |       let _clone = scene_buffer.clone();
+36 |       let _clone = scene_buffer.clone();
    |                                 ^^^^^ method not found in `SceneBuffer`
    |
   ::: tests/compile_fail/../../src/scene/buffer.rs

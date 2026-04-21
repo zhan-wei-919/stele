@@ -11,15 +11,6 @@ mod draw_list {
     pub(crate) struct PathCmd;
 }
 
-mod renderer {
-    pub(crate) mod instance {
-        #[derive(Clone, Copy, Debug)]
-        pub(crate) struct GlyphInstance;
-
-        #[derive(Clone, Copy, Debug)]
-        pub(crate) struct RectInstance;
-    }
-}
 #[path = "../../src/scene/block.rs"]
 mod scene_block;
 pub(crate) use scene_block::{BlockDataArena, BlockId};
@@ -27,6 +18,14 @@ pub(crate) use scene_block::{BlockDataArena, BlockId};
 mod scene_buffer_impl;
 mod scene {
     pub(crate) use super::scene_buffer_impl::{SceneBuffer, SceneBufferInner, SceneFrameMetadata};
+
+    pub(crate) mod instance {
+        #[derive(Clone, Copy, Debug)]
+        pub(crate) struct GlyphInstance;
+
+        #[derive(Clone, Copy, Debug)]
+        pub(crate) struct RectInstance;
+    }
 }
 
 fn main() {

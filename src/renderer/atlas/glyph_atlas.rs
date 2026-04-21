@@ -1,15 +1,8 @@
 //! GPU texture atlas owned by the renderer.
 
-const DEFAULT_ATLAS_SIZE: u32 = 2048;
+use crate::scene::instance::AtlasRegion;
 
-/// UVs, pixel size, and bearing for a glyph cached in the atlas.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AtlasRegion {
-    pub uv_min: [f32; 2],
-    pub uv_max: [f32; 2],
-    pub size: [f32; 2],
-    pub bearing: [f32; 2],
-}
+const DEFAULT_ATLAS_SIZE: u32 = 2048;
 
 /// GPU texture atlas that caches rasterized glyph bitmaps.
 pub struct GlyphAtlas {

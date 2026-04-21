@@ -3,6 +3,7 @@
 mod block;
 mod buffer;
 mod config;
+pub(crate) mod instance;
 mod pipeline;
 mod pool;
 mod protocol;
