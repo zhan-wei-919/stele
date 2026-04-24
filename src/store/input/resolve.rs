@@ -3,7 +3,8 @@
 use log::trace;
 
 use crate::io::{
-    InputEvent, KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind, MouseScroll,
+    InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    MouseScroll,
 };
 
 use super::{Command, InputContext};
@@ -17,18 +18,19 @@ pub(crate) fn resolve_command(
 ) -> Option<Command> {
     match context {
         InputContext::Viewport => resolve_viewport_command(event, config),
+        InputContext::TextInput(_) => resolve_text_input_command(event),
     }
 }
 
 fn resolve_viewport_command(event: &InputEvent, config: InteractionConfig) -> Option<Command> {
     match event {
-        InputEvent::Key(key_event) => resolve_key_command(key_event),
+        InputEvent::Key(key_event) => resolve_viewport_key_command(key_event),
         InputEvent::Mouse(mouse_event) => resolve_mouse_command(mouse_event, config),
         InputEvent::Paste(_) | InputEvent::CursorLeft | InputEvent::FocusChanged { .. } => None,
     }
 }
 
-fn resolve_key_command(event: &KeyEvent) -> Option<Command> {
+fn resolve_viewport_key_command(event: &KeyEvent) -> Option<Command> {
     if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
     }
@@ -49,6 +51,37 @@ fn resolve_key_command(event: &KeyEvent) -> Option<Command> {
             None
         }
     }
+}
+
+fn resolve_text_input_command(event: &InputEvent) -> Option<Command> {
+    let InputEvent::Key(key_event) = event else {
+        return None;
+    };
+    if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+        return None;
+    }
+    if has_command_modifier(key_event.modifiers) {
+        return None;
+    }
+
+    match key_event.code {
+        KeyCode::Char(ch) => Some(Command::InsertChar(ch)),
+        KeyCode::Backspace => Some(Command::DeleteBackward),
+        KeyCode::Left => Some(Command::MoveCursorLeft),
+        KeyCode::Right => Some(Command::MoveCursorRight),
+        _ => {
+            trace!(
+                "store.input_unhandled context=text_input code={:?} kind={:?}",
+                key_event.code,
+                key_event.kind
+            );
+            None
+        }
+    }
+}
+
+fn has_command_modifier(modifiers: KeyModifiers) -> bool {
+    modifiers.control() || modifiers.alt() || modifiers.super_key()
 }
 
 fn resolve_mouse_command(event: &MouseEvent, config: InteractionConfig) -> Option<Command> {
@@ -94,6 +127,7 @@ mod tests {
 
     use crate::io::{KeyModifiers, MouseButtonKind};
 
+    use super::super::context::TextInputId;
     use super::*;
 
     #[test]
@@ -134,6 +168,14 @@ mod tests {
             resolve_command(&key_event(KeyCode::Char('a'), KeyEventKind::Press)),
             None
         );
+        assert_eq!(
+            resolve_command(&key_event(KeyCode::Left, KeyEventKind::Press)),
+            None
+        );
+        assert_eq!(
+            resolve_command(&key_event(KeyCode::Right, KeyEventKind::Press)),
+            None
+        );
     }
 
     #[test]
@@ -144,6 +186,112 @@ mod tests {
             None
         );
         assert_eq!(resolve_command(&InputEvent::Paste("text".to_owned())), None);
+    }
+
+    #[test]
+    fn text_input_key_press_and_repeat_resolve_to_edit_commands() {
+        for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            assert_eq!(
+                resolve_text_input_command(&key_event(KeyCode::Char('a'), kind)),
+                Some(Command::InsertChar('a'))
+            );
+            assert_eq!(
+                resolve_text_input_command(&key_event(KeyCode::Backspace, kind)),
+                Some(Command::DeleteBackward)
+            );
+            assert_eq!(
+                resolve_text_input_command(&key_event(KeyCode::Left, kind)),
+                Some(Command::MoveCursorLeft)
+            );
+            assert_eq!(
+                resolve_text_input_command(&key_event(KeyCode::Right, kind)),
+                Some(Command::MoveCursorRight)
+            );
+        }
+    }
+
+    #[test]
+    fn text_input_shift_modified_keys_use_text_fallbacks() {
+        assert_eq!(
+            resolve_text_input_command(&key_event_with_modifiers(
+                KeyCode::Char('A'),
+                KeyEventKind::Press,
+                KeyModifiers::SHIFT
+            )),
+            Some(Command::InsertChar('A'))
+        );
+        assert_eq!(
+            resolve_text_input_command(&key_event_with_modifiers(
+                KeyCode::Left,
+                KeyEventKind::Press,
+                KeyModifiers::SHIFT
+            )),
+            Some(Command::MoveCursorLeft)
+        );
+    }
+
+    #[test]
+    fn text_input_command_modified_keys_do_not_use_text_fallbacks() {
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+            KeyModifiers::SHIFT | KeyModifiers::SUPER,
+        ] {
+            for code in [
+                KeyCode::Char('c'),
+                KeyCode::Backspace,
+                KeyCode::Left,
+                KeyCode::Right,
+            ] {
+                assert_eq!(
+                    resolve_text_input_command(&key_event_with_modifiers(
+                        code,
+                        KeyEventKind::Press,
+                        modifiers
+                    )),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_input_key_releases_do_not_resolve() {
+        for code in [
+            KeyCode::Char('a'),
+            KeyCode::Backspace,
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            assert_eq!(
+                resolve_text_input_command(&key_event(code, KeyEventKind::Release)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn text_input_non_key_facts_do_not_resolve() {
+        assert_eq!(resolve_text_input_command(&InputEvent::CursorLeft), None);
+        assert_eq!(
+            resolve_text_input_command(&InputEvent::FocusChanged { focused: false }),
+            None
+        );
+        assert_eq!(
+            resolve_text_input_command(&InputEvent::Paste("text".to_owned())),
+            None
+        );
+        assert_eq!(
+            resolve_text_input_command(&mouse_event(MouseEventKind::Moved, None)),
+            None
+        );
+        assert_eq!(
+            resolve_text_input_command(&mouse_scroll(MouseScroll::LineDelta { x: 0.0, y: -1.0 })),
+            None
+        );
     }
 
     #[test]
@@ -183,13 +331,29 @@ mod tests {
     }
 
     fn resolve_command(event: &InputEvent) -> Option<Command> {
-        super::resolve_command(InputContext::Viewport, event, InteractionConfig::default())
+        resolve_command_in(InputContext::Viewport, event)
+    }
+
+    fn resolve_text_input_command(event: &InputEvent) -> Option<Command> {
+        resolve_command_in(InputContext::TextInput(TextInputId::new(1)), event)
+    }
+
+    fn resolve_command_in(context: InputContext, event: &InputEvent) -> Option<Command> {
+        super::resolve_command(context, event, InteractionConfig::default())
     }
 
     fn key_event(code: KeyCode, kind: KeyEventKind) -> InputEvent {
+        key_event_with_modifiers(code, kind, KeyModifiers::NONE)
+    }
+
+    fn key_event_with_modifiers(
+        code: KeyCode,
+        kind: KeyEventKind,
+        modifiers: KeyModifiers,
+    ) -> InputEvent {
         InputEvent::Key(KeyEvent {
             code,
-            modifiers: KeyModifiers::NONE,
+            modifiers,
             kind,
         })
     }

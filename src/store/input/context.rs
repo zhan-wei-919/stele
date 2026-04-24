@@ -7,6 +7,21 @@ use super::super::types::InteractionState;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputContext {
     Viewport,
+    // Reserved until focus plumbing can produce text-input contexts.
+    #[cfg_attr(not(test), allow(dead_code))]
+    TextInput(TextInputId),
+}
+
+/// Stable store-local identity for a text input target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TextInputId(u64);
+
+impl TextInputId {
+    /// Creates a text input identity for tests and future focus plumbing.
+    #[cfg(test)]
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 /// Resolves the active store input context from model and interaction state.

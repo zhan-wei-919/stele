@@ -8,4 +8,8 @@ pub(crate) enum Command {
     ScrollToStart,
     ScrollToEnd,
     ScrollByPixels(f32),
+    InsertChar(char),
+    DeleteBackward,
+    MoveCursorLeft,
+    MoveCursorRight,
 }

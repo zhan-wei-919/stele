@@ -75,7 +75,9 @@ impl Reducer {
         command: Command,
     ) -> ReduceOutcome {
         let previous = interaction.scroll_offset;
-        let next_y = next_scroll_y(interaction, config, command);
+        let Some(next_y) = next_scroll_y(interaction, config, command) else {
+            return ReduceOutcome::NoChange;
+        };
 
         interaction.scroll_offset = [0.0, next_y];
         if interaction.scroll_offset == previous {
@@ -90,7 +92,7 @@ fn next_scroll_y(
     interaction: &InteractionState,
     config: InteractionConfig,
     command: Command,
-) -> f32 {
+) -> Option<f32> {
     let max_scroll_y = InteractionState::max_scroll_y(
         interaction.last_known_viewport,
         interaction.last_known_content_extent,
@@ -104,6 +106,41 @@ fn next_scroll_y(
         Command::ScrollToStart => 0.0,
         Command::ScrollToEnd => max_scroll_y,
         Command::ScrollByPixels(pixels) => current_y + pixels,
+        Command::InsertChar(_)
+        | Command::DeleteBackward
+        | Command::MoveCursorLeft
+        | Command::MoveCursorRight => return None,
     };
-    next_y.clamp(0.0, max_scroll_y)
+    Some(next_y.clamp(0.0, max_scroll_y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_commands_are_explicit_no_ops() {
+        let reducer = Reducer;
+        let commands = [
+            Command::InsertChar('a'),
+            Command::DeleteBackward,
+            Command::MoveCursorLeft,
+            Command::MoveCursorRight,
+        ];
+
+        for command in commands {
+            let mut interaction = InteractionState {
+                scroll_offset: [0.0, 120.0],
+                last_known_viewport: [960.0, 640.0],
+                last_known_content_extent: [960.0, 2_000.0],
+            };
+            let previous = interaction;
+
+            let outcome =
+                reducer.apply_command(&mut interaction, InteractionConfig::default(), command);
+
+            assert!(matches!(outcome, ReduceOutcome::NoChange));
+            assert_eq!(interaction, previous);
+        }
+    }
 }
