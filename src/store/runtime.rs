@@ -12,7 +12,7 @@ use crate::scene::{SceneBuffer, SceneBufferPool, SceneConfig};
 
 use super::composer::Composer;
 use super::delegate::StoreDelegate;
-use super::input::resolve_command;
+use super::input::{resolve_command, resolve_input_context};
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
 use super::reducer::{ReduceOutcome, Reducer};
@@ -91,7 +91,8 @@ impl Store {
             return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
         }
 
-        let Some(command) = resolve_command(event, self.config) else {
+        let context = resolve_input_context(&self.model, &self.interaction);
+        let Some(command) = resolve_command(context, event, self.config) else {
             return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
         };
 

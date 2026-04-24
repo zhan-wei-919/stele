@@ -6,11 +6,21 @@ use crate::io::{
     InputEvent, KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind, MouseScroll,
 };
 
-use super::Command;
+use super::{Command, InputContext};
 use crate::store::types::InteractionConfig;
 
 /// Resolves one input fact into the store command it requests.
-pub(crate) fn resolve_command(event: &InputEvent, config: InteractionConfig) -> Option<Command> {
+pub(crate) fn resolve_command(
+    context: InputContext,
+    event: &InputEvent,
+    config: InteractionConfig,
+) -> Option<Command> {
+    match context {
+        InputContext::Viewport => resolve_viewport_command(event, config),
+    }
+}
+
+fn resolve_viewport_command(event: &InputEvent, config: InteractionConfig) -> Option<Command> {
     match event {
         InputEvent::Key(key_event) => resolve_key_command(key_event),
         InputEvent::Mouse(mouse_event) => resolve_mouse_command(mouse_event, config),
@@ -173,7 +183,7 @@ mod tests {
     }
 
     fn resolve_command(event: &InputEvent) -> Option<Command> {
-        super::resolve_command(event, InteractionConfig::default())
+        super::resolve_command(InputContext::Viewport, event, InteractionConfig::default())
     }
 
     fn key_event(code: KeyCode, kind: KeyEventKind) -> InputEvent {

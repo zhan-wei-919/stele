@@ -60,7 +60,7 @@ impl Reducer {
                 );
                 ReduceOutcome::Changed
             }
-            _ => {
+            Action::Input { .. } => {
                 debug_assert!(false, "input actions must be handled by the store");
                 ReduceOutcome::NoChange
             }
