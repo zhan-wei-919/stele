@@ -99,6 +99,7 @@ impl Reducer {
                 text_input.insert_char(ch);
                 true
             }
+            Command::InsertText(text) => text_input.insert_text(&text),
             Command::DeleteBackward => text_input.delete_backward(),
             Command::MoveCursorLeft => text_input.move_cursor_left(),
             Command::MoveCursorRight => text_input.move_cursor_right(),
@@ -136,6 +137,7 @@ fn next_scroll_y(
         Command::ScrollToEnd => max_scroll_y,
         Command::ScrollByPixels(pixels) => current_y + pixels,
         Command::InsertChar(_)
+        | Command::InsertText(_)
         | Command::DeleteBackward
         | Command::MoveCursorLeft
         | Command::MoveCursorRight => return None,
@@ -249,6 +251,32 @@ mod tests {
     }
 
     #[test]
+    fn bulk_insert_text_updates_at_cursor_and_preserves_utf8_boundaries() {
+        let reducer = Reducer;
+        let mut text_input = TextInputState::default();
+
+        for command in [
+            Command::InsertChar('a'),
+            Command::InsertChar('中'),
+            Command::InsertChar('d'),
+            Command::MoveCursorLeft,
+        ] {
+            reducer.apply_text_command(&mut text_input, command);
+        }
+
+        assert!(matches!(
+            reducer.apply_text_command(&mut text_input, Command::InsertText("βc".to_owned())),
+            ReduceOutcome::Changed
+        ));
+
+        assert_eq!(text_input.text(), "a中βcd");
+        assert_eq!(text_input.cursor_index(), "a中βc".len());
+        assert!(text_input
+            .text()
+            .is_char_boundary(text_input.cursor_index()));
+    }
+
+    #[test]
     fn scroll_commands_do_not_modify_text_state() {
         let reducer = Reducer;
         let mut text_input = TextInputState::default();
@@ -273,21 +301,26 @@ mod tests {
     #[test]
     fn viewport_reducer_still_ignores_text_commands() {
         let reducer = Reducer;
-        let mut interaction = InteractionState {
+        let previous = InteractionState {
             scroll_offset: [0.0, 120.0],
             last_known_viewport: [960.0, 640.0],
             last_known_content_extent: [960.0, 2_000.0],
             ..InteractionState::default()
         };
-        let previous = interaction;
 
-        let outcome = reducer.apply_command(
-            &mut interaction,
-            InteractionConfig::default(),
+        for command in [
             Command::InsertChar('a'),
-        );
+            Command::InsertText("abc".to_owned()),
+            Command::DeleteBackward,
+            Command::MoveCursorLeft,
+            Command::MoveCursorRight,
+        ] {
+            let mut interaction = previous;
+            let outcome =
+                reducer.apply_command(&mut interaction, InteractionConfig::default(), command);
 
-        assert!(matches!(outcome, ReduceOutcome::NoChange));
-        assert_eq!(interaction, previous);
+            assert!(matches!(outcome, ReduceOutcome::NoChange));
+            assert_eq!(interaction, previous);
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! Commands that describe store-owned interaction intent.
 
 /// Semantic input command consumed by the store reducer.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Command {
     ScrollByLine(i32),
     ScrollByPage(i32),
@@ -9,6 +9,7 @@ pub(crate) enum Command {
     ScrollToEnd,
     ScrollByPixels(f32),
     InsertChar(char),
+    InsertText(String),
     DeleteBackward,
     MoveCursorLeft,
     MoveCursorRight,

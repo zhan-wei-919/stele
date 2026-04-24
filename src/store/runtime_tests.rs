@@ -71,6 +71,39 @@ fn focused_text_input_char_writes_through_real_input_action() {
 }
 
 #[test]
+fn focused_text_input_paste_writes_through_real_input_action() {
+    let mut store = build_store_for_test();
+    store.interaction.focused_text_input = Some(TextInputId::new(1));
+
+    let outcome = store.handle_action(Action::Input {
+        event: InputEvent::Paste("abc中".to_owned()),
+    });
+
+    assert!(matches!(
+        outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.text_input.text(), "abc中");
+    assert_eq!(store.text_input.cursor_index(), "abc中".len());
+    assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
+}
+
+#[test]
+fn viewport_paste_without_focused_text_input_is_ignored() {
+    let mut store = build_store_for_test();
+
+    let outcome = store.handle_action(Action::Input {
+        event: InputEvent::Paste("abc".to_owned()),
+    });
+
+    assert!(matches!(outcome, super::ActionOutcome::NoChange));
+    assert_eq!(store.text_input.text(), "");
+    assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
+}
+
+#[test]
 fn focused_text_input_down_key_does_not_scroll_viewport() {
     let mut store = build_store_for_test();
     prime_scroll_metrics(&mut store, [960.0, 640.0], [960.0, 2_000.0]);

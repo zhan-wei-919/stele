@@ -54,8 +54,10 @@ fn resolve_viewport_key_command(event: &KeyEvent) -> Option<Command> {
 }
 
 fn resolve_text_input_command(event: &InputEvent) -> Option<Command> {
-    let InputEvent::Key(key_event) = event else {
-        return None;
+    let key_event = match event {
+        InputEvent::Paste(text) => return Some(Command::InsertText(text.clone())),
+        InputEvent::Key(key_event) => key_event,
+        _ => return None,
     };
     if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return None;
@@ -211,6 +213,14 @@ mod tests {
     }
 
     #[test]
+    fn text_input_paste_resolves_to_bulk_insert_command() {
+        assert_eq!(
+            resolve_text_input_command(&InputEvent::Paste("abc".to_owned())),
+            Some(Command::InsertText("abc".to_owned()))
+        );
+    }
+
+    #[test]
     fn text_input_shift_modified_keys_use_text_fallbacks() {
         assert_eq!(
             resolve_text_input_command(&key_event_with_modifiers(
@@ -278,10 +288,6 @@ mod tests {
         assert_eq!(resolve_text_input_command(&InputEvent::CursorLeft), None);
         assert_eq!(
             resolve_text_input_command(&InputEvent::FocusChanged { focused: false }),
-            None
-        );
-        assert_eq!(
-            resolve_text_input_command(&InputEvent::Paste("text".to_owned())),
             None
         );
         assert_eq!(

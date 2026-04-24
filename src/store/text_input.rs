@@ -34,6 +34,19 @@ impl TextInputState {
         self.bump_revision();
     }
 
+    /// Inserts text at the cursor and advances past the inserted bytes.
+    pub(crate) fn insert_text(&mut self, text: &str) -> bool {
+        self.debug_assert_cursor_boundary();
+        if text.is_empty() {
+            return false;
+        }
+
+        self.text.insert_str(self.cursor_index, text);
+        self.cursor_index += text.len();
+        self.bump_revision();
+        true
+    }
+
     /// Deletes the character before the cursor when one exists.
     pub(crate) fn delete_backward(&mut self) -> bool {
         self.debug_assert_cursor_boundary();
@@ -127,5 +140,36 @@ mod tests {
         assert!(text_input.delete_backward());
         assert_eq!(text_input.revision(), 4);
         assert_eq!(text_input.text(), "");
+    }
+
+    #[test]
+    fn bulk_insert_updates_at_cursor_and_preserves_utf8_boundaries() {
+        let mut text_input = TextInputState::default();
+
+        text_input.insert_char('a');
+        text_input.insert_char('中');
+        text_input.insert_char('d');
+        assert!(text_input.move_cursor_left());
+
+        assert!(text_input.insert_text("βc"));
+
+        assert_eq!(text_input.text(), "a中βcd");
+        assert_eq!(text_input.cursor_index(), "a中βc".len());
+        assert!(text_input
+            .text()
+            .is_char_boundary(text_input.cursor_index()));
+    }
+
+    #[test]
+    fn empty_bulk_insert_does_not_change_revision() {
+        let mut text_input = TextInputState::default();
+        text_input.insert_char('a');
+        let revision = text_input.revision();
+
+        assert!(!text_input.insert_text(""));
+
+        assert_eq!(text_input.text(), "a");
+        assert_eq!(text_input.cursor_index(), 1);
+        assert_eq!(text_input.revision(), revision);
     }
 }

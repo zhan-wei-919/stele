@@ -166,8 +166,7 @@ pub(crate) enum MouseEventKind {
 pub(crate) enum InputEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
-    // Reserved for the upcoming command-layer paste path so we can keep
-    // bulk text insertion separate from key facts once a producer is wired in.
+    // Phase 4 consumes paste facts in the store before a platform clipboard producer is wired in.
     #[allow(dead_code)]
     Paste(String),
     CursorLeft,
