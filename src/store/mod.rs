@@ -2,6 +2,7 @@
 
 mod composer;
 mod delegate;
+mod input;
 mod logical_atlas;
 mod model;
 mod reducer;

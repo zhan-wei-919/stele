@@ -1,5 +1,6 @@
 target/
 docs/
 CLAUDE.md
+AGENTS.md
 .claude/
 Cargo.lock

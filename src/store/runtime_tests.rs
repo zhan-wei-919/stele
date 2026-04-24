@@ -74,6 +74,45 @@ fn configured_scroll_input_updates_offset_and_requests_compose() {
 }
 
 #[test]
+fn keyboard_scroll_commands_update_offset_and_clamp() {
+    let mut store = build_store_with_delegate(Arc::new(ConfiguredTestStoreDelegate));
+    prime_scroll_metrics(&mut store, [960.0, 640.0], [960.0, 2_000.0]);
+
+    store.interaction.scroll_offset = [0.0, 24.0];
+    assert_key_scrolls_to(&mut store, KeyCode::Up, KeyEventKind::Press, 12.0);
+    assert_key_scrolls_to(&mut store, KeyCode::Down, KeyEventKind::Repeat, 24.0);
+
+    store.interaction.scroll_offset = [0.0, 620.0];
+    assert_key_scrolls_to(&mut store, KeyCode::PageUp, KeyEventKind::Repeat, 20.0);
+    assert_key_scrolls_to(&mut store, KeyCode::PageDown, KeyEventKind::Press, 620.0);
+
+    store.interaction.scroll_offset = [0.0, 700.0];
+    assert_key_scrolls_to(&mut store, KeyCode::Home, KeyEventKind::Press, 0.0);
+    assert_key_scrolls_to(&mut store, KeyCode::End, KeyEventKind::Repeat, 1_360.0);
+
+    store.interaction.scroll_offset = [0.0, 4.0];
+    assert_key_scrolls_to(&mut store, KeyCode::PageUp, KeyEventKind::Press, 0.0);
+
+    store.interaction.scroll_offset = [0.0, 1_350.0];
+    assert_key_scrolls_to(&mut store, KeyCode::PageDown, KeyEventKind::Press, 1_360.0);
+}
+
+#[test]
+fn key_release_does_not_request_compose() {
+    let mut store = build_store_for_test();
+    prime_scroll_metrics(&mut store, [960.0, 640.0], [960.0, 2_000.0]);
+    store.interaction.scroll_offset = [0.0, 120.0];
+
+    let outcome = store.handle_action(key_input_action_with_kind(
+        KeyCode::Down,
+        KeyEventKind::Release,
+    ));
+
+    assert!(matches!(outcome, super::ActionOutcome::NoChange));
+    assert_eq!(store.interaction.scroll_offset, [0.0, 120.0]);
+}
+
+#[test]
 fn mouse_scroll_uses_normalized_delta_signs() {
     let mut store = build_store_for_test();
     let _ = compose_and_record_state(&mut store);
@@ -112,6 +151,37 @@ fn mouse_scroll_uses_normalized_delta_signs() {
         }
     ));
     assert_eq!(store.interaction.scroll_offset, [0.0, 200.0]);
+}
+
+#[test]
+fn mouse_pixel_scroll_uses_scaled_delta_signs() {
+    let mut store = build_store_with_delegate(Arc::new(PixelScaleStoreDelegate));
+    prime_scroll_metrics(&mut store, [960.0, 640.0], [960.0, 2_000.0]);
+    store.interaction.scroll_offset = [0.0, 120.0];
+
+    let down_outcome = store.handle_action(mouse_input_action(MouseScroll::PixelDelta {
+        x: 0.0,
+        y: -15.0,
+    }));
+    assert!(matches!(
+        down_outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.interaction.scroll_offset, [0.0, 150.0]);
+
+    let up_outcome = store.handle_action(mouse_input_action(MouseScroll::PixelDelta {
+        x: 0.0,
+        y: 20.0,
+    }));
+    assert!(matches!(
+        up_outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.interaction.scroll_offset, [0.0, 110.0]);
 }
 
 #[test]
@@ -327,6 +397,7 @@ fn build_store_for_test() -> Store {
 
 struct TestStoreDelegate;
 struct ConfiguredTestStoreDelegate;
+struct PixelScaleStoreDelegate;
 struct ReflowingResizeStoreDelegate;
 struct VetoDownStoreDelegate;
 
@@ -364,6 +435,27 @@ impl StoreDelegate for ConfiguredTestStoreDelegate {
     fn interaction_config(&self) -> InteractionConfig {
         InteractionConfig {
             line_step_px: 12.0,
+            ..InteractionConfig::default()
+        }
+    }
+}
+
+impl StoreDelegate for PixelScaleStoreDelegate {
+    fn bootstrap(
+        &self,
+        rasterizer: &FreeTypeRasterizer,
+        _logical_viewport: [f32; 2],
+    ) -> StoreBootstrap {
+        let tree = build_tree_test_document();
+        let prepared_tree = prepare_tree(&tree, rasterizer);
+        StoreBootstrap::new(tree, prepared_tree)
+    }
+
+    fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
+
+    fn interaction_config(&self) -> InteractionConfig {
+        InteractionConfig {
+            wheel_pixel_scale: 2.0,
             ..InteractionConfig::default()
         }
     }
@@ -490,6 +582,44 @@ fn build_store_with_delegate(delegate: Arc<dyn StoreDelegate>) -> Store {
 
 fn build_store_with_viewport(delegate: Arc<dyn StoreDelegate>, viewport: ViewportState) -> Store {
     Store::new(build_rasterizer_for_perf_test(), viewport, delegate)
+}
+
+fn prime_scroll_metrics(store: &mut Store, viewport: [f32; 2], content_extent: [f32; 2]) {
+    store.interaction.last_known_viewport = viewport;
+    store.interaction.last_known_content_extent = content_extent;
+}
+
+fn assert_key_scrolls_to(store: &mut Store, code: KeyCode, kind: KeyEventKind, expected_y: f32) {
+    let outcome = store.handle_action(key_input_action_with_kind(code, kind));
+    assert!(matches!(
+        outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.interaction.scroll_offset, [0.0, expected_y]);
+}
+
+fn key_input_action_with_kind(code: KeyCode, kind: KeyEventKind) -> Action {
+    Action::Input {
+        event: InputEvent::Key(KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind,
+        }),
+    }
+}
+
+fn mouse_input_action(scroll_delta: MouseScroll) -> Action {
+    Action::Input {
+        event: InputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            logical_position: None,
+            scroll_delta: Some(scroll_delta),
+            modifiers: KeyModifiers::NONE,
+            event_time: Instant::now(),
+        }),
+    }
 }
 
 fn compose_and_record_state(store: &mut Store) -> [f32; 2] {
