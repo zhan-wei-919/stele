@@ -9,13 +9,12 @@ use super::super::input::TextInputId;
 use super::{compose_and_emit_with_post_clamp, Store};
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::io::{
-    Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
-    MouseScroll, SceneFrame, ViewUpdate,
+    Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButtonKind, MouseEvent,
+    MouseEventKind, MouseScroll, SceneFrame, ViewUpdate,
 };
-use crate::layout::prepare_tree::prepare_tree;
 use crate::layout::tree::{
-    BlockNode, BlockStyle, DocumentTree, FlowDirection, InlineNode, ParagraphNode, ParagraphStyle,
-    StackNode, TextRun, TextStyle,
+    Align, BlockNode, BlockStyle, BorderStyle, DocumentTree, Edges, FlowDirection, InlineNode,
+    ParagraphNode, ParagraphStyle, StackNode, TextInputNode, TextInputStyle, TextRun, TextStyle,
 };
 use crate::renderer::subpixel::detect_subpixel_layout;
 use crate::scene::{SceneBufferPool, SceneConfig};
@@ -44,15 +43,27 @@ fn typed_input_actions_do_not_trigger_scene_recompute() {
     });
 
     assert!(matches!(outcome, super::ActionOutcome::NoChange));
-    assert_eq!(store.text_input.text(), "");
+    assert_eq!(store.model.text_inputs().revision(), 0);
     assert!(store.logical_atlas.take_pending_update().is_none());
     assert_eq!(store.phase, StorePhase::Idle);
 }
 
 #[test]
-fn focused_text_input_char_writes_through_real_input_action() {
-    let mut store = build_store_for_test();
-    store.interaction.focused_text_input = Some(TextInputId::new(1));
+fn click_text_input_then_type_updates_that_input_only() {
+    let mut store = build_text_input_store();
+    let _ = compose_and_record_state(&mut store);
+    let first = TextInputId::new(1);
+    let second = TextInputId::new(2);
+
+    let focus_action = click_text_input_action(&store, first);
+    let focus_outcome = store.handle_action(focus_action);
+    assert!(matches!(
+        focus_outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.interaction.focused_text_input, Some(first));
 
     let outcome = store.handle_action(key_input_action_with_kind(
         KeyCode::Char('a'),
@@ -65,15 +76,52 @@ fn focused_text_input_char_writes_through_real_input_action() {
             clear_tessellation_cache: false
         }
     ));
-    assert_eq!(store.text_input.text(), "a");
-    assert_eq!(store.text_input.cursor_index(), 1);
+    assert_eq!(text_input_text(&store, first), "a");
+    assert_eq!(text_input_text(&store, second), "");
     assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
 }
 
 #[test]
-fn focused_text_input_paste_writes_through_real_input_action() {
-    let mut store = build_store_for_test();
-    store.interaction.focused_text_input = Some(TextInputId::new(1));
+fn clicking_second_text_input_moves_focus_without_changing_first() {
+    let mut store = build_text_input_store();
+    let _ = compose_and_record_state(&mut store);
+    let first = TextInputId::new(1);
+    let second = TextInputId::new(2);
+
+    let first_focus = click_text_input_action(&store, first);
+    let _ = store.handle_action(first_focus);
+    let _ = store.handle_action(key_input_action_with_kind(
+        KeyCode::Char('a'),
+        KeyEventKind::Press,
+    ));
+    let _ = compose_and_record_state(&mut store);
+    let second_focus = click_text_input_action(&store, second);
+    let outcome = store.handle_action(second_focus);
+
+    assert!(matches!(
+        outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.interaction.focused_text_input, Some(second));
+    assert_eq!(text_input_text(&store, first), "a");
+    assert_eq!(text_input_text(&store, second), "");
+
+    let _ = store.handle_action(key_input_action_with_kind(
+        KeyCode::Char('b'),
+        KeyEventKind::Press,
+    ));
+
+    assert_eq!(text_input_text(&store, first), "a");
+    assert_eq!(text_input_text(&store, second), "b");
+}
+
+#[test]
+fn focused_text_input_paste_writes_to_focused_state() {
+    let mut store = build_text_input_store();
+    let first = TextInputId::new(1);
+    store.interaction.focused_text_input = Some(first);
 
     let outcome = store.handle_action(Action::Input {
         event: InputEvent::Paste("abc中".to_owned()),
@@ -85,8 +133,8 @@ fn focused_text_input_paste_writes_through_real_input_action() {
             clear_tessellation_cache: false
         }
     ));
-    assert_eq!(store.text_input.text(), "abc中");
-    assert_eq!(store.text_input.cursor_index(), "abc中".len());
+    assert_eq!(text_input_text(&store, first), "abc中");
+    assert_eq!(text_input_cursor(&store, first), "abc中".len());
     assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
 }
 
@@ -99,13 +147,13 @@ fn viewport_paste_without_focused_text_input_is_ignored() {
     });
 
     assert!(matches!(outcome, super::ActionOutcome::NoChange));
-    assert_eq!(store.text_input.text(), "");
+    assert_eq!(store.model.text_inputs().revision(), 0);
     assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
 }
 
 #[test]
 fn focused_text_input_down_key_does_not_scroll_viewport() {
-    let mut store = build_store_for_test();
+    let mut store = build_text_input_store();
     prime_scroll_metrics(&mut store, [960.0, 640.0], [960.0, 2_000.0]);
     store.interaction.focused_text_input = Some(TextInputId::new(1));
     store.interaction.scroll_offset = [0.0, 120.0];
@@ -117,13 +165,14 @@ fn focused_text_input_down_key_does_not_scroll_viewport() {
 
     assert!(matches!(outcome, super::ActionOutcome::NoChange));
     assert_eq!(store.interaction.scroll_offset, [0.0, 120.0]);
-    assert_eq!(store.text_input.text(), "");
+    assert_eq!(text_input_text(&store, TextInputId::new(1)), "");
 }
 
 #[test]
 fn focused_text_input_navigation_and_backspace_update_text_state() {
-    let mut store = build_store_for_test();
-    store.interaction.focused_text_input = Some(TextInputId::new(1));
+    let mut store = build_text_input_store();
+    let first = TextInputId::new(1);
+    store.interaction.focused_text_input = Some(first);
 
     for code in [
         KeyCode::Char('a'),
@@ -142,8 +191,114 @@ fn focused_text_input_navigation_and_backspace_update_text_state() {
         ));
     }
 
-    assert_eq!(store.text_input.text(), "ab");
-    assert_eq!(store.text_input.cursor_index(), 2);
+    assert_eq!(text_input_text(&store, first), "ab");
+    assert_eq!(text_input_cursor(&store, first), 2);
+}
+
+#[test]
+fn clicking_outside_clears_focus_and_later_text_is_ignored() {
+    let mut store = build_text_input_store();
+    let _ = compose_and_record_state(&mut store);
+    let first = TextInputId::new(1);
+
+    let focus_action = click_text_input_action(&store, first);
+    let _ = store.handle_action(focus_action);
+    let outcome = store.handle_action(mouse_down_action([900.0, 620.0]));
+    assert!(matches!(
+        outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.interaction.focused_text_input, None);
+
+    let ignored = store.handle_action(key_input_action_with_kind(
+        KeyCode::Char('a'),
+        KeyEventKind::Press,
+    ));
+    assert!(matches!(ignored, super::ActionOutcome::NoChange));
+    assert_eq!(text_input_text(&store, first), "");
+    assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
+}
+
+#[test]
+fn text_edit_reprepare_makes_new_text_visible_on_next_compose() {
+    let mut store = build_text_input_store();
+    let _ = compose_and_record_state(&mut store);
+    let first = TextInputId::new(1);
+
+    let focus_action = click_text_input_action(&store, first);
+    let _ = store.handle_action(focus_action);
+    let _ = store.handle_action(key_input_action_with_kind(
+        KeyCode::Char('z'),
+        KeyEventKind::Press,
+    ));
+    let scene =
+        store.compose_scene_buffer(Bump::with_capacity(4096), false, &SceneConfig::default());
+
+    assert!(
+        scene
+            .scene_buffer
+            .blocks()
+            .iter()
+            .any(|block| !block.glyphs().is_empty()),
+        "fresh compose must include glyphs for edited text"
+    );
+}
+
+#[test]
+fn startup_compose_produces_text_input_hit_targets() {
+    let mut store = build_text_input_store();
+
+    let _ = compose_and_record_state(&mut store);
+
+    assert_eq!(store.text_input_hit_targets.len(), 2);
+}
+
+#[test]
+fn pointer_focus_refreshes_hit_targets_after_text_edit_before_compose() {
+    let mut store = build_dynamic_text_input_store();
+    let _ = compose_and_record_state(&mut store);
+    let input = TextInputId::new(1);
+    let old_rect = text_input_hit_rect(&store, input);
+    store.interaction.focused_text_input = Some(input);
+
+    let edit = store.handle_action(Action::Input {
+        event: InputEvent::Paste(
+            "wide text that expands the intrinsic input rect before the next compose".to_owned(),
+        ),
+    });
+    assert!(matches!(
+        edit,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+
+    let fresh_targets = store.composer.text_input_hit_targets(
+        &store.layout_cache,
+        store.viewport,
+        store.interaction.scroll_offset,
+    );
+    let fresh_rect = fresh_targets
+        .iter()
+        .find(|target| target.text_input_id == input)
+        .expect("fresh text input target must exist")
+        .rect();
+    assert!(
+        fresh_rect[2] > old_rect[2] + 20.0,
+        "test input must grow enough to expose stale hit targets"
+    );
+
+    let click = mouse_down_action([
+        fresh_rect[0] + fresh_rect[2] - 1.0,
+        fresh_rect[1] + fresh_rect[3] * 0.5,
+    ]);
+    let outcome = store.handle_action(click);
+
+    assert!(matches!(outcome, super::ActionOutcome::NoChange));
+    assert_eq!(store.interaction.focused_text_input, Some(input));
+    assert_eq!(text_input_hit_rect(&store, input), fresh_rect);
 }
 
 #[test]
@@ -494,7 +649,17 @@ fn build_store_for_test() -> Store {
     build_store_with_delegate(Arc::new(TestStoreDelegate))
 }
 
+fn build_text_input_store() -> Store {
+    build_store_with_delegate(Arc::new(TextInputTestStoreDelegate))
+}
+
+fn build_dynamic_text_input_store() -> Store {
+    build_store_with_delegate(Arc::new(DynamicTextInputTestStoreDelegate))
+}
+
 struct TestStoreDelegate;
+struct TextInputTestStoreDelegate;
+struct DynamicTextInputTestStoreDelegate;
 struct ConfiguredTestStoreDelegate;
 struct PixelScaleStoreDelegate;
 struct ReflowingResizeStoreDelegate;
@@ -511,8 +676,33 @@ impl StoreDelegate for TestStoreDelegate {
         _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
         let tree = build_tree_test_document();
-        let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new(tree, prepared_tree)
+        StoreBootstrap::new(tree, rasterizer)
+    }
+
+    fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
+}
+
+impl StoreDelegate for TextInputTestStoreDelegate {
+    fn bootstrap(
+        &self,
+        rasterizer: &FreeTypeRasterizer,
+        _logical_viewport: [f32; 2],
+    ) -> StoreBootstrap {
+        let tree = build_text_input_test_document();
+        StoreBootstrap::new(tree, rasterizer)
+    }
+
+    fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
+}
+
+impl StoreDelegate for DynamicTextInputTestStoreDelegate {
+    fn bootstrap(
+        &self,
+        rasterizer: &FreeTypeRasterizer,
+        _logical_viewport: [f32; 2],
+    ) -> StoreBootstrap {
+        let tree = build_dynamic_text_input_test_document();
+        StoreBootstrap::new(tree, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
@@ -525,8 +715,7 @@ impl StoreDelegate for ConfiguredTestStoreDelegate {
         _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
         let tree = build_tree_test_document();
-        let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new(tree, prepared_tree)
+        StoreBootstrap::new(tree, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
@@ -546,8 +735,7 @@ impl StoreDelegate for PixelScaleStoreDelegate {
         _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
         let tree = build_tree_test_document();
-        let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new(tree, prepared_tree)
+        StoreBootstrap::new(tree, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
@@ -567,8 +755,7 @@ impl StoreDelegate for ReflowingResizeStoreDelegate {
         _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
         let tree = build_reflowing_test_document();
-        let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new(tree, prepared_tree)
+        StoreBootstrap::new(tree, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
@@ -581,8 +768,7 @@ impl StoreDelegate for VetoDownStoreDelegate {
         _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
         let tree = build_tree_test_document();
-        let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new(tree, prepared_tree)
+        StoreBootstrap::new(tree, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
@@ -610,8 +796,7 @@ impl StoreDelegate for TreeTestStoreDelegate {
     ) -> StoreBootstrap {
         self.bootstrap_count.fetch_add(1, Ordering::Relaxed);
         let tree = build_tree_test_document();
-        let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new(tree, prepared_tree)
+        StoreBootstrap::new(tree, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
@@ -646,6 +831,61 @@ fn build_tree_test_document() -> DocumentTree {
             .expect("stack must be valid"),
     ))
     .expect("tree must be valid")
+}
+
+fn build_text_input_test_document() -> DocumentTree {
+    let style = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+    let input_style = TextInputStyle {
+        block: BlockStyle {
+            padding: Edges::all(8.0).expect("padding must be valid"),
+            margin: Edges::new(0.0, 0.0, 0.0, 10.0).expect("margin must be valid"),
+            background: Some([0.12, 0.16, 0.22, 1.0]),
+            min_width: Some(240.0),
+            ..BlockStyle::default()
+        },
+        border: Some(BorderStyle::new([0.35, 0.48, 0.62, 1.0], 1.0).expect("border must be valid")),
+        caret_color: [1.0, 1.0, 1.0, 1.0],
+    };
+    let children = [TextInputId::new(1), TextInputId::new(2)]
+        .into_iter()
+        .map(|id| {
+            BlockNode::TextInput(
+                TextInputNode::new(id, "", style, input_style).expect("text input must be valid"),
+            )
+        })
+        .collect();
+
+    DocumentTree::new(BlockNode::Stack(
+        StackNode::new(FlowDirection::Vertical, children, BlockStyle::default())
+            .expect("stack must be valid"),
+    ))
+    .expect("text input document must be valid")
+}
+
+fn build_dynamic_text_input_test_document() -> DocumentTree {
+    let style = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+    let input_style = TextInputStyle {
+        block: BlockStyle {
+            align_self: Align::Start,
+            padding: Edges::all(4.0).expect("padding must be valid"),
+            background: Some([0.12, 0.16, 0.22, 1.0]),
+            ..BlockStyle::default()
+        },
+        border: Some(BorderStyle::new([0.35, 0.48, 0.62, 1.0], 1.0).expect("border must be valid")),
+        caret_color: [1.0, 1.0, 1.0, 1.0],
+    };
+    let input = TextInputNode::new(TextInputId::new(1), "", style, input_style)
+        .expect("text input must be valid");
+
+    DocumentTree::new(BlockNode::Stack(
+        StackNode::new(
+            FlowDirection::Vertical,
+            vec![BlockNode::TextInput(input)],
+            BlockStyle::default(),
+        )
+        .expect("stack must be valid"),
+    ))
+    .expect("dynamic text input document must be valid")
 }
 
 fn build_reflowing_test_document() -> DocumentTree {
@@ -719,6 +959,50 @@ fn mouse_input_action(scroll_delta: MouseScroll) -> Action {
             event_time: Instant::now(),
         }),
     }
+}
+
+fn mouse_down_action(position: [f32; 2]) -> Action {
+    Action::Input {
+        event: InputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButtonKind::Left),
+            logical_position: Some(position),
+            scroll_delta: None,
+            modifiers: KeyModifiers::NONE,
+            event_time: Instant::now(),
+        }),
+    }
+}
+
+fn click_text_input_action(store: &Store, text_input: TextInputId) -> Action {
+    let rect = text_input_hit_rect(store, text_input);
+    mouse_down_action([rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5])
+}
+
+fn text_input_hit_rect(store: &Store, text_input: TextInputId) -> [f32; 4] {
+    store
+        .text_input_hit_targets
+        .iter()
+        .find(|target| target.text_input_id == text_input)
+        .expect("text input hit target must exist after compose")
+        .rect()
+}
+
+fn text_input_text(store: &Store, text_input: TextInputId) -> &str {
+    store
+        .model
+        .text_inputs()
+        .get(text_input)
+        .expect("text input state must exist")
+        .text()
+}
+
+fn text_input_cursor(store: &Store, text_input: TextInputId) -> usize {
+    store
+        .model
+        .text_inputs()
+        .get(text_input)
+        .expect("text input state must exist")
+        .cursor_index()
 }
 
 fn compose_and_record_state(store: &mut Store) -> [f32; 2] {

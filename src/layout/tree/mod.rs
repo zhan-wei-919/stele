@@ -3,17 +3,19 @@
 mod nodes;
 mod render;
 mod style;
+mod text_input;
 mod text_style;
 mod validation;
 
 pub(crate) use nodes::{
     AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, FlowDirection, InlineAtom,
     InlineAtomKind, InlineNode, NodeId, OverlayAnchor, OverlayNode, ParagraphNode, StackNode,
-    TextRun,
+    TextInputId, TextInputNode, TextRun,
 };
 pub(crate) use render::{validate_local_paint_commands, LocalPaintCommand, PathStroke};
 pub(crate) use style::{
     Align, AtomBaseline, BlockStyle, BorderStyle, ClipMode, Edges, InlineAtomStyle, LineHeight,
-    ParagraphStyle, TextAlign, WrapMode,
+    ParagraphStyle, TextAlign, TextInputStyle, WrapMode,
 };
+pub(crate) use text_input::{is_insertable_text_input_char, single_line_text};
 pub(crate) use text_style::TextStyle;

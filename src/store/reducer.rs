@@ -75,6 +75,16 @@ impl Reducer {
         config: InteractionConfig,
         command: Command,
     ) -> ReduceOutcome {
+        if let Command::FocusTextInput(text_input) = command {
+            let previous = interaction.focused_text_input;
+            interaction.focused_text_input = text_input;
+            return if interaction.focused_text_input == previous {
+                ReduceOutcome::NoChange
+            } else {
+                ReduceOutcome::Changed
+            };
+        }
+
         let previous = interaction.scroll_offset;
         let Some(next_y) = next_scroll_y(interaction, config, command) else {
             return ReduceOutcome::NoChange;
@@ -95,15 +105,13 @@ impl Reducer {
         command: Command,
     ) -> ReduceOutcome {
         let changed = match command {
-            Command::InsertChar(ch) => {
-                text_input.insert_char(ch);
-                true
-            }
+            Command::InsertChar(ch) => text_input.insert_char(ch),
             Command::InsertText(text) => text_input.insert_text(&text),
             Command::DeleteBackward => text_input.delete_backward(),
             Command::MoveCursorLeft => text_input.move_cursor_left(),
             Command::MoveCursorRight => text_input.move_cursor_right(),
-            Command::ScrollByLine(_)
+            Command::FocusTextInput(_)
+            | Command::ScrollByLine(_)
             | Command::ScrollByPage(_)
             | Command::ScrollToStart
             | Command::ScrollToEnd
@@ -136,7 +144,8 @@ fn next_scroll_y(
         Command::ScrollToStart => 0.0,
         Command::ScrollToEnd => max_scroll_y,
         Command::ScrollByPixels(pixels) => current_y + pixels,
-        Command::InsertChar(_)
+        Command::FocusTextInput(_)
+        | Command::InsertChar(_)
         | Command::InsertText(_)
         | Command::DeleteBackward
         | Command::MoveCursorLeft
@@ -177,6 +186,46 @@ mod tests {
 
         assert_eq!(text_input.text(), "abc");
         assert_eq!(text_input.cursor_index(), 2);
+    }
+
+    #[test]
+    fn focus_command_updates_only_focused_text_input() {
+        let reducer = Reducer;
+        let text_input = crate::layout::tree::TextInputId::new(7);
+        let mut interaction = InteractionState {
+            scroll_offset: [0.0, 80.0],
+            ..InteractionState::default()
+        };
+
+        assert!(matches!(
+            reducer.apply_command(
+                &mut interaction,
+                InteractionConfig::default(),
+                Command::FocusTextInput(Some(text_input))
+            ),
+            ReduceOutcome::Changed
+        ));
+        assert_eq!(interaction.focused_text_input, Some(text_input));
+        assert_eq!(interaction.scroll_offset, [0.0, 80.0]);
+
+        assert!(matches!(
+            reducer.apply_command(
+                &mut interaction,
+                InteractionConfig::default(),
+                Command::FocusTextInput(Some(text_input))
+            ),
+            ReduceOutcome::NoChange
+        ));
+
+        assert!(matches!(
+            reducer.apply_command(
+                &mut interaction,
+                InteractionConfig::default(),
+                Command::FocusTextInput(None)
+            ),
+            ReduceOutcome::Changed
+        ));
+        assert_eq!(interaction.focused_text_input, None);
     }
 
     #[test]
@@ -274,6 +323,24 @@ mod tests {
         assert!(text_input
             .text()
             .is_char_boundary(text_input.cursor_index()));
+    }
+
+    #[test]
+    fn text_commands_reject_control_characters() {
+        let reducer = Reducer;
+        let mut text_input = TextInputState::default();
+
+        assert!(matches!(
+            reducer.apply_text_command(&mut text_input, Command::InsertChar('\n')),
+            ReduceOutcome::NoChange
+        ));
+        assert!(matches!(
+            reducer.apply_text_command(&mut text_input, Command::InsertText("a\nb\rc".to_owned())),
+            ReduceOutcome::Changed
+        ));
+
+        assert_eq!(text_input.text(), "abc");
+        assert_eq!(text_input.cursor_index(), 3);
     }
 
     #[test]

@@ -6,11 +6,12 @@ use log::info;
 
 use crate::layout::prepare_tree::{
     PreparedBlockNode, PreparedEmbed, PreparedEmbedPayload, PreparedOverlay, PreparedParagraph,
-    PreparedStack, PreparedTree,
+    PreparedStack, PreparedTextInput, PreparedTree,
 };
 use crate::layout::tree::{Align, BlockStyle, ClipMode, FlowDirection, OverlayAnchor};
 
 use super::paragraph::{layout_paragraph, measure_paragraph_content_width};
+use super::text_input::{layout_text_input, measure_text_input_content_width};
 use super::types::{
     LayoutBlock, LayoutBlockContent, LayoutConstraints, LayoutEmbed, LayoutEmbedKind, LayoutRect,
     LayoutTree, ScrollAnchor,
@@ -169,6 +170,15 @@ fn layout_flow_block<'a>(
             record_anchors,
             width_mode,
         ),
+        PreparedBlockNode::TextInput(text_input) => layout_leaf_text_input(
+            text_input,
+            origin,
+            available_width,
+            inherited_clip,
+            context,
+            record_anchors,
+            width_mode,
+        ),
         PreparedBlockNode::Overlay(overlay) => {
             layout_overlay_placeholder(overlay, inherited_clip, context)
         }
@@ -266,6 +276,7 @@ fn stack_block(
         scroll_anchor: ScrollAnchor::FollowsContent,
         z_order: style.z_index,
         background: style.background,
+        border: None,
         content: LayoutBlockContent::Stack { children },
     }
 }
@@ -488,6 +499,7 @@ fn layout_leaf_paragraph<'a>(
         scroll_anchor: ScrollAnchor::FollowsContent,
         z_order: style.z_index,
         background: style.background,
+        border: None,
         content: LayoutBlockContent::Paragraph(laid_out),
     };
     record_anchor_layout(context, paragraph.node_id, rect, &block, record_anchors);
@@ -544,6 +556,7 @@ fn layout_leaf_embed<'a>(
         scroll_anchor: ScrollAnchor::FollowsContent,
         z_order: style.z_index,
         background: style.background,
+        border: None,
         content: LayoutBlockContent::Embed(LayoutEmbed {
             rect: content_rect,
             kind,
@@ -551,6 +564,49 @@ fn layout_leaf_embed<'a>(
         }),
     };
     record_anchor_layout(context, embed.node_id, rect, &block, record_anchors);
+    SolvedBlock {
+        outer_size: solved_outer_size(style, width, height),
+        block,
+    }
+}
+
+fn layout_leaf_text_input<'a>(
+    text_input: &'a PreparedTextInput,
+    origin: [f32; 2],
+    available_width: f32,
+    inherited_clip: LayoutRect,
+    context: &mut SolveContext<'a>,
+    record_anchors: bool,
+    width_mode: ChildWidthMode,
+) -> SolvedBlock {
+    let style = text_input.style.block;
+    let border_width = text_input_border_width(text_input);
+    let width = resolve_text_input_width(text_input, available_width, width_mode);
+    let content_rect = LayoutRect::new(
+        origin[0] + style.padding.left + border_width,
+        origin[1] + style.padding.top + border_width,
+        (width - style.padding.horizontal() - border_width * 2.0).max(0.0),
+        text_input.default_line_height,
+    );
+    let laid_out = layout_text_input(text_input, content_rect);
+    let height = resolve_height(
+        style,
+        laid_out.rect.height() + style.padding.vertical() + border_width * 2.0,
+    );
+    let rect = LayoutRect::new(origin[0], origin[1], width, height);
+    let clip_rect = effective_clip(rect, inherited_clip, style.clip);
+    let block = LayoutBlock {
+        node_id: text_input.node_id,
+        doc_order: text_input.node_id.value() as u32,
+        rect,
+        clip_rect,
+        scroll_anchor: ScrollAnchor::FollowsContent,
+        z_order: style.z_index,
+        background: style.background,
+        border: text_input.style.border,
+        content: LayoutBlockContent::TextInput(laid_out),
+    };
+    record_anchor_layout(context, text_input.node_id, rect, &block, record_anchors);
     SolvedBlock {
         outer_size: solved_outer_size(style, width, height),
         block,
@@ -577,6 +633,7 @@ fn layout_overlay_placeholder<'a>(
             scroll_anchor: ScrollAnchor::FollowsContent,
             z_order: 0,
             background: None,
+            border: None,
             content: LayoutBlockContent::Stack {
                 children: Vec::new(),
             },
@@ -638,6 +695,9 @@ fn measure_flow_block(
             measure_leaf_paragraph(paragraph, available_width, width_mode)
         }
         PreparedBlockNode::Embed(embed) => measure_leaf_embed(embed, available_width, width_mode),
+        PreparedBlockNode::TextInput(text_input) => {
+            measure_leaf_text_input(text_input, available_width, width_mode)
+        }
         PreparedBlockNode::Overlay(_) => [0.0, 0.0],
     }
 }
@@ -682,11 +742,29 @@ fn measure_leaf_embed(
     ]
 }
 
+fn measure_leaf_text_input(
+    text_input: &PreparedTextInput,
+    available_width: f32,
+    width_mode: ChildWidthMode,
+) -> [f32; 2] {
+    let style = text_input.style.block;
+    let border_width = text_input_border_width(text_input);
+    let width = resolve_text_input_width(text_input, available_width, width_mode);
+    let intrinsic_height =
+        text_input.default_line_height + style.padding.vertical() + border_width * 2.0;
+    let height = resolve_height(style, intrinsic_height);
+    [
+        width + style.margin.horizontal(),
+        height + style.margin.vertical(),
+    ]
+}
+
 fn block_style(node: &PreparedBlockNode) -> BlockStyle {
     match node {
         PreparedBlockNode::Stack(stack) => stack.style,
         PreparedBlockNode::Paragraph(paragraph) => paragraph.style.block,
         PreparedBlockNode::Embed(embed) => embed.style,
+        PreparedBlockNode::TextInput(text_input) => text_input.style.block,
         PreparedBlockNode::Overlay(_) => BlockStyle::default(),
     }
 }
@@ -829,6 +907,28 @@ fn resolve_embed_width(
     }
 }
 
+fn resolve_text_input_width(
+    text_input: &PreparedTextInput,
+    available_width: f32,
+    width_mode: ChildWidthMode,
+) -> f32 {
+    let style = text_input.style.block;
+    let border_width = text_input_border_width(text_input);
+    let intrinsic_width = measure_text_input_content_width(text_input)
+        + style.padding.horizontal()
+        + border_width * 2.0;
+    match width_mode {
+        ChildWidthMode::VerticalStretch => resolve_width(style, available_width, available_width),
+        ChildWidthMode::Default | ChildWidthMode::VerticalFitContent => {
+            resolve_intrinsic_width(style, intrinsic_width)
+        }
+    }
+}
+
+fn text_input_border_width(text_input: &PreparedTextInput) -> f32 {
+    text_input.style.border.map_or(0.0, |border| border.width)
+}
+
 fn resolve_intrinsic_width(style: BlockStyle, intrinsic_width: f32) -> f32 {
     let parent_limit = width_limit(style, f32::INFINITY);
     let mut width = intrinsic_width.max(0.0);
@@ -898,7 +998,9 @@ fn subtree_min_materialized_z(block: &LayoutBlock) -> Option<u32> {
                 (None, None) => None,
             }
         }),
-        LayoutBlockContent::Paragraph(_) | LayoutBlockContent::Embed(_) => self_z,
+        LayoutBlockContent::Paragraph(_)
+        | LayoutBlockContent::Embed(_)
+        | LayoutBlockContent::TextInput(_) => self_z,
     }
 }
 
@@ -913,7 +1015,9 @@ fn subtree_max_materialized_z(block: &LayoutBlock) -> Option<u32> {
                 (None, None) => None,
             }
         }),
-        LayoutBlockContent::Paragraph(_) | LayoutBlockContent::Embed(_) => self_z,
+        LayoutBlockContent::Paragraph(_)
+        | LayoutBlockContent::Embed(_)
+        | LayoutBlockContent::TextInput(_) => self_z,
     }
 }
 
@@ -928,9 +1032,10 @@ fn offset_subtree_z(block: &mut LayoutBlock, delta: u32) {
 
 fn block_materializes(block: &LayoutBlock) -> bool {
     match &block.content {
-        LayoutBlockContent::Stack { .. } => block.background.is_some(),
+        LayoutBlockContent::Stack { .. } => block.background.is_some() || block.border.is_some(),
         LayoutBlockContent::Paragraph(paragraph) => {
             block.background.is_some()
+                || block.border.is_some()
                 || paragraph.lines.iter().any(|line| {
                     line.runs.iter().any(|run| match run {
                         super::types::LayoutRun::Text(run) => {
@@ -955,10 +1060,14 @@ fn block_materializes(block: &LayoutBlock) -> bool {
         }
         LayoutBlockContent::Embed(embed) => {
             block.background.is_some()
+                || block.border.is_some()
                 || match &embed.kind {
                     LayoutEmbedKind::Custom { paint } => !paint.is_empty(),
                     LayoutEmbedKind::Image { .. } | LayoutEmbedKind::Path { .. } => true,
                 }
+        }
+        LayoutBlockContent::TextInput(text_input) => {
+            block.background.is_some() || block.border.is_some() || !text_input.glyphs.is_empty()
         }
     }
 }
@@ -972,7 +1081,7 @@ mod tests {
     use crate::layout::tree::{
         Align, AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, ClipMode,
         DocumentTree, Edges, FlowDirection, InlineNode, OverlayAnchor, OverlayNode, ParagraphNode,
-        ParagraphStyle, StackNode, TextRun, TextStyle,
+        ParagraphStyle, StackNode, TextInputId, TextInputNode, TextInputStyle, TextRun, TextStyle,
     };
 
     use super::{layout_tree, LayoutBlockContent, LayoutConstraints};
@@ -1090,6 +1199,62 @@ mod tests {
         };
         assert_eq!(children.len(), 1);
         assert!((children[0].rect.width() - 24.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_input_layout_preserves_order_and_computes_non_empty_rect() {
+        let text_style =
+            TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let before = ParagraphNode::new(
+            vec![InlineNode::Text(TextRun::new("before", text_style))],
+            ParagraphStyle::default(),
+        )
+        .expect("paragraph must be valid");
+        let input = TextInputNode::new(
+            TextInputId::new(22),
+            "placeholder",
+            text_style,
+            TextInputStyle {
+                block: BlockStyle {
+                    padding: Edges::all(4.0).expect("padding must be valid"),
+                    min_width: Some(120.0),
+                    ..BlockStyle::default()
+                },
+                ..TextInputStyle::default()
+            },
+        )
+        .expect("text input must be valid");
+        let after = ParagraphNode::new(
+            vec![InlineNode::Text(TextRun::new("after", text_style))],
+            ParagraphStyle::default(),
+        )
+        .expect("paragraph must be valid");
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![
+                    BlockNode::Paragraph(before),
+                    BlockNode::TextInput(input),
+                    BlockNode::Paragraph(after),
+                ],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+
+        let prepared = prepare_tree(&tree, &rasterizer());
+        let laid_out = layout_tree(&prepared, LayoutConstraints::new(200.0));
+        let LayoutBlockContent::Stack { children } = &laid_out.root.content else {
+            panic!("root must be stack");
+        };
+
+        assert!(matches!(
+            &children[1].content,
+            LayoutBlockContent::TextInput(_)
+        ));
+        assert!(children[1].rect.width() > 0.0);
+        assert!(children[1].rect.height() > 0.0);
     }
 
     #[test]

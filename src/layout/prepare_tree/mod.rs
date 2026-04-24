@@ -3,6 +3,7 @@
 mod embed;
 mod paragraph;
 mod prepare;
+mod text_input;
 
 use std::collections::HashMap;
 
@@ -13,7 +14,12 @@ pub(crate) use embed::{PreparedEmbed, PreparedEmbedPayload};
 pub(crate) use paragraph::{
     PreparedAtomPayload, PreparedInlineAtom, PreparedParagraph, PreparedParagraphItem,
 };
+#[cfg(test)]
 pub(crate) use prepare::prepare_tree;
+pub(crate) use prepare::prepare_tree_with_text_inputs;
+#[cfg(test)]
+pub(crate) use text_input::EmptyTextInputResolver;
+pub(crate) use text_input::{PreparedTextInput, TextInputResolver, TextInputValue};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedTree {
@@ -26,6 +32,7 @@ pub(crate) enum PreparedBlockNode {
     Stack(PreparedStack),
     Paragraph(PreparedParagraph),
     Embed(PreparedEmbed),
+    TextInput(PreparedTextInput),
     Overlay(PreparedOverlay),
 }
 

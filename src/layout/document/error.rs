@@ -13,6 +13,7 @@ pub(crate) enum DocumentError {
     InvalidLocalPaint,
     InvalidAnchorKey,
     DuplicateAnchorKey { key: String },
+    DuplicateTextInputId { id: u64 },
     UnknownOverlayTarget { key: String },
     RootOverlay,
 }

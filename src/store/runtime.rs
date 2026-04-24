@@ -7,17 +7,20 @@ use log::{info, warn};
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::font::FreeTypeRasterizer;
-use crate::io::{Action, InputEvent, IoHandle, SceneFrame, ViewUpdate};
+use crate::io::{
+    Action, InputEvent, IoHandle, MouseButtonKind, MouseEventKind, SceneFrame, ViewUpdate,
+};
 use crate::scene::{SceneBuffer, SceneBufferPool, SceneConfig};
 
 use super::composer::Composer;
 use super::delegate::StoreDelegate;
-use super::input::{resolve_command, resolve_input_context, InputContext};
+use super::input::{resolve_command, resolve_input_context, Command, InputContext};
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
 use super::reducer::{ReduceOutcome, Reducer};
-use super::text_input::TextInputState;
-use super::types::{InputFilter, InteractionConfig, InteractionState, StorePhase, ViewportState};
+use super::types::{
+    InputFilter, InteractionConfig, InteractionState, StorePhase, TextInputHitTarget, ViewportState,
+};
 
 const INPUT_COALESCE_DRAIN_COUNT: usize = 256;
 
@@ -25,7 +28,10 @@ const INPUT_COALESCE_DRAIN_COUNT: usize = 256;
 pub(crate) struct Store {
     viewport: ViewportState,
     interaction: InteractionState,
-    text_input: TextInputState,
+    text_input_hit_targets: Vec<TextInputHitTarget>,
+    text_input_hit_targets_revision: u64,
+    text_input_hit_targets_scroll_offset: [f32; 2],
+    text_input_hit_targets_viewport: [f32; 2],
     config: InteractionConfig,
     model: Model,
     layout_cache: LayoutCache,
@@ -63,7 +69,10 @@ impl Store {
         Self {
             viewport,
             interaction: InteractionState::default(),
-            text_input: TextInputState::default(),
+            text_input_hit_targets: Vec::new(),
+            text_input_hit_targets_revision: 0,
+            text_input_hit_targets_scroll_offset: [0.0, 0.0],
+            text_input_hit_targets_viewport: [0.0, 0.0],
             config,
             model,
             layout_cache,
@@ -95,6 +104,16 @@ impl Store {
         }
 
         let context = resolve_input_context(&self.model, &self.interaction);
+        if self.is_pointer_focus_event(event) {
+            self.refresh_text_input_hit_targets_if_stale();
+        }
+        if let Some(command) = self.resolve_pointer_focus_command(event) {
+            let outcome = self
+                .reducer
+                .apply_command(&mut self.interaction, self.config, command);
+            return self.reduce_to_action_outcome(outcome, false);
+        }
+
         let Some(command) = resolve_command(context, event, self.config) else {
             return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
         };
@@ -104,11 +123,71 @@ impl Store {
                 self.reducer
                     .apply_command(&mut self.interaction, self.config, command)
             }
-            InputContext::TextInput(_) => self
-                .reducer
-                .apply_text_command(&mut self.text_input, command),
+            InputContext::TextInput(text_input) => {
+                let outcome = {
+                    let Some(state) = self.model.text_inputs_mut().get_mut(text_input) else {
+                        return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
+                    };
+                    self.reducer.apply_text_command(state, command)
+                };
+                if matches!(outcome, ReduceOutcome::Changed) {
+                    self.layout_cache
+                        .rebuild_from_model(&self.model, &self.rasterizer);
+                }
+                outcome
+            }
         };
         self.reduce_to_action_outcome(outcome, false)
+    }
+
+    fn is_pointer_focus_event(&self, event: &InputEvent) -> bool {
+        let InputEvent::Mouse(mouse_event) = event else {
+            return false;
+        };
+        matches!(
+            mouse_event.kind,
+            MouseEventKind::Down(MouseButtonKind::Left)
+        ) && mouse_event.logical_position.is_some()
+    }
+
+    fn refresh_text_input_hit_targets_if_stale(&mut self) {
+        if !self.text_input_hit_targets_are_stale() {
+            return;
+        }
+        self.text_input_hit_targets = self.composer.text_input_hit_targets(
+            &self.layout_cache,
+            self.viewport,
+            self.interaction.scroll_offset,
+        );
+        self.record_text_input_hit_target_state();
+    }
+
+    fn text_input_hit_targets_are_stale(&self) -> bool {
+        self.text_input_hit_targets_revision != self.model.text_inputs().revision()
+            || self.text_input_hit_targets_scroll_offset != self.interaction.scroll_offset
+            || self.text_input_hit_targets_viewport != self.viewport.logical_size()
+    }
+
+    fn record_text_input_hit_target_state(&mut self) {
+        self.text_input_hit_targets_revision = self.model.text_inputs().revision();
+        self.text_input_hit_targets_scroll_offset = self.interaction.scroll_offset;
+        self.text_input_hit_targets_viewport = self.viewport.logical_size();
+    }
+
+    fn resolve_pointer_focus_command(&self, event: &InputEvent) -> Option<Command> {
+        let InputEvent::Mouse(mouse_event) = event else {
+            return None;
+        };
+        if !matches!(
+            mouse_event.kind,
+            MouseEventKind::Down(MouseButtonKind::Left)
+        ) {
+            return None;
+        }
+        let position = mouse_event.logical_position?;
+        let focused = hit_test_text_inputs(&self.text_input_hit_targets, position)
+            .filter(|text_input| self.model.text_inputs().contains(*text_input));
+        Some(Command::FocusTextInput(focused))
     }
 
     fn handle_system_action(&mut self, action: &Action) -> ActionOutcome {
@@ -162,6 +241,7 @@ impl Store {
         self.phase = StorePhase::ComposingSnapshot;
         let compose_started = Instant::now();
         let mut content_extent = [0.0, 0.0];
+        let mut text_input_hit_targets = Vec::new();
         let scene_buffer = SceneBuffer::new(owner, |owner| {
             let outcome = self.composer.compose_into_buffer(
                 owner,
@@ -171,12 +251,16 @@ impl Store {
                 &self.rasterizer,
                 self.viewport,
                 self.interaction.scroll_offset,
+                self.interaction.focused_text_input,
                 clear_tessellation_cache,
                 scene_config.max_blocks_per_scene,
             );
             content_extent = outcome.content_extent;
+            text_input_hit_targets = outcome.text_input_hit_targets;
             outcome.scene
         });
+        self.text_input_hit_targets = text_input_hit_targets;
+        self.record_text_input_hit_target_state();
         #[cfg(test)]
         if !self.compose_test_delay.is_zero() {
             std::thread::sleep(self.compose_test_delay);
@@ -208,7 +292,8 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
         };
         let batch = drain_action_batch(first_action, &mut handle);
         let pre_offset = store.interaction.scroll_offset;
-        let pre_text_input_revision = store.text_input.revision();
+        let pre_focus = store.interaction.focused_text_input;
+        let pre_text_input_revision = store.model.text_inputs().revision();
         let mut saw_compose_request = false;
         let mut clear_tessellation_cache = false;
         let mut shutdown_seen = false;
@@ -235,7 +320,8 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
 
         let needs_compose = if batch.is_input_batch {
             store.interaction.scroll_offset != pre_offset
-                || store.text_input.revision() != pre_text_input_revision
+                || store.interaction.focused_text_input != pre_focus
+                || store.model.text_inputs().revision() != pre_text_input_revision
         } else {
             saw_compose_request
         };
@@ -385,6 +471,18 @@ fn duration_budget(limit_ms: u32) -> Duration {
 fn update_post_compose_state(store: &mut Store, content_extent: [f32; 2]) {
     store.interaction.last_known_viewport = store.viewport.logical_size();
     store.interaction.last_known_content_extent = content_extent;
+}
+
+fn hit_test_text_inputs(
+    targets: &[TextInputHitTarget],
+    position: [f32; 2],
+) -> Option<crate::layout::tree::TextInputId> {
+    targets
+        .iter()
+        .copied()
+        .filter(|target| target.contains(position))
+        .max_by_key(|target| target.paint_order())
+        .map(|target| target.text_input_id)
 }
 
 fn drain_action_batch(first_action: Action, handle: &mut IoHandle) -> ActionBatch {

@@ -4,12 +4,12 @@ use std::sync::{Arc, OnceLock};
 
 use crate::draw_list::{ImageData, LineCap, LineJoin, PathVerb};
 use crate::font::FreeTypeRasterizer;
-use crate::layout::prepare_tree::prepare_tree;
 use crate::layout::tree::{
     Align, AnchorKey, AtomBaseline, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle,
     BorderStyle, ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind,
     InlineAtomStyle, InlineNode, LineHeight, LocalPaintCommand, OverlayAnchor, OverlayNode,
-    ParagraphNode, ParagraphStyle, PathStroke, StackNode, TextAlign, TextRun, TextStyle, WrapMode,
+    ParagraphNode, ParagraphStyle, PathStroke, StackNode, TextAlign, TextInputId, TextInputNode,
+    TextInputStyle, TextRun, TextStyle, WrapMode,
 };
 use crate::store::{Model, Store, StoreBootstrap, StoreDelegate, ViewportState};
 
@@ -51,8 +51,7 @@ impl StoreDelegate for DemoStoreDelegate {
         logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
         let document = build_demo_document_tree(rasterizer.default_font_id(), logical_viewport);
-        let prepared_tree = prepare_tree(&document, rasterizer);
-        StoreBootstrap::new(document, prepared_tree)
+        StoreBootstrap::new(document, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}
@@ -119,6 +118,7 @@ fn build_content_column(
         vec![
             build_hero_section(styles),
             build_summary_section(styles, wide_layout),
+            build_text_input_section(styles),
             build_inline_showcase_section(styles),
             build_alignment_section(styles),
             build_quote_and_list_section(styles),
@@ -262,6 +262,32 @@ fn build_summary_card(
             min_width: Some(180.0),
             max_width: Some(240.0),
             min_height: Some(124.0),
+            ..BlockStyle::default()
+        },
+    )
+}
+
+fn build_text_input_section(styles: &DemoStyles) -> BlockNode {
+    stack(
+        FlowDirection::Vertical,
+        vec![
+            paragraph(
+                vec![text("Text Input", styles.heading)],
+                ParagraphStyle {
+                    block: BlockStyle {
+                        margin: edges(0.0, 0.0, 0.0, 10.0),
+                        ..BlockStyle::default()
+                    },
+                    ..ParagraphStyle::default()
+                },
+            ),
+            text_input(1, "Click and type here", styles.body),
+            text_input(2, "Second independent input", styles.body),
+        ],
+        BlockStyle {
+            background: Some(SURFACE_BG),
+            clip: ClipMode::Rect,
+            padding: edges(18.0, 18.0, 18.0, 18.0),
             ..BlockStyle::default()
         },
     )
@@ -1051,6 +1077,29 @@ fn custom_atom() -> InlineNode {
 
 fn paragraph(inlines: Vec<InlineNode>, style: ParagraphStyle) -> BlockNode {
     BlockNode::Paragraph(ParagraphNode::new(inlines, style).expect("demo paragraph must be valid"))
+}
+
+fn text_input(id: u64, placeholder: &str, text_style: TextStyle) -> BlockNode {
+    BlockNode::TextInput(
+        TextInputNode::new(
+            TextInputId::new(id),
+            placeholder,
+            text_style,
+            TextInputStyle {
+                block: BlockStyle {
+                    background: Some(CODE_BG),
+                    clip: ClipMode::Rect,
+                    padding: edges(12.0, 8.0, 12.0, 8.0),
+                    margin: edges(0.0, 0.0, 0.0, 10.0),
+                    min_width: Some(260.0),
+                    ..BlockStyle::default()
+                },
+                border: Some(border(TEXT_LINK, 1.0)),
+                caret_color: TEXT_ACCENT,
+            },
+        )
+        .expect("demo text input must be valid"),
+    )
 }
 
 fn anchored_paragraph(

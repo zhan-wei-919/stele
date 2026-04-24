@@ -28,7 +28,6 @@ mod test_support;
 
 use font::{FontDiscovery, FreeTypeRasterizer};
 use io::{Action, InputEvent, IoHandle, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ViewUpdate};
-use layout::prepare_tree::prepare_tree;
 use layout::tree::{
     BlockNode, BlockStyle, DocumentTree, FlowDirection, InlineNode, ParagraphNode, ParagraphStyle,
     StackNode, TextRun, TextStyle,
@@ -93,8 +92,7 @@ impl StoreDelegate for ConfiguredTestStoreDelegate {
         _logical_viewport: [f32; 2],
     ) -> StoreBootstrap {
         let tree = build_tree_test_document();
-        let prepared_tree = prepare_tree(&tree, rasterizer);
-        StoreBootstrap::new(tree, prepared_tree)
+        StoreBootstrap::new(tree, rasterizer)
     }
 
     fn resize(&self, _model: &mut Model, _logical_viewport: [f32; 2]) {}

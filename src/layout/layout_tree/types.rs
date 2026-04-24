@@ -110,6 +110,7 @@ pub(crate) struct LayoutBlock {
     pub(crate) scroll_anchor: ScrollAnchor,
     pub(crate) z_order: u32,
     pub(crate) background: Option<[f32; 4]>,
+    pub(crate) border: Option<BorderStyle>,
     pub(crate) content: LayoutBlockContent,
 }
 
@@ -118,6 +119,7 @@ pub(crate) enum LayoutBlockContent {
     Stack { children: Vec<LayoutBlock> },
     Paragraph(LayoutParagraph),
     Embed(LayoutEmbed),
+    TextInput(LayoutTextInput),
 }
 
 #[derive(Clone, Debug)]
@@ -182,4 +184,13 @@ pub(crate) enum LayoutEmbedKind {
     Custom {
         paint: Arc<[LocalPaintCommand]>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LayoutTextInput {
+    pub(crate) text_input_id: crate::layout::tree::TextInputId,
+    pub(crate) rect: LayoutRect,
+    pub(crate) glyphs: Vec<PositionedGlyph>,
+    pub(crate) caret_rect: LayoutRect,
+    pub(crate) caret_color: [f32; 4],
 }

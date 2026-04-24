@@ -234,6 +234,34 @@ impl ParagraphStyle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TextInputStyle {
+    pub(crate) block: BlockStyle,
+    pub(crate) border: Option<BorderStyle>,
+    pub(crate) caret_color: [f32; 4],
+}
+
+impl Default for TextInputStyle {
+    fn default() -> Self {
+        Self {
+            block: BlockStyle::default(),
+            border: None,
+            caret_color: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+}
+
+impl TextInputStyle {
+    pub(crate) fn validate(self) -> Result<(), DocumentError> {
+        self.block.validate()?;
+        validate_optional_color(Some(self.caret_color))?;
+        if let Some(border) = self.border {
+            let _ = BorderStyle::new(border.color, border.width)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct InlineAtomStyle {
     pub(crate) margin: Edges,
     pub(crate) padding: Edges,
@@ -278,7 +306,9 @@ impl InlineAtomStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockStyle, BorderStyle, Edges, InlineAtomStyle, LineHeight, ParagraphStyle};
+    use super::{
+        BlockStyle, BorderStyle, Edges, InlineAtomStyle, LineHeight, ParagraphStyle, TextInputStyle,
+    };
     use crate::layout::document::DocumentError;
 
     #[test]
@@ -342,5 +372,23 @@ mod tests {
             ..InlineAtomStyle::default()
         };
         assert_eq!(style.validate(), Err(DocumentError::InvalidEdges));
+    }
+
+    #[test]
+    fn text_input_style_validates_caret_color_and_border() {
+        let border = BorderStyle::new([0.8, 0.8, 0.8, 1.0], 1.0).expect("valid border");
+        let style = TextInputStyle {
+            border: Some(border),
+            caret_color: [1.0, 1.0, 1.0, 1.0],
+            ..TextInputStyle::default()
+        };
+
+        style.validate().expect("text input style must be valid");
+
+        let invalid = TextInputStyle {
+            caret_color: [1.2, 1.0, 1.0, 1.0],
+            ..TextInputStyle::default()
+        };
+        assert_eq!(invalid.validate(), Err(DocumentError::InvalidColor));
     }
 }

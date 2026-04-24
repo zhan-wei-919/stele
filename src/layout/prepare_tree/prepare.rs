@@ -9,14 +9,19 @@ use crate::layout::line_break::{collect_breaks, BreakOpportunity};
 use crate::layout::prepare::PreparedGlyph;
 use crate::layout::tree::{
     BlockEmbedKind, BlockEmbedNode, BlockNode, DocumentTree, InlineAtom, InlineAtomKind,
-    InlineNode, OverlayNode, ParagraphNode, StackNode, TextStyle,
+    InlineNode, OverlayNode, ParagraphNode, StackNode, TextInputNode, TextStyle,
 };
 
 use super::embed::{PreparedEmbed, PreparedEmbedPayload};
 use super::paragraph::{
     PreparedAtomPayload, PreparedInlineAtom, PreparedParagraph, PreparedParagraphItem,
 };
-use super::{PreparedBlockNode, PreparedOverlay, PreparedStack, PreparedTree};
+#[cfg(test)]
+use super::EmptyTextInputResolver;
+use super::{
+    PreparedBlockNode, PreparedOverlay, PreparedStack, PreparedTextInput, PreparedTree,
+    TextInputResolver, TextInputValue,
+};
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_LINE_HEIGHT_FACTOR: f32 = 1.4;
@@ -28,18 +33,29 @@ struct PrepareStats {
     paragraph_count: usize,
     atom_count: usize,
     embed_count: usize,
+    text_input_count: usize,
 }
 
 /// Measures the full rich-text tree once and returns the cached cold-path data.
+#[cfg(test)]
 pub(crate) fn prepare_tree(
     document: &DocumentTree,
     rasterizer: &FreeTypeRasterizer,
 ) -> PreparedTree {
+    prepare_tree_with_text_inputs(document, rasterizer, &EmptyTextInputResolver)
+}
+
+/// Measures the full tree with model-owned text input contents resolved by id.
+pub(crate) fn prepare_tree_with_text_inputs(
+    document: &DocumentTree,
+    rasterizer: &FreeTypeRasterizer,
+    text_inputs: &impl TextInputResolver,
+) -> PreparedTree {
     let mut stats = PrepareStats::default();
-    let root = prepare_block(document.root(), rasterizer, &mut stats);
+    let root = prepare_block(document.root(), rasterizer, text_inputs, &mut stats);
     info!(
-        "layout.tree.prepare node_count={} paragraph_count={} atom_count={} embed_count={}",
-        stats.node_count, stats.paragraph_count, stats.atom_count, stats.embed_count
+        "layout.tree.prepare node_count={} paragraph_count={} atom_count={} embed_count={} text_input_count={}",
+        stats.node_count, stats.paragraph_count, stats.atom_count, stats.embed_count, stats.text_input_count
     );
     PreparedTree {
         root,
@@ -50,12 +66,13 @@ pub(crate) fn prepare_tree(
 fn prepare_block(
     node: &BlockNode,
     rasterizer: &FreeTypeRasterizer,
+    text_inputs: &impl TextInputResolver,
     stats: &mut PrepareStats,
 ) -> PreparedBlockNode {
     stats.node_count += 1;
     match node {
         BlockNode::Stack(stack) => {
-            PreparedBlockNode::Stack(prepare_stack(stack, rasterizer, stats))
+            PreparedBlockNode::Stack(prepare_stack(stack, rasterizer, text_inputs, stats))
         }
         BlockNode::Paragraph(paragraph) => {
             stats.paragraph_count += 1;
@@ -65,8 +82,12 @@ fn prepare_block(
             stats.embed_count += 1;
             PreparedBlockNode::Embed(prepare_embed(embed))
         }
+        BlockNode::TextInput(text_input) => {
+            stats.text_input_count += 1;
+            PreparedBlockNode::TextInput(prepare_text_input(text_input, rasterizer, text_inputs))
+        }
         BlockNode::Overlay(overlay) => {
-            PreparedBlockNode::Overlay(prepare_overlay(overlay, rasterizer, stats))
+            PreparedBlockNode::Overlay(prepare_overlay(overlay, rasterizer, text_inputs, stats))
         }
     }
 }
@@ -74,6 +95,7 @@ fn prepare_block(
 fn prepare_stack(
     stack: &StackNode,
     rasterizer: &FreeTypeRasterizer,
+    text_inputs: &impl TextInputResolver,
     stats: &mut PrepareStats,
 ) -> PreparedStack {
     PreparedStack {
@@ -82,7 +104,7 @@ fn prepare_stack(
         children: stack
             .children
             .iter()
-            .map(|child| prepare_block(child, rasterizer, stats))
+            .map(|child| prepare_block(child, rasterizer, text_inputs, stats))
             .collect(),
         style: stack.style,
     }
@@ -91,12 +113,18 @@ fn prepare_stack(
 fn prepare_overlay(
     overlay: &OverlayNode,
     rasterizer: &FreeTypeRasterizer,
+    text_inputs: &impl TextInputResolver,
     stats: &mut PrepareStats,
 ) -> PreparedOverlay {
     PreparedOverlay {
         node_id: overlay.node_id,
         anchor: overlay.anchor.clone(),
-        child: Box::new(prepare_block(overlay.child.as_ref(), rasterizer, stats)),
+        child: Box::new(prepare_block(
+            overlay.child.as_ref(),
+            rasterizer,
+            text_inputs,
+            stats,
+        )),
     }
 }
 
@@ -358,6 +386,122 @@ fn prepare_embed(embed: &BlockEmbedNode) -> PreparedEmbed {
     }
 }
 
+fn prepare_text_input(
+    text_input: &TextInputNode,
+    rasterizer: &FreeTypeRasterizer,
+    text_inputs: &impl TextInputResolver,
+) -> PreparedTextInput {
+    let value = text_inputs
+        .resolve_text_input(text_input.text_input_id)
+        .unwrap_or(TextInputValue {
+            text: "",
+            cursor_index: 0,
+        });
+    debug_assert!(
+        value.text.is_char_boundary(value.cursor_index),
+        "text input cursor must stay on a UTF-8 boundary before prepare"
+    );
+
+    let font_selection = rasterizer.resolve_font(
+        text_input.text_style.font_id(),
+        text_input.text_style.bold(),
+        text_input.text_style.italic(),
+    );
+    log_font_fallback(font_selection);
+    let metrics = rasterizer.line_metrics(
+        font_selection.resolved_font_id,
+        text_input.text_style.font_size(),
+    );
+    let display_text = if value.text.is_empty() {
+        text_input.placeholder.as_str()
+    } else {
+        value.text
+    };
+    let glyphs = prepare_text_glyphs(
+        display_text,
+        text_input.text_style,
+        font_selection,
+        metrics,
+        rasterizer,
+    );
+    let content_width = glyphs
+        .iter()
+        .map(|glyph| glyph.advance.max(0.0))
+        .sum::<f32>();
+    let caret_advance = caret_advance(
+        value.text,
+        value.cursor_index,
+        text_input.text_style,
+        font_selection,
+        metrics,
+        rasterizer,
+    );
+
+    PreparedTextInput {
+        node_id: text_input.node_id,
+        text_input_id: text_input.text_input_id,
+        glyphs,
+        content_width,
+        caret_advance,
+        default_ascent: metrics.ascent,
+        default_line_height: metrics.line_height,
+        style: text_input.style,
+    }
+}
+
+fn prepare_text_glyphs(
+    text: &str,
+    style: TextStyle,
+    font_selection: FontSelection,
+    metrics: LineMetrics,
+    rasterizer: &FreeTypeRasterizer,
+) -> Vec<PreparedGlyph> {
+    let measured_glyphs = rasterizer.measure_text(
+        text,
+        font_selection.resolved_font_id,
+        style.font_size(),
+        style.letter_spacing(),
+    );
+
+    let mut glyphs = Vec::new();
+    let mut measured_index = 0usize;
+    for ch in text.chars() {
+        if ch == '\n' {
+            continue;
+        }
+        let measured = measured_glyphs
+            .get(measured_index)
+            .copied()
+            .unwrap_or_else(|| MeasuredGlyph::fallback(style.font_size(), style.letter_spacing()));
+        measured_index += 1;
+        glyphs.push(PreparedGlyph::from_measurement(
+            0,
+            style,
+            font_selection,
+            metrics,
+            measured,
+        ));
+    }
+    glyphs
+}
+
+fn caret_advance(
+    text: &str,
+    cursor_index: usize,
+    style: TextStyle,
+    font_selection: FontSelection,
+    metrics: LineMetrics,
+    rasterizer: &FreeTypeRasterizer,
+) -> f32 {
+    let prefix = text
+        .get(..cursor_index)
+        .expect("text input cursor must be a validated UTF-8 boundary");
+    prepare_text_glyphs(prefix, style, font_selection, metrics, rasterizer)
+        .into_iter()
+        .map(|glyph| glyph.advance.max(0.0))
+        .sum()
+}
+
 fn atom_ascent(atom: &PreparedInlineAtom) -> f32 {
     let outer_height = atom.outer_height();
     match atom.baseline {
@@ -442,7 +586,8 @@ mod tests {
     use crate::font::{FontDiscovery, FreeTypeRasterizer};
     use crate::layout::tree::{
         BlockNode, DocumentTree, FlowDirection, InlineAtom, InlineAtomKind, InlineAtomStyle,
-        InlineNode, ParagraphNode, ParagraphStyle, StackNode, TextRun, TextStyle,
+        InlineNode, ParagraphNode, ParagraphStyle, StackNode, TextInputId, TextInputNode,
+        TextInputStyle, TextRun, TextStyle,
     };
     use crate::renderer::subpixel::detect_subpixel_layout;
 
@@ -491,5 +636,47 @@ mod tests {
             panic!("child must be paragraph");
         };
         assert_eq!(paragraph.items.len(), 3);
+    }
+
+    #[test]
+    fn prepares_text_input_leaf_without_losing_block_order() {
+        let body = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let paragraph = ParagraphNode::new(
+            vec![InlineNode::Text(TextRun::new("before", body))],
+            ParagraphStyle::default(),
+        )
+        .expect("paragraph must be valid");
+        let text_input = TextInputNode::new(
+            TextInputId::new(10),
+            "placeholder",
+            body,
+            TextInputStyle::default(),
+        )
+        .expect("text input must be valid");
+        let tree = DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![
+                    BlockNode::Paragraph(paragraph),
+                    BlockNode::TextInput(text_input),
+                ],
+                crate::layout::tree::BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid");
+
+        let prepared = prepare_tree(&tree, &rasterizer());
+        let super::PreparedBlockNode::Stack(root) = prepared.root else {
+            panic!("root must be stack");
+        };
+
+        assert!(matches!(
+            root.children.as_slice(),
+            [
+                super::PreparedBlockNode::Paragraph(_),
+                super::PreparedBlockNode::TextInput(_)
+            ]
+        ));
     }
 }

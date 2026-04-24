@@ -7,7 +7,8 @@ use crate::draw_list::{ImageData, PathVerb};
 use crate::layout::document::DocumentError;
 
 use super::render::{LocalPaintCommand, PathStroke};
-use super::style::{BlockStyle, InlineAtomStyle, ParagraphStyle};
+use super::style::{BlockStyle, InlineAtomStyle, ParagraphStyle, TextInputStyle};
+use super::text_input::single_line_text;
 use super::text_style::TextStyle;
 use super::validate_local_paint_commands;
 use super::validation::validate_dimension;
@@ -16,6 +17,19 @@ use super::validation::validate_dimension;
 pub(crate) struct NodeId(u64);
 
 impl NodeId {
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct TextInputId(u64);
+
+impl TextInputId {
     pub(crate) const fn new(value: u64) -> Self {
         Self(value)
     }
@@ -56,6 +70,7 @@ pub(crate) enum FlowDirection {
 pub(crate) struct DocumentTree {
     root: BlockNode,
     anchor_index: HashMap<AnchorKey, NodeId>,
+    text_input_ids: HashSet<TextInputId>,
 }
 
 impl DocumentTree {
@@ -66,11 +81,13 @@ impl DocumentTree {
 
         let mut next_node_id = 0u64;
         let mut seen_anchors = HashSet::new();
+        let mut seen_text_inputs = HashSet::new();
         let mut flow_anchor_index = HashMap::new();
         assign_node_ids(
             &mut root,
             &mut next_node_id,
             &mut seen_anchors,
+            &mut seen_text_inputs,
             &mut flow_anchor_index,
             false,
         )?;
@@ -79,6 +96,7 @@ impl DocumentTree {
         Ok(Self {
             root,
             anchor_index: flow_anchor_index,
+            text_input_ids: seen_text_inputs,
         })
     }
 
@@ -89,6 +107,10 @@ impl DocumentTree {
     pub(crate) fn anchor_index(&self) -> &HashMap<AnchorKey, NodeId> {
         &self.anchor_index
     }
+
+    pub(crate) fn text_input_ids(&self) -> &HashSet<TextInputId> {
+        &self.text_input_ids
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +118,7 @@ pub(crate) enum BlockNode {
     Stack(StackNode),
     Paragraph(ParagraphNode),
     Embed(BlockEmbedNode),
+    TextInput(TextInputNode),
     Overlay(OverlayNode),
 }
 
@@ -105,6 +128,7 @@ impl BlockNode {
             Self::Stack(node) => node.node_id = node_id,
             Self::Paragraph(node) => node.node_id = node_id,
             Self::Embed(node) => node.node_id = node_id,
+            Self::TextInput(node) => node.node_id = node_id,
             Self::Overlay(node) => node.node_id = node_id,
         }
     }
@@ -294,6 +318,36 @@ impl BlockEmbedKind {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct TextInputNode {
+    pub(crate) node_id: NodeId,
+    pub(crate) anchor_key: Option<AnchorKey>,
+    pub(crate) text_input_id: TextInputId,
+    pub(crate) placeholder: String,
+    pub(crate) text_style: TextStyle,
+    pub(crate) style: TextInputStyle,
+}
+
+impl TextInputNode {
+    pub(crate) fn new(
+        text_input_id: TextInputId,
+        placeholder: impl Into<String>,
+        text_style: TextStyle,
+        style: TextInputStyle,
+    ) -> Result<Self, DocumentError> {
+        style.validate()?;
+        let placeholder = single_line_text(&placeholder.into());
+        Ok(Self {
+            node_id: NodeId::new(0),
+            anchor_key: None,
+            text_input_id,
+            placeholder,
+            text_style,
+            style,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct OverlayNode {
     pub(crate) node_id: NodeId,
     pub(crate) anchor: OverlayAnchor,
@@ -323,6 +377,7 @@ fn assign_node_ids(
     node: &mut BlockNode,
     next_node_id: &mut u64,
     seen_anchors: &mut HashSet<AnchorKey>,
+    seen_text_inputs: &mut HashSet<TextInputId>,
     flow_anchor_index: &mut HashMap<AnchorKey, NodeId>,
     in_overlay_subtree: bool,
 ) -> Result<(), DocumentError> {
@@ -344,6 +399,7 @@ fn assign_node_ids(
                     child,
                     next_node_id,
                     seen_anchors,
+                    seen_text_inputs,
                     flow_anchor_index,
                     in_overlay_subtree,
                 )?;
@@ -357,6 +413,16 @@ fn assign_node_ids(
                 flow_anchor_index,
                 in_overlay_subtree,
             )?;
+        }
+        BlockNode::TextInput(text_input) => {
+            register_anchor(
+                text_input.anchor_key.as_ref(),
+                node_id,
+                seen_anchors,
+                flow_anchor_index,
+                in_overlay_subtree,
+            )?;
+            register_text_input(text_input.text_input_id, seen_text_inputs)?;
         }
         BlockNode::Embed(embed) => {
             register_anchor(
@@ -372,12 +438,26 @@ fn assign_node_ids(
                 overlay.child.as_mut(),
                 next_node_id,
                 seen_anchors,
+                seen_text_inputs,
                 flow_anchor_index,
                 true,
             )?;
         }
     }
     Ok(())
+}
+
+fn register_text_input(
+    text_input_id: TextInputId,
+    seen_text_inputs: &mut HashSet<TextInputId>,
+) -> Result<(), DocumentError> {
+    if seen_text_inputs.insert(text_input_id) {
+        Ok(())
+    } else {
+        Err(DocumentError::DuplicateTextInputId {
+            id: text_input_id.value(),
+        })
+    }
 }
 
 fn register_anchor(
@@ -421,7 +501,7 @@ fn validate_overlay_targets(
             }
             validate_overlay_targets(overlay.child.as_ref(), flow_anchor_index)?;
         }
-        BlockNode::Paragraph(_) | BlockNode::Embed(_) => {}
+        BlockNode::Paragraph(_) | BlockNode::Embed(_) | BlockNode::TextInput(_) => {}
     }
     Ok(())
 }
@@ -438,6 +518,7 @@ mod tests {
     use crate::layout::document::DocumentError;
     use crate::layout::tree::style::{InlineAtomStyle, ParagraphStyle};
     use crate::layout::tree::text_style::TextStyle;
+    use crate::layout::tree::{TextInputId, TextInputNode, TextInputStyle};
 
     fn body_style() -> TextStyle {
         TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid")
@@ -489,6 +570,42 @@ mod tests {
             DocumentTree::new(root),
             Err(DocumentError::DuplicateAnchorKey { key }) if key == "dup"
         ));
+    }
+
+    #[test]
+    fn rejects_duplicate_text_input_ids() {
+        let input_id = TextInputId::new(42);
+        let left = TextInputNode::new(input_id, "left", body_style(), TextInputStyle::default())
+            .expect("text input must be valid");
+        let right = TextInputNode::new(input_id, "right", body_style(), TextInputStyle::default())
+            .expect("text input must be valid");
+
+        let root = BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::TextInput(left), BlockNode::TextInput(right)],
+                super::super::style::BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        );
+
+        assert!(matches!(
+            DocumentTree::new(root),
+            Err(DocumentError::DuplicateTextInputId { id }) if id == input_id.value()
+        ));
+    }
+
+    #[test]
+    fn text_input_placeholder_is_single_line_at_source() {
+        let input = TextInputNode::new(
+            TextInputId::new(7),
+            "a\nb\rc\t中",
+            body_style(),
+            TextInputStyle::default(),
+        )
+        .expect("text input must be valid");
+
+        assert_eq!(input.placeholder, "abc中");
     }
 
     #[test]

@@ -18,7 +18,8 @@ pub(crate) fn resolve_command(
 ) -> Option<Command> {
     match context {
         InputContext::Viewport => resolve_viewport_command(event, config),
-        InputContext::TextInput(_) => resolve_text_input_command(event),
+        InputContext::TextInput(_) => resolve_text_input_command(event)
+            .or_else(|| resolve_viewport_mouse_command(event, config)),
     }
 }
 
@@ -28,6 +29,16 @@ fn resolve_viewport_command(event: &InputEvent, config: InteractionConfig) -> Op
         InputEvent::Mouse(mouse_event) => resolve_mouse_command(mouse_event, config),
         InputEvent::Paste(_) | InputEvent::CursorLeft | InputEvent::FocusChanged { .. } => None,
     }
+}
+
+fn resolve_viewport_mouse_command(
+    event: &InputEvent,
+    config: InteractionConfig,
+) -> Option<Command> {
+    let InputEvent::Mouse(mouse_event) = event else {
+        return None;
+    };
+    resolve_mouse_command(mouse_event, config)
 }
 
 fn resolve_viewport_key_command(event: &KeyEvent) -> Option<Command> {
@@ -129,8 +140,8 @@ mod tests {
 
     use crate::io::{KeyModifiers, MouseButtonKind};
 
-    use super::super::context::TextInputId;
     use super::*;
+    use crate::layout::tree::TextInputId;
 
     #[test]
     fn key_press_and_repeat_resolve_to_scroll_commands() {
@@ -294,9 +305,16 @@ mod tests {
             resolve_text_input_command(&mouse_event(MouseEventKind::Moved, None)),
             None
         );
+    }
+
+    #[test]
+    fn text_input_context_keeps_mouse_wheel_scrolling_viewport() {
         assert_eq!(
-            resolve_text_input_command(&mouse_scroll(MouseScroll::LineDelta { x: 0.0, y: -1.0 })),
-            None
+            resolve_command_in(
+                InputContext::TextInput(TextInputId::new(1)),
+                &mouse_scroll(MouseScroll::LineDelta { x: 0.0, y: -1.0 })
+            ),
+            Some(Command::ScrollByPixels(40.0))
         );
     }
 

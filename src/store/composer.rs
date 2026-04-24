@@ -12,7 +12,8 @@ use crate::font::FreeTypeRasterizer;
 use crate::layout::layout_tree::{
     self, LayoutAtomPayload, LayoutBlock as TreeLayoutBlock,
     LayoutBlockContent as TreeLayoutBlockContent, LayoutConstraints, LayoutEmbedKind,
-    LayoutRect as TreeLayoutRect, LayoutRun as TreeLayoutRun, ScrollAnchor,
+    LayoutRect as TreeLayoutRect, LayoutRun as TreeLayoutRun,
+    LayoutTextInput as TreeLayoutTextInput, ScrollAnchor,
 };
 use crate::layout::tree::{BorderStyle, LocalPaintCommand, PathStroke};
 use crate::scene::instance::{GlyphInstance, RectInstance};
@@ -20,7 +21,7 @@ use crate::scene::{BlockDataArena, BlockId, SceneBufferInner, SceneFrameMetadata
 
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
-use super::types::ViewportState;
+use super::types::{TextInputHitTarget, ViewportState};
 
 /// Stateless composer from logical layout output to one render-ready scene buffer.
 pub(crate) struct Composer;
@@ -31,6 +32,7 @@ type OrderedBlock<'a> = (u32, BlockDataArena<'a>);
 pub(crate) struct ComposeOutcome<'a> {
     pub(crate) scene: SceneBufferInner<'a>,
     pub(crate) content_extent: [f32; 2],
+    pub(crate) text_input_hit_targets: Vec<TextInputHitTarget>,
 }
 
 #[derive(Default)]
@@ -51,6 +53,35 @@ impl MaterializedPrimitives {
 }
 
 impl Composer {
+    /// Computes the current viewport-space text input hit targets without materializing a scene.
+    pub(crate) fn text_input_hit_targets(
+        &self,
+        layout_cache: &LayoutCache,
+        viewport: ViewportState,
+        scroll_offset: [f32; 2],
+    ) -> Vec<TextInputHitTarget> {
+        let layout_tree = layout_tree::layout_tree(
+            layout_cache.prepared(),
+            LayoutConstraints::new(viewport.logical_size()[0].max(1.0)),
+        );
+        let viewport_size = viewport.logical_size();
+        let viewport_rect = TreeLayoutRect::new(0.0, 0.0, viewport_size[0], viewport_size[1]);
+        let scroll_translation = [-scroll_offset[0], -scroll_offset[1]];
+        let mut targets = Vec::new();
+
+        collect_hit_targets_for_block(
+            &layout_tree.root,
+            &mut targets,
+            viewport_rect,
+            scroll_translation,
+        );
+        for overlay in &layout_tree.overlays {
+            collect_hit_targets_for_block(overlay, &mut targets, viewport_rect, scroll_translation);
+        }
+
+        targets
+    }
+
     /// Recomputes the full scene payload into one arena-backed scene buffer.
     pub(crate) fn compose_into_buffer<'a>(
         &self,
@@ -61,6 +92,7 @@ impl Composer {
         rasterizer: &FreeTypeRasterizer,
         viewport: ViewportState,
         scroll_offset: [f32; 2],
+        focused_text_input: Option<crate::layout::tree::TextInputId>,
         clear_tessellation_cache: bool,
         max_blocks_per_scene: usize,
     ) -> ComposeOutcome<'a> {
@@ -70,13 +102,14 @@ impl Composer {
             prepared_tree.anchor_index.len(),
             "model and prepared tree must stay in sync",
         );
-        let (mut entries, content_extent) = compose_tree_entries(
+        let (mut entries, content_extent, text_input_hit_targets) = compose_tree_entries(
             owner,
             prepared_tree,
             logical_atlas,
             rasterizer,
             viewport,
             scroll_offset,
+            focused_text_input,
         );
 
         sort_ordered_entries(&mut entries);
@@ -109,6 +142,7 @@ impl Composer {
         ComposeOutcome {
             scene,
             content_extent,
+            text_input_hit_targets,
         }
     }
 }
@@ -120,12 +154,14 @@ fn compose_tree_entries<'a>(
     rasterizer: &FreeTypeRasterizer,
     viewport: ViewportState,
     scroll_offset: [f32; 2],
-) -> (Vec<OrderedBlock<'a>>, [f32; 2]) {
+    focused_text_input: Option<crate::layout::tree::TextInputId>,
+) -> (Vec<OrderedBlock<'a>>, [f32; 2], Vec<TextInputHitTarget>) {
     let layout_tree: layout_tree::LayoutTree = layout_tree::layout_tree(
         prepared_tree,
         LayoutConstraints::new(viewport.logical_size()[0].max(1.0)),
     );
     let mut entries = Vec::new();
+    let mut text_input_hit_targets = Vec::new();
     let mut content_extent = [0.0, 0.0];
     let viewport_size = viewport.logical_size();
     let viewport_rect = TreeLayoutRect::new(0.0, 0.0, viewport_size[0], viewport_size[1]);
@@ -136,12 +172,14 @@ fn compose_tree_entries<'a>(
         owner,
         &layout_tree.root,
         &mut entries,
+        &mut text_input_hit_targets,
         &mut content_extent,
         logical_atlas,
         rasterizer,
         viewport.scale_factor,
         viewport_rect,
         scroll_translation,
+        focused_text_input,
         true,
     );
     for overlay in &layout_tree.overlays {
@@ -149,12 +187,14 @@ fn compose_tree_entries<'a>(
             owner,
             overlay,
             &mut entries,
+            &mut text_input_hit_targets,
             &mut content_extent,
             logical_atlas,
             rasterizer,
             viewport.scale_factor,
             viewport_rect,
             scroll_translation,
+            focused_text_input,
             false,
         );
     }
@@ -163,23 +203,79 @@ fn compose_tree_entries<'a>(
         entries.len(),
         layout_tree.overlays.len()
     );
-    (entries, content_extent)
+    (entries, content_extent, text_input_hit_targets)
 }
 
 fn sort_ordered_entries(entries: &mut [OrderedBlock<'_>]) {
     entries.sort_by_key(|(doc_order, block)| (block.z_order(), *doc_order));
 }
 
+fn collect_hit_targets_for_block(
+    block: &TreeLayoutBlock,
+    targets: &mut Vec<TextInputHitTarget>,
+    viewport_rect: TreeLayoutRect,
+    scroll_translation: [f32; 2],
+) {
+    let translation = match block.scroll_anchor {
+        ScrollAnchor::FollowsContent => scroll_translation,
+        ScrollAnchor::FixedToViewport => [0.0, 0.0],
+    };
+    let translated_rect = translate_layout_rect(block.rect, translation);
+    let translated_clip_rect = resolve_block_clip_rect(block, translation, viewport_rect);
+    push_text_input_hit_target(
+        targets,
+        block,
+        translated_rect,
+        translated_clip_rect,
+        viewport_rect,
+    );
+
+    if let TreeLayoutBlockContent::Stack { children } = &block.content {
+        for child in children {
+            collect_hit_targets_for_block(child, targets, viewport_rect, scroll_translation);
+        }
+    }
+}
+
+fn push_text_input_hit_target(
+    targets: &mut Vec<TextInputHitTarget>,
+    block: &TreeLayoutBlock,
+    rect: TreeLayoutRect,
+    clip_rect: TreeLayoutRect,
+    viewport_rect: TreeLayoutRect,
+) {
+    let TreeLayoutBlockContent::TextInput(text_input) = &block.content else {
+        return;
+    };
+    let visible_rect = rect.intersect(clip_rect).intersect(viewport_rect);
+    if visible_rect.is_empty() {
+        return;
+    }
+    targets.push(TextInputHitTarget::new(
+        text_input.text_input_id,
+        [
+            visible_rect.x(),
+            visible_rect.y(),
+            visible_rect.width(),
+            visible_rect.height(),
+        ],
+        block.z_order,
+        block.doc_order,
+    ));
+}
+
 fn collect_tree_entries<'a>(
     owner: &'a Bump,
     block: &TreeLayoutBlock,
     entries: &mut Vec<OrderedBlock<'a>>,
+    text_input_hit_targets: &mut Vec<TextInputHitTarget>,
     content_extent: &mut [f32; 2],
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
     viewport_rect: TreeLayoutRect,
     scroll_translation: [f32; 2],
+    focused_text_input: Option<crate::layout::tree::TextInputId>,
     measure_content_extent: bool,
 ) {
     if measure_content_extent {
@@ -195,6 +291,13 @@ fn collect_tree_entries<'a>(
     };
     let translated_rect = translate_layout_rect(block.rect, translation);
     let translated_clip_rect = resolve_block_clip_rect(block, translation, viewport_rect);
+    push_text_input_hit_target(
+        text_input_hit_targets,
+        block,
+        translated_rect,
+        translated_clip_rect,
+        viewport_rect,
+    );
 
     if let Some(materialized) = compose_tree_block(
         owner,
@@ -205,6 +308,7 @@ fn collect_tree_entries<'a>(
         logical_atlas,
         rasterizer,
         scale_factor,
+        focused_text_input,
     ) {
         entries.push((block.doc_order, materialized));
     }
@@ -215,12 +319,14 @@ fn collect_tree_entries<'a>(
                 owner,
                 child,
                 entries,
+                text_input_hit_targets,
                 content_extent,
                 logical_atlas,
                 rasterizer,
                 scale_factor,
                 viewport_rect,
                 scroll_translation,
+                focused_text_input,
                 measure_content_extent,
             );
         }
@@ -236,6 +342,7 @@ fn compose_tree_block<'a>(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    focused_text_input: Option<crate::layout::tree::TextInputId>,
 ) -> Option<BlockDataArena<'a>> {
     if rect.is_empty() || clip_rect.is_empty() {
         return None;
@@ -243,6 +350,7 @@ fn compose_tree_block<'a>(
 
     let mut batch = MaterializedPrimitives::default();
     push_block_background(&mut batch, block.background, rect, scale_factor);
+    push_block_border(&mut batch, block.border, rect, scale_factor);
     materialize_block_content(
         &mut batch,
         &block.content,
@@ -250,6 +358,7 @@ fn compose_tree_block<'a>(
         logical_atlas,
         rasterizer,
         scale_factor,
+        focused_text_input,
     );
     build_block_arena(owner, block, clip_rect, logical_atlas.generation, batch)
 }
@@ -265,6 +374,17 @@ fn push_block_background(
     }
 }
 
+fn push_block_border(
+    batch: &mut MaterializedPrimitives,
+    border: Option<BorderStyle>,
+    rect: TreeLayoutRect,
+    scale_factor: f32,
+) {
+    if let Some(border) = border {
+        push_border_instances(&mut batch.rects, rect, border, scale_factor);
+    }
+}
+
 fn materialize_block_content(
     batch: &mut MaterializedPrimitives,
     content: &TreeLayoutBlockContent,
@@ -272,6 +392,7 @@ fn materialize_block_content(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    focused_text_input: Option<crate::layout::tree::TextInputId>,
 ) {
     match content {
         TreeLayoutBlockContent::Stack { .. } => {}
@@ -294,6 +415,15 @@ fn materialize_block_content(
             &embed.kind,
             translation,
             scale_factor,
+        ),
+        TreeLayoutBlockContent::TextInput(text_input) => materialize_text_input(
+            batch,
+            text_input,
+            translation,
+            logical_atlas,
+            rasterizer,
+            scale_factor,
+            focused_text_input,
         ),
     }
 }
@@ -494,6 +624,36 @@ fn materialize_embed(
             intrinsic_size,
             scale_factor,
         ),
+    }
+}
+
+fn materialize_text_input(
+    batch: &mut MaterializedPrimitives,
+    text_input: &TreeLayoutTextInput,
+    translation: [f32; 2],
+    logical_atlas: &mut LogicalAtlas,
+    rasterizer: &FreeTypeRasterizer,
+    scale_factor: f32,
+    focused_text_input: Option<crate::layout::tree::TextInputId>,
+) {
+    for glyph in &text_input.glyphs {
+        push_glyph_instance(
+            &mut batch.glyphs,
+            glyph,
+            translation,
+            logical_atlas,
+            rasterizer,
+            scale_factor,
+        );
+    }
+    if focused_text_input == Some(text_input.text_input_id) {
+        push_rect_instance_with_layer(
+            &mut batch.rects,
+            translate_layout_rect(text_input.caret_rect, translation),
+            text_input.caret_color,
+            RenderLayer::Foreground,
+            scale_factor,
+        );
     }
 }
 
@@ -1152,6 +1312,7 @@ mod tests {
                 &rasterizer,
                 ViewportState::new(120, 90, 1.0, 7, None),
                 [0.0, 0.0],
+                None,
                 false,
                 512,
             )
@@ -1550,6 +1711,7 @@ mod tests {
                 &rasterizer,
                 ViewportState::new(120, 90, 1.0, 7, None),
                 scroll_offset,
+                None,
                 false,
                 512,
             )
@@ -1777,6 +1939,7 @@ mod tests {
             BlockNode::Stack(node) => node.node_id.value(),
             BlockNode::Paragraph(node) => node.node_id.value(),
             BlockNode::Embed(node) => node.node_id.value(),
+            BlockNode::TextInput(node) => node.node_id.value(),
             BlockNode::Overlay(node) => node.node_id.value(),
         }
     }

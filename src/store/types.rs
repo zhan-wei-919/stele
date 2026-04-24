@@ -13,6 +13,55 @@ pub(crate) struct InteractionState {
     pub(crate) focused_text_input: Option<TextInputId>,
 }
 
+/// Last composed viewport-space hit target for a text input block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TextInputHitTarget {
+    pub(crate) text_input_id: TextInputId,
+    rect: [f32; 4],
+    z_order: u32,
+    doc_order: u32,
+}
+
+impl TextInputHitTarget {
+    /// Creates a validated text input hit target.
+    pub(crate) fn new(
+        text_input_id: TextInputId,
+        rect: [f32; 4],
+        z_order: u32,
+        doc_order: u32,
+    ) -> Self {
+        debug_assert!(
+            rect.into_iter().all(f32::is_finite) && rect[2] >= 0.0 && rect[3] >= 0.0,
+            "text input hit target rect must stay finite and non-negative"
+        );
+        Self {
+            text_input_id,
+            rect,
+            z_order,
+            doc_order,
+        }
+    }
+
+    /// Returns whether the viewport-space point falls inside this target.
+    pub(crate) fn contains(self, point: [f32; 2]) -> bool {
+        point[0] >= self.rect[0]
+            && point[1] >= self.rect[1]
+            && point[0] <= self.rect[0] + self.rect[2]
+            && point[1] <= self.rect[1] + self.rect[3]
+    }
+
+    /// Returns the z/doc ordering tuple used to pick the topmost hit.
+    pub(crate) fn paint_order(self) -> (u32, u32) {
+        (self.z_order, self.doc_order)
+    }
+
+    /// Returns the viewport-space rectangle as x, y, width, height.
+    #[cfg(test)]
+    pub(crate) fn rect(self) -> [f32; 4] {
+        self.rect
+    }
+}
+
 impl InteractionState {
     /// Returns the current vertical scroll limit for the provided viewport/content pair.
     pub(crate) fn max_scroll_y(viewport: [f32; 2], content_extent: [f32; 2]) -> f32 {
