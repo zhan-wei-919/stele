@@ -6,7 +6,7 @@ use bumpalo::Bump;
 use tokio::runtime::Runtime;
 
 use super::super::input::TextInputId;
-use super::{compose_and_emit_with_post_clamp, Store};
+use super::{compose_and_emit_with_post_clamp, Invalidation, Store};
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::io::{
     Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButtonKind, MouseEvent,
@@ -28,6 +28,20 @@ fn build_rasterizer_for_perf_test() -> FreeTypeRasterizer {
     let font_discovery = FontDiscovery::new().expect("failed to discover system fonts");
     FreeTypeRasterizer::new(font_discovery, detect_subpixel_layout())
         .expect("failed to initialize FreeType rasterizer")
+}
+
+fn assert_compose_invalidation(outcome: super::ActionOutcome, expected: Invalidation) {
+    assert!(matches!(
+        outcome,
+        super::ActionOutcome::Compose { invalidation } if invalidation == expected
+    ));
+}
+
+fn compose_invalidation(outcome: super::ActionOutcome) -> Invalidation {
+    let super::ActionOutcome::Compose { invalidation } = outcome else {
+        panic!("expected compose outcome");
+    };
+    invalidation
 }
 
 #[test]
@@ -57,12 +71,7 @@ fn click_text_input_then_type_updates_that_input_only() {
 
     let focus_action = click_text_input_action(&store, first);
     let focus_outcome = store.handle_action(focus_action);
-    assert!(matches!(
-        focus_outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(focus_outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.focused_text_input, Some(first));
 
     let outcome = store.handle_action(key_input_action_with_kind(
@@ -70,12 +79,7 @@ fn click_text_input_then_type_updates_that_input_only() {
         KeyEventKind::Press,
     ));
 
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::REPREPARE_AND_COMPOSE);
     assert_eq!(text_input_text(&store, first), "a");
     assert_eq!(text_input_text(&store, second), "");
     assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
@@ -98,12 +102,7 @@ fn clicking_second_text_input_moves_focus_without_changing_first() {
     let second_focus = click_text_input_action(&store, second);
     let outcome = store.handle_action(second_focus);
 
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.focused_text_input, Some(second));
     assert_eq!(text_input_text(&store, first), "a");
     assert_eq!(text_input_text(&store, second), "");
@@ -127,12 +126,7 @@ fn focused_text_input_paste_writes_to_focused_state() {
         event: InputEvent::Paste("abc中".to_owned()),
     });
 
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::REPREPARE_AND_COMPOSE);
     assert_eq!(text_input_text(&store, first), "abc中");
     assert_eq!(text_input_cursor(&store, first), "abc中".len());
     assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
@@ -183,12 +177,7 @@ fn focused_text_input_navigation_and_backspace_update_text_state() {
         KeyCode::Backspace,
     ] {
         let outcome = store.handle_action(key_input_action_with_kind(code, KeyEventKind::Press));
-        assert!(matches!(
-            outcome,
-            super::ActionOutcome::Compose {
-                clear_tessellation_cache: false
-            }
-        ));
+        assert_compose_invalidation(outcome, Invalidation::REPREPARE_AND_COMPOSE);
     }
 
     assert_eq!(text_input_text(&store, first), "ab");
@@ -204,12 +193,7 @@ fn clicking_outside_clears_focus_and_later_text_is_ignored() {
     let focus_action = click_text_input_action(&store, first);
     let _ = store.handle_action(focus_action);
     let outcome = store.handle_action(mouse_down_action([900.0, 620.0]));
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.focused_text_input, None);
 
     let ignored = store.handle_action(key_input_action_with_kind(
@@ -229,10 +213,11 @@ fn text_edit_reprepare_makes_new_text_visible_on_next_compose() {
 
     let focus_action = click_text_input_action(&store, first);
     let _ = store.handle_action(focus_action);
-    let _ = store.handle_action(key_input_action_with_kind(
+    let invalidation = compose_invalidation(store.handle_action(key_input_action_with_kind(
         KeyCode::Char('z'),
         KeyEventKind::Press,
-    ));
+    )));
+    store.apply_invalidation(invalidation);
     let scene =
         store.compose_scene_buffer(Bump::with_capacity(4096), false, &SceneConfig::default());
 
@@ -244,6 +229,27 @@ fn text_edit_reprepare_makes_new_text_visible_on_next_compose() {
             .any(|block| !block.glyphs().is_empty()),
         "fresh compose must include glyphs for edited text"
     );
+}
+
+#[test]
+fn batched_text_edits_reprepare_once_after_merge() {
+    let mut store = build_text_input_store();
+    let first = TextInputId::new(1);
+    store.interaction.focused_text_input = Some(first);
+
+    let first_edit = compose_invalidation(store.handle_action(key_input_action_with_kind(
+        KeyCode::Char('a'),
+        KeyEventKind::Press,
+    )));
+    let second_edit = compose_invalidation(store.handle_action(key_input_action_with_kind(
+        KeyCode::Char('b'),
+        KeyEventKind::Press,
+    )));
+    let invalidation = first_edit.merge(second_edit);
+
+    assert_eq!(store.reprepare_count, 0);
+    store.apply_invalidation(invalidation);
+    assert_eq!(store.reprepare_count, 1);
 }
 
 #[test]
@@ -263,17 +269,24 @@ fn pointer_focus_refreshes_hit_targets_after_text_edit_before_compose() {
     let old_rect = text_input_hit_rect(&store, input);
     store.interaction.focused_text_input = Some(input);
 
-    let edit = store.handle_action(Action::Input {
-        event: InputEvent::Paste(
-            "wide text that expands the intrinsic input rect before the next compose".to_owned(),
-        ),
-    });
-    assert!(matches!(
-        edit,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    let mut pending_invalidation =
+        compose_invalidation(
+            store.handle_action(Action::Input {
+                event: InputEvent::Paste(
+                    "wide text that expands the intrinsic input rect before the next compose"
+                        .to_owned(),
+                ),
+            }),
+        );
+    assert_eq!(pending_invalidation, Invalidation::REPREPARE_AND_COMPOSE);
+
+    let click = mouse_down_action([
+        old_rect[0] + old_rect[2] + 10.0,
+        old_rect[1] + old_rect[3] * 0.5,
+    ]);
+    store.flush_invalidation_for_action(&mut pending_invalidation, &click);
+    assert_eq!(pending_invalidation, Invalidation::NONE);
+    assert_eq!(store.reprepare_count, 1);
 
     let fresh_targets = store.composer.text_input_hit_targets(
         &store.layout_cache,
@@ -290,10 +303,6 @@ fn pointer_focus_refreshes_hit_targets_after_text_edit_before_compose() {
         "test input must grow enough to expose stale hit targets"
     );
 
-    let click = mouse_down_action([
-        fresh_rect[0] + fresh_rect[2] - 1.0,
-        fresh_rect[1] + fresh_rect[3] * 0.5,
-    ]);
     let outcome = store.handle_action(click);
 
     assert!(matches!(outcome, super::ActionOutcome::NoChange));
@@ -318,12 +327,7 @@ fn configured_scroll_input_updates_offset_and_requests_compose() {
         }),
     });
 
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.scroll_offset, [0.0, 12.0]);
 }
 
@@ -381,12 +385,7 @@ fn mouse_scroll_uses_normalized_delta_signs() {
             event_time: Instant::now(),
         }),
     });
-    assert!(matches!(
-        down_outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(down_outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.scroll_offset, [0.0, 240.0]);
 
     let up_outcome = store.handle_action(Action::Input {
@@ -398,12 +397,7 @@ fn mouse_scroll_uses_normalized_delta_signs() {
             event_time: Instant::now(),
         }),
     });
-    assert!(matches!(
-        up_outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(up_outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.scroll_offset, [0.0, 200.0]);
 }
 
@@ -417,24 +411,14 @@ fn mouse_pixel_scroll_uses_scaled_delta_signs() {
         x: 0.0,
         y: -15.0,
     }));
-    assert!(matches!(
-        down_outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(down_outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.scroll_offset, [0.0, 150.0]);
 
     let up_outcome = store.handle_action(mouse_input_action(MouseScroll::PixelDelta {
         x: 0.0,
         y: 20.0,
     }));
-    assert!(matches!(
-        up_outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(up_outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.scroll_offset, [0.0, 110.0]);
 }
 
@@ -469,13 +453,30 @@ fn resize_pre_clamps_scroll_offset_against_known_extent() {
         event_time: Instant::now(),
     });
 
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.scroll_offset, [0.0, 100.0]);
+}
+
+#[test]
+fn resize_scale_change_resets_atlas_and_requests_compose() {
+    let mut store = build_store_for_test();
+
+    let invalidation = compose_invalidation(store.handle_action(Action::Resize {
+        width: 960,
+        height: 640,
+        scale_factor: 2.0,
+        viewport_revision: 1,
+        event_time: Instant::now(),
+    }));
+
+    assert_eq!(invalidation, Invalidation::RESET_ATLAS_AND_COMPOSE);
+    assert_eq!(store.logical_atlas.generation, 0);
+    assert_eq!(store.reprepare_count, 0);
+    store.apply_invalidation(invalidation);
+    assert_eq!(store.logical_atlas.generation, 1);
+    assert_eq!(store.reprepare_count, 0);
+    assert_eq!(store.logical_atlas.scale_factor_bits, 2.0f32.to_bits());
+    assert!(store.logical_atlas.take_pending_update().is_some());
 }
 
 #[test]
@@ -501,17 +502,14 @@ fn post_compose_clamp_triggers_one_recompose_after_reflow_shrinks_content() {
         viewport_revision: 1,
         event_time: Instant::now(),
     });
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
 
     let (mut view_update_rx, mut pool) = build_pool_for_test();
     let completed = Runtime::new()
         .expect("tokio runtime must build")
-        .block_on(async { compose_and_emit_with_post_clamp(&mut store, &mut pool, false).await });
+        .block_on(async {
+            compose_and_emit_with_post_clamp(&mut store, &mut pool, Invalidation::RECOMPOSE).await
+        });
 
     assert!(completed);
     assert_eq!(
@@ -549,12 +547,7 @@ fn reports_resize_recompute_and_diff_perf() {
         event_time: Instant::now(),
     });
     let recompute_elapsed = recompute_started.elapsed();
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
 
     let emit_started = Instant::now();
     let scene_buffer = store.compose_scene_buffer(Bump::with_capacity(4096), false, &scene_config);
@@ -626,12 +619,7 @@ fn tree_resize_reuses_prepared_tree_cache() {
         viewport_revision: 2,
         event_time: Instant::now(),
     });
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
 
     let second = store.compose_scene_buffer(Bump::with_capacity(4096), false, &scene_config);
     assert!(
@@ -930,12 +918,7 @@ fn prime_scroll_metrics(store: &mut Store, viewport: [f32; 2], content_extent: [
 
 fn assert_key_scrolls_to(store: &mut Store, code: KeyCode, kind: KeyEventKind, expected_y: f32) {
     let outcome = store.handle_action(key_input_action_with_kind(code, kind));
-    assert!(matches!(
-        outcome,
-        super::ActionOutcome::Compose {
-            clear_tessellation_cache: false
-        }
-    ));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.scroll_offset, [0.0, expected_y]);
 }
 

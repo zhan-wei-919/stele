@@ -15,6 +15,7 @@ use crate::scene::{SceneBuffer, SceneBufferPool, SceneConfig};
 use super::composer::Composer;
 use super::delegate::StoreDelegate;
 use super::input::{resolve_command, resolve_input_context, Command, InputContext};
+use super::invalidation::Invalidation;
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
 use super::reducer::{ReduceOutcome, Reducer};
@@ -43,6 +44,8 @@ pub(crate) struct Store {
     phase: StorePhase,
     #[cfg(test)]
     compose_test_delay: Duration,
+    #[cfg(test)]
+    reprepare_count: usize,
 }
 
 impl Store {
@@ -84,6 +87,8 @@ impl Store {
             phase: StorePhase::Idle,
             #[cfg(test)]
             compose_test_delay: Duration::ZERO,
+            #[cfg(test)]
+            reprepare_count: 0,
         }
     }
 
@@ -100,7 +105,7 @@ impl Store {
             self.delegate.filter_input(&self.interaction, event),
             InputFilter::VetoDefault
         ) {
-            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
+            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
         }
 
         let context = resolve_input_context(&self.model, &self.interaction);
@@ -111,33 +116,32 @@ impl Store {
             let outcome = self
                 .reducer
                 .apply_command(&mut self.interaction, self.config, command);
-            return self.reduce_to_action_outcome(outcome, false);
+            return self.reduce_to_action_outcome(outcome, Invalidation::RECOMPOSE);
         }
 
         let Some(command) = resolve_command(context, event, self.config) else {
-            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
+            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
         };
 
-        let outcome = match context {
+        let (outcome, invalidation) = match context {
             InputContext::Viewport => {
-                self.reducer
-                    .apply_command(&mut self.interaction, self.config, command)
+                let outcome =
+                    self.reducer
+                        .apply_command(&mut self.interaction, self.config, command);
+                (outcome, Invalidation::RECOMPOSE)
             }
             InputContext::TextInput(text_input) => {
                 let outcome = {
                     let Some(state) = self.model.text_inputs_mut().get_mut(text_input) else {
-                        return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
+                        return self
+                            .reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
                     };
                     self.reducer.apply_text_command(state, command)
                 };
-                if matches!(outcome, ReduceOutcome::Changed) {
-                    self.layout_cache
-                        .rebuild_from_model(&self.model, &self.rasterizer);
-                }
-                outcome
+                (outcome, Invalidation::REPREPARE_AND_COMPOSE)
             }
         };
-        self.reduce_to_action_outcome(outcome, false)
+        self.reduce_to_action_outcome(outcome, invalidation)
     }
 
     fn is_pointer_focus_event(&self, event: &InputEvent) -> bool {
@@ -205,13 +209,18 @@ impl Store {
             action,
             |logical_viewport| delegate.resize(model, logical_viewport),
         );
-        self.reduce_to_action_outcome(outcome, scale_changed)
+        let invalidation = if scale_changed {
+            Invalidation::RESET_ATLAS_AND_COMPOSE
+        } else {
+            Invalidation::RECOMPOSE
+        };
+        self.reduce_to_action_outcome(outcome, invalidation)
     }
 
     fn reduce_to_action_outcome(
         &mut self,
         outcome: ReduceOutcome,
-        clear_tessellation_cache: bool,
+        invalidation: Invalidation,
     ) -> ActionOutcome {
         match outcome {
             ReduceOutcome::Shutdown => ActionOutcome::Shutdown,
@@ -220,21 +229,34 @@ impl Store {
                 ActionOutcome::NoChange
             }
             ReduceOutcome::Changed => {
-                if clear_tessellation_cache {
-                    self.logical_atlas
-                        .reset_for_scale(self.viewport.scale_factor);
-                }
-                ActionOutcome::Compose {
-                    clear_tessellation_cache,
-                }
+                debug_assert!(
+                    invalidation.needs_compose(),
+                    "changed state must request a compose invalidation"
+                );
+                ActionOutcome::Compose { invalidation }
             }
+        }
+    }
+
+    fn apply_invalidation(&mut self, invalidation: Invalidation) {
+        if invalidation.needs_reprepare() {
+            #[cfg(test)]
+            {
+                self.reprepare_count += 1;
+            }
+            self.layout_cache
+                .rebuild_from_model(&self.model, &self.rasterizer);
+        }
+        if invalidation.resets_atlas() {
+            self.logical_atlas
+                .reset_for_scale(self.viewport.scale_factor);
         }
     }
 
     fn compose_scene_buffer(
         &mut self,
         owner: bumpalo::Bump,
-        clear_tessellation_cache: bool,
+        reset_tessellation_cache: bool,
         scene_config: &SceneConfig,
     ) -> SceneComposeResult {
         self.phase = StorePhase::Laying;
@@ -252,7 +274,7 @@ impl Store {
                 self.viewport,
                 self.interaction.scroll_offset,
                 self.interaction.focused_text_input,
-                clear_tessellation_cache,
+                reset_tessellation_cache,
                 scene_config.max_blocks_per_scene,
             );
             content_extent = outcome.content_extent;
@@ -282,7 +304,7 @@ impl Store {
 
 /// Runs the async store until shutdown or channel disconnect.
 pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: SceneBufferPool) {
-    if !compose_and_emit_with_post_clamp(&mut store, &mut pool, false).await {
+    if !compose_and_emit_with_post_clamp(&mut store, &mut pool, Invalidation::RECOMPOSE).await {
         return;
     }
 
@@ -291,14 +313,15 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
             break;
         };
         let batch = drain_action_batch(first_action, &mut handle);
-        let pre_offset = store.interaction.scroll_offset;
-        let pre_focus = store.interaction.focused_text_input;
-        let pre_text_input_revision = store.model.text_inputs().revision();
-        let mut saw_compose_request = false;
-        let mut clear_tessellation_cache = false;
+        let input_snapshot = batch
+            .is_input_batch
+            .then(|| InputBatchSnapshot::capture(&store));
+        let mut invalidation = Invalidation::NONE;
+        let mut pending_side_effects = Invalidation::NONE;
         let mut shutdown_seen = false;
 
         for action in batch.actions {
+            store.flush_invalidation_for_action(&mut pending_side_effects, &action);
             match store.handle_action(action) {
                 ActionOutcome::Shutdown => {
                     shutdown_seen = true;
@@ -306,10 +329,10 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
                 }
                 ActionOutcome::NoChange => {}
                 ActionOutcome::Compose {
-                    clear_tessellation_cache: clear_tessellation_cache_this_action,
+                    invalidation: action_invalidation,
                 } => {
-                    saw_compose_request = true;
-                    clear_tessellation_cache |= clear_tessellation_cache_this_action;
+                    invalidation = invalidation.merge(action_invalidation);
+                    pending_side_effects = pending_side_effects.merge(action_invalidation);
                 }
             }
         }
@@ -318,18 +341,14 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
             break;
         }
 
-        let needs_compose = if batch.is_input_batch {
-            store.interaction.scroll_offset != pre_offset
-                || store.interaction.focused_text_input != pre_focus
-                || store.model.text_inputs().revision() != pre_text_input_revision
-        } else {
-            saw_compose_request
-        };
+        if input_snapshot.is_some_and(|snapshot| !snapshot.changed(&store)) {
+            invalidation = Invalidation::NONE;
+            pending_side_effects = Invalidation::NONE;
+        }
 
-        if needs_compose {
-            if !compose_and_emit_with_post_clamp(&mut store, &mut pool, clear_tessellation_cache)
-                .await
-            {
+        if invalidation.needs_compose() {
+            store.apply_invalidation(pending_side_effects);
+            if !compose_and_emit_with_post_clamp(&mut store, &mut pool, invalidation).await {
                 break;
             }
         } else {
@@ -338,12 +357,30 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
     }
 }
 
+impl Store {
+    fn flush_invalidation_for_action(&mut self, pending: &mut Invalidation, action: &Action) {
+        if !pending.needs_reprepare() || !self.action_needs_fresh_hit_targets(action) {
+            return;
+        }
+        self.apply_invalidation(*pending);
+        *pending = Invalidation::NONE;
+    }
+
+    fn action_needs_fresh_hit_targets(&self, action: &Action) -> bool {
+        let Action::Input { event } = action else {
+            return false;
+        };
+        self.is_pointer_focus_event(event)
+    }
+}
+
 async fn compose_and_emit_with_post_clamp(
     store: &mut Store,
     pool: &mut SceneBufferPool,
-    clear_tessellation_cache: bool,
+    invalidation: Invalidation,
 ) -> bool {
-    let Some(content_extent) = compose_and_emit_once(store, pool, clear_tessellation_cache).await
+    let Some(content_extent) =
+        compose_and_emit_once(store, pool, invalidation.resets_atlas()).await
     else {
         return false;
     };
@@ -394,13 +431,13 @@ async fn compose_and_emit_with_post_clamp(
 async fn compose_and_emit_once(
     store: &mut Store,
     pool: &mut SceneBufferPool,
-    clear_tessellation_cache: bool,
+    reset_tessellation_cache: bool,
 ) -> Option<[f32; 2]> {
     let owner = match pool.acquire_empty_bump().await {
         Ok(owner) => owner,
         Err(_) => return None,
     };
-    let compose_result = store.compose_scene_buffer(owner, clear_tessellation_cache, pool.config());
+    let compose_result = store.compose_scene_buffer(owner, reset_tessellation_cache, pool.config());
     let content_extent = compose_result.content_extent;
     let scene_buffer = compose_result.scene_buffer;
 
@@ -451,7 +488,7 @@ async fn compose_and_emit_once(
 enum ActionOutcome {
     Shutdown,
     NoChange,
-    Compose { clear_tessellation_cache: bool },
+    Compose { invalidation: Invalidation },
 }
 
 struct SceneComposeResult {
@@ -462,6 +499,28 @@ struct SceneComposeResult {
 struct ActionBatch {
     actions: Vec<Action>,
     is_input_batch: bool,
+}
+
+struct InputBatchSnapshot {
+    scroll_offset: [f32; 2],
+    focused_text_input: Option<crate::layout::tree::TextInputId>,
+    text_input_revision: u64,
+}
+
+impl InputBatchSnapshot {
+    fn capture(store: &Store) -> Self {
+        Self {
+            scroll_offset: store.interaction.scroll_offset,
+            focused_text_input: store.interaction.focused_text_input,
+            text_input_revision: store.model.text_inputs().revision(),
+        }
+    }
+
+    fn changed(self, store: &Store) -> bool {
+        self.scroll_offset != store.interaction.scroll_offset
+            || self.focused_text_input != store.interaction.focused_text_input
+            || self.text_input_revision != store.model.text_inputs().revision()
+    }
 }
 
 fn duration_budget(limit_ms: u32) -> Duration {
@@ -499,8 +558,8 @@ fn drain_action_batch(first_action: Action, handle: &mut IoHandle) -> ActionBatc
             let mut actions = Vec::with_capacity(4);
             actions.push(input);
 
-            // Input bursts can collapse to a no-op scroll delta, so drain contiguous input first
-            // and decide whether a compose is needed from the batch's net effect.
+            // Input bursts often contain many small deltas, so drain contiguous input first
+            // and compose once for the highest-cost invalidation in the batch.
             while actions.len() < INPUT_COALESCE_DRAIN_COUNT {
                 match handle.try_next_action() {
                     Ok(next @ Action::Input { .. }) => actions.push(next),
