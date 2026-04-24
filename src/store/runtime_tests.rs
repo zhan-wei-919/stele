@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use bumpalo::Bump;
 use tokio::runtime::Runtime;
 
+use super::super::input::TextInputId;
 use super::{compose_and_emit_with_post_clamp, Store};
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::io::{
@@ -43,8 +44,73 @@ fn typed_input_actions_do_not_trigger_scene_recompute() {
     });
 
     assert!(matches!(outcome, super::ActionOutcome::NoChange));
+    assert_eq!(store.text_input.text(), "");
     assert!(store.logical_atlas.take_pending_update().is_none());
     assert_eq!(store.phase, StorePhase::Idle);
+}
+
+#[test]
+fn focused_text_input_char_writes_through_real_input_action() {
+    let mut store = build_store_for_test();
+    store.interaction.focused_text_input = Some(TextInputId::new(1));
+
+    let outcome = store.handle_action(key_input_action_with_kind(
+        KeyCode::Char('a'),
+        KeyEventKind::Press,
+    ));
+
+    assert!(matches!(
+        outcome,
+        super::ActionOutcome::Compose {
+            clear_tessellation_cache: false
+        }
+    ));
+    assert_eq!(store.text_input.text(), "a");
+    assert_eq!(store.text_input.cursor_index(), 1);
+    assert_eq!(store.interaction.scroll_offset, [0.0, 0.0]);
+}
+
+#[test]
+fn focused_text_input_down_key_does_not_scroll_viewport() {
+    let mut store = build_store_for_test();
+    prime_scroll_metrics(&mut store, [960.0, 640.0], [960.0, 2_000.0]);
+    store.interaction.focused_text_input = Some(TextInputId::new(1));
+    store.interaction.scroll_offset = [0.0, 120.0];
+
+    let outcome = store.handle_action(key_input_action_with_kind(
+        KeyCode::Down,
+        KeyEventKind::Press,
+    ));
+
+    assert!(matches!(outcome, super::ActionOutcome::NoChange));
+    assert_eq!(store.interaction.scroll_offset, [0.0, 120.0]);
+    assert_eq!(store.text_input.text(), "");
+}
+
+#[test]
+fn focused_text_input_navigation_and_backspace_update_text_state() {
+    let mut store = build_store_for_test();
+    store.interaction.focused_text_input = Some(TextInputId::new(1));
+
+    for code in [
+        KeyCode::Char('a'),
+        KeyCode::Char('c'),
+        KeyCode::Left,
+        KeyCode::Char('b'),
+        KeyCode::Right,
+        KeyCode::Backspace,
+    ] {
+        let outcome = store.handle_action(key_input_action_with_kind(code, KeyEventKind::Press));
+        assert!(matches!(
+            outcome,
+            super::ActionOutcome::Compose {
+                clear_tessellation_cache: false
+            }
+        ));
+    }
+
+    assert_eq!(store.text_input.text(), "ab");
+    assert_eq!(store.text_input.cursor_index(), 2);
 }
 
 #[test]

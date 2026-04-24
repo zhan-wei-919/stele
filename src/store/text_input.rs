@@ -1,25 +1,29 @@
-//! Store-local text input buffer used by reducer-level edit command tests.
+//! Store-local text input buffer for focused text editing commands.
 
 /// Editable text and cursor state for a focused text input target.
-// Reserved for focus plumbing; reducer tests lock down the state contract first.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TextInputState {
     text: String,
     cursor_index: usize,
+    revision: u64,
 }
 
-// Reserved for focus plumbing; reducer tests lock down the state contract first.
-#[cfg_attr(not(test), allow(dead_code))]
 impl TextInputState {
     /// Returns the current text contents.
+    #[cfg(test)]
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     /// Returns the cursor as a UTF-8 byte index into the current text.
+    #[cfg(test)]
     pub(crate) fn cursor_index(&self) -> usize {
         self.cursor_index
+    }
+
+    /// Returns the monotonic state revision used for cheap change detection.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Inserts one character at the cursor and advances past it.
@@ -27,6 +31,7 @@ impl TextInputState {
         self.debug_assert_cursor_boundary();
         self.text.insert(self.cursor_index, ch);
         self.cursor_index += ch.len_utf8();
+        self.bump_revision();
     }
 
     /// Deletes the character before the cursor when one exists.
@@ -38,6 +43,7 @@ impl TextInputState {
 
         self.text.drain(previous_index..self.cursor_index);
         self.cursor_index = previous_index;
+        self.bump_revision();
         true
     }
 
@@ -49,6 +55,7 @@ impl TextInputState {
         };
 
         self.cursor_index = previous_index;
+        self.bump_revision();
         true
     }
 
@@ -60,7 +67,15 @@ impl TextInputState {
         };
 
         self.cursor_index = next_index;
+        self.bump_revision();
         true
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("text input revision exhausted");
     }
 
     fn previous_cursor_index(&self) -> Option<usize> {
@@ -80,5 +95,37 @@ impl TextInputState {
             self.text.is_char_boundary(self.cursor_index),
             "text input cursor must stay on a UTF-8 character boundary"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revision_increments_only_when_state_changes() {
+        let mut text_input = TextInputState::default();
+
+        assert_eq!(text_input.revision(), 0);
+        assert!(!text_input.delete_backward());
+        assert!(!text_input.move_cursor_left());
+        assert_eq!(text_input.revision(), 0);
+
+        text_input.insert_char('a');
+        assert_eq!(text_input.revision(), 1);
+
+        assert!(text_input.move_cursor_left());
+        assert_eq!(text_input.revision(), 2);
+        assert!(!text_input.move_cursor_left());
+        assert_eq!(text_input.revision(), 2);
+
+        assert!(text_input.move_cursor_right());
+        assert_eq!(text_input.revision(), 3);
+        assert!(!text_input.move_cursor_right());
+        assert_eq!(text_input.revision(), 3);
+
+        assert!(text_input.delete_backward());
+        assert_eq!(text_input.revision(), 4);
+        assert_eq!(text_input.text(), "");
     }
 }

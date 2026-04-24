@@ -89,8 +89,6 @@ impl Reducer {
     }
 
     /// Applies one resolved text edit command to a text input state.
-    // Reserved for focus plumbing; reducer tests lock down the text command contract first.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn apply_text_command(
         &self,
         text_input: &mut TextInputState,
@@ -279,6 +277,7 @@ mod tests {
             scroll_offset: [0.0, 120.0],
             last_known_viewport: [960.0, 640.0],
             last_known_content_extent: [960.0, 2_000.0],
+            ..InteractionState::default()
         };
         let previous = interaction;
 

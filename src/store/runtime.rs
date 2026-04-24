@@ -12,10 +12,11 @@ use crate::scene::{SceneBuffer, SceneBufferPool, SceneConfig};
 
 use super::composer::Composer;
 use super::delegate::StoreDelegate;
-use super::input::{resolve_command, resolve_input_context};
+use super::input::{resolve_command, resolve_input_context, InputContext};
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
 use super::reducer::{ReduceOutcome, Reducer};
+use super::text_input::TextInputState;
 use super::types::{InputFilter, InteractionConfig, InteractionState, StorePhase, ViewportState};
 
 const INPUT_COALESCE_DRAIN_COUNT: usize = 256;
@@ -24,6 +25,7 @@ const INPUT_COALESCE_DRAIN_COUNT: usize = 256;
 pub(crate) struct Store {
     viewport: ViewportState,
     interaction: InteractionState,
+    text_input: TextInputState,
     config: InteractionConfig,
     model: Model,
     layout_cache: LayoutCache,
@@ -61,6 +63,7 @@ impl Store {
         Self {
             viewport,
             interaction: InteractionState::default(),
+            text_input: TextInputState::default(),
             config,
             model,
             layout_cache,
@@ -96,9 +99,15 @@ impl Store {
             return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
         };
 
-        let outcome = self
-            .reducer
-            .apply_command(&mut self.interaction, self.config, command);
+        let outcome = match context {
+            InputContext::Viewport => {
+                self.reducer
+                    .apply_command(&mut self.interaction, self.config, command)
+            }
+            InputContext::TextInput(_) => self
+                .reducer
+                .apply_text_command(&mut self.text_input, command),
+        };
         self.reduce_to_action_outcome(outcome, false)
     }
 
@@ -199,6 +208,7 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
         };
         let batch = drain_action_batch(first_action, &mut handle);
         let pre_offset = store.interaction.scroll_offset;
+        let pre_text_input_revision = store.text_input.revision();
         let mut saw_compose_request = false;
         let mut clear_tessellation_cache = false;
         let mut shutdown_seen = false;
@@ -225,6 +235,7 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
 
         let needs_compose = if batch.is_input_batch {
             store.interaction.scroll_offset != pre_offset
+                || store.text_input.revision() != pre_text_input_revision
         } else {
             saw_compose_request
         };

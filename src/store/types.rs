@@ -2,12 +2,15 @@
 
 use std::time::Instant;
 
+use super::input::TextInputId;
+
 /// Store-owned interaction state derived from input batches and compose results.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct InteractionState {
     pub(crate) scroll_offset: [f32; 2],
     pub(crate) last_known_content_extent: [f32; 2],
     pub(crate) last_known_viewport: [f32; 2],
+    pub(crate) focused_text_input: Option<TextInputId>,
 }
 
 impl InteractionState {

@@ -7,8 +7,6 @@ use super::super::types::InteractionState;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InputContext {
     Viewport,
-    // Reserved until focus plumbing can produce text-input contexts.
-    #[cfg_attr(not(test), allow(dead_code))]
     TextInput(TextInputId),
 }
 
@@ -17,8 +15,10 @@ pub(crate) enum InputContext {
 pub(crate) struct TextInputId(u64);
 
 impl TextInputId {
-    /// Creates a text input identity for tests and future focus plumbing.
-    #[cfg(test)]
+    /// Creates a text input identity.
+    // The current slice consumes explicit focus but does not yet include the production focus owner.
+    // Keep construction crate-local so that owner can set focus without exposing the raw id.
+    #[allow(dead_code)]
     pub(crate) fn new(value: u64) -> Self {
         Self(value)
     }
@@ -27,9 +27,12 @@ impl TextInputId {
 /// Resolves the active store input context from model and interaction state.
 pub(crate) fn resolve_input_context(
     _model: &Model,
-    _interaction: &InteractionState,
+    interaction: &InteractionState,
 ) -> InputContext {
-    InputContext::Viewport
+    match interaction.focused_text_input {
+        Some(text_input) => InputContext::TextInput(text_input),
+        None => InputContext::Viewport,
+    }
 }
 
 #[cfg(test)]
@@ -41,13 +44,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_context_resolves_to_viewport() {
+    fn default_context_resolves_to_viewport() {
         let model = Model::new(empty_document());
         let interaction = InteractionState::default();
 
         assert_eq!(
             resolve_input_context(&model, &interaction),
             InputContext::Viewport
+        );
+    }
+
+    #[test]
+    fn focused_text_input_resolves_to_text_input_context() {
+        let model = Model::new(empty_document());
+        let text_input = TextInputId::new(1);
+        let mut interaction = InteractionState::default();
+        interaction.focused_text_input = Some(text_input);
+
+        assert_eq!(
+            resolve_input_context(&model, &interaction),
+            InputContext::TextInput(text_input)
         );
     }
 
