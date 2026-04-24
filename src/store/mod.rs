@@ -7,6 +7,7 @@ mod logical_atlas;
 mod model;
 mod reducer;
 mod runtime;
+mod text_input;
 pub(crate) mod types;
 
 pub(crate) use delegate::StoreDelegate;
