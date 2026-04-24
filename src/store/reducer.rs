@@ -1,51 +1,33 @@
-//! Reducer that updates store-owned model state from incoming actions.
+//! Reducer that updates store-owned state from system actions and input commands.
 
 use log::warn;
 
 use crate::io::Action;
 
-use super::delegate::StoreDelegate;
-use super::input::{resolve_command, Command};
-use super::model::Model;
-use super::types::{InputFilter, InteractionConfig, InteractionState, ViewportState};
+use super::input::Command;
+use super::types::{InteractionConfig, InteractionState, ViewportState};
 
-/// Result of applying one action to the store.
+/// Result of applying one state transition to the store.
 pub(crate) enum ReduceOutcome {
     NoChange,
     Changed,
     Shutdown,
 }
 
-/// Applies actions to the logical model and viewport state.
+/// Applies validated commands and system actions to store-owned state.
 pub(crate) struct Reducer;
 
 impl Reducer {
-    /// Applies one action to the current store state.
-    pub(crate) fn apply(
+    /// Applies one non-input action to the current store state.
+    pub(crate) fn apply_system_action(
         &self,
-        model: &mut Model,
         viewport: &mut ViewportState,
         interaction: &mut InteractionState,
-        config: InteractionConfig,
         action: &Action,
-        delegate: &dyn StoreDelegate,
+        mut resize_model: impl FnMut([f32; 2]),
     ) -> ReduceOutcome {
         match action {
             Action::Shutdown => ReduceOutcome::Shutdown,
-            Action::Input { event } => {
-                if matches!(
-                    delegate.filter_input(interaction, event),
-                    InputFilter::VetoDefault
-                ) {
-                    return ReduceOutcome::NoChange;
-                }
-
-                let Some(command) = resolve_command(event, config) else {
-                    return ReduceOutcome::NoChange;
-                };
-
-                self.apply_command(interaction, config, command)
-            }
             Action::Resize {
                 width,
                 height,
@@ -71,17 +53,22 @@ impl Reducer {
                     *viewport_revision,
                     Some(*event_time),
                 );
-                delegate.resize(model, viewport.logical_size());
+                resize_model(viewport.logical_size());
                 interaction.clamp_scroll_offset(
                     viewport.logical_size(),
                     interaction.last_known_content_extent,
                 );
                 ReduceOutcome::Changed
             }
+            _ => {
+                debug_assert!(false, "input actions must be handled by the store");
+                ReduceOutcome::NoChange
+            }
         }
     }
 
-    fn apply_command(
+    /// Applies one resolved input command to the current interaction state.
+    pub(crate) fn apply_command(
         &self,
         interaction: &mut InteractionState,
         config: InteractionConfig,

@@ -7,15 +7,16 @@ use log::{info, warn};
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::font::FreeTypeRasterizer;
-use crate::io::{Action, IoHandle, SceneFrame, ViewUpdate};
+use crate::io::{Action, InputEvent, IoHandle, SceneFrame, ViewUpdate};
 use crate::scene::{SceneBuffer, SceneBufferPool, SceneConfig};
 
 use super::composer::Composer;
 use super::delegate::StoreDelegate;
+use super::input::resolve_command;
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
 use super::reducer::{ReduceOutcome, Reducer};
-use super::types::{InteractionConfig, InteractionState, StorePhase, ViewportState};
+use super::types::{InputFilter, InteractionConfig, InteractionState, StorePhase, ViewportState};
 
 const INPUT_COALESCE_DRAIN_COUNT: usize = 256;
 
@@ -76,32 +77,66 @@ impl Store {
 
     fn handle_action(&mut self, action: Action) -> ActionOutcome {
         self.phase = StorePhase::Reducing;
+        match action {
+            Action::Input { event } => self.handle_input_event(&event),
+            action => self.handle_system_action(&action),
+        }
+    }
+
+    fn handle_input_event(&mut self, event: &InputEvent) -> ActionOutcome {
+        if matches!(
+            self.delegate.filter_input(&self.interaction, event),
+            InputFilter::VetoDefault
+        ) {
+            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
+        }
+
+        let Some(command) = resolve_command(event, self.config) else {
+            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, false);
+        };
+
+        let outcome = self
+            .reducer
+            .apply_command(&mut self.interaction, self.config, command);
+        self.reduce_to_action_outcome(outcome, false)
+    }
+
+    fn handle_system_action(&mut self, action: &Action) -> ActionOutcome {
         let scale_changed = matches!(
-            &action,
+            action,
             Action::Resize { scale_factor, .. }
                 if self.viewport.scale_factor.to_bits() != scale_factor.to_bits()
         );
 
-        match self.reducer.apply(
-            &mut self.model,
+        let delegate = self.delegate.as_ref();
+        let model = &mut self.model;
+        let outcome = self.reducer.apply_system_action(
             &mut self.viewport,
             &mut self.interaction,
-            self.config,
-            &action,
-            self.delegate.as_ref(),
-        ) {
+            action,
+            |logical_viewport| delegate.resize(model, logical_viewport),
+        );
+        self.reduce_to_action_outcome(outcome, scale_changed)
+    }
+
+    fn reduce_to_action_outcome(
+        &mut self,
+        outcome: ReduceOutcome,
+        clear_tessellation_cache: bool,
+    ) -> ActionOutcome {
+        match outcome {
             ReduceOutcome::Shutdown => ActionOutcome::Shutdown,
             ReduceOutcome::NoChange => {
                 self.phase = StorePhase::Idle;
                 ActionOutcome::NoChange
             }
             ReduceOutcome::Changed => {
-                if scale_changed {
+                if clear_tessellation_cache {
                     self.logical_atlas
                         .reset_for_scale(self.viewport.scale_factor);
                 }
                 ActionOutcome::Compose {
-                    clear_tessellation_cache: scale_changed,
+                    clear_tessellation_cache,
                 }
             }
         }
