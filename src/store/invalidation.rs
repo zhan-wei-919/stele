@@ -45,6 +45,15 @@ impl Invalidation {
         }
     }
 
+    /// Returns the remaining compose work after prepared layout data has been refreshed early.
+    pub(crate) fn with_reprepare_consumed(self) -> Self {
+        Self {
+            needs_compose: self.needs_compose,
+            needs_reprepare: false,
+            resets_atlas: self.resets_atlas,
+        }
+    }
+
     /// Returns whether this transition needs a fresh scene composition.
     pub(crate) fn needs_compose(self) -> bool {
         self.needs_compose
@@ -96,6 +105,18 @@ mod tests {
         assert!(Invalidation::REPREPARE_AND_COMPOSE.needs_reprepare());
         assert!(!Invalidation::RESET_ATLAS_AND_COMPOSE.needs_reprepare());
         assert!(Invalidation::REPREPARE_RESET_ATLAS_AND_COMPOSE.needs_reprepare());
+    }
+
+    #[test]
+    fn consumed_reprepare_preserves_remaining_compose_work() {
+        assert_eq!(
+            Invalidation::REPREPARE_AND_COMPOSE.with_reprepare_consumed(),
+            Invalidation::RECOMPOSE
+        );
+        assert_eq!(
+            Invalidation::REPREPARE_RESET_ATLAS_AND_COMPOSE.with_reprepare_consumed(),
+            Invalidation::RESET_ATLAS_AND_COMPOSE
+        );
     }
 
     #[test]

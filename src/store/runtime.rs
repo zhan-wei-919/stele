@@ -238,19 +238,23 @@ impl Store {
         }
     }
 
-    fn apply_invalidation(&mut self, invalidation: Invalidation) {
+    fn consume_invalidation_effects(&mut self, invalidation: Invalidation) {
         if invalidation.needs_reprepare() {
-            #[cfg(test)]
-            {
-                self.reprepare_count += 1;
-            }
-            self.layout_cache
-                .rebuild_from_model(&self.model, &self.rasterizer);
+            self.reprepare_layout_cache();
         }
         if invalidation.resets_atlas() {
             self.logical_atlas
                 .reset_for_scale(self.viewport.scale_factor);
         }
+    }
+
+    fn reprepare_layout_cache(&mut self) {
+        #[cfg(test)]
+        {
+            self.reprepare_count += 1;
+        }
+        self.layout_cache
+            .rebuild_from_model(&self.model, &self.rasterizer);
     }
 
     fn compose_scene_buffer(
@@ -317,11 +321,10 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
             .is_input_batch
             .then(|| InputBatchSnapshot::capture(&store));
         let mut invalidation = Invalidation::NONE;
-        let mut pending_side_effects = Invalidation::NONE;
         let mut shutdown_seen = false;
 
         for action in batch.actions {
-            store.flush_invalidation_for_action(&mut pending_side_effects, &action);
+            store.flush_invalidation_for_action(&mut invalidation, &action);
             match store.handle_action(action) {
                 ActionOutcome::Shutdown => {
                     shutdown_seen = true;
@@ -332,7 +335,6 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
                     invalidation: action_invalidation,
                 } => {
                     invalidation = invalidation.merge(action_invalidation);
-                    pending_side_effects = pending_side_effects.merge(action_invalidation);
                 }
             }
         }
@@ -343,11 +345,9 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
 
         if input_snapshot.is_some_and(|snapshot| !snapshot.changed(&store)) {
             invalidation = Invalidation::NONE;
-            pending_side_effects = Invalidation::NONE;
         }
 
         if invalidation.needs_compose() {
-            store.apply_invalidation(pending_side_effects);
             if !compose_and_emit_with_post_clamp(&mut store, &mut pool, invalidation).await {
                 break;
             }
@@ -362,8 +362,8 @@ impl Store {
         if !pending.needs_reprepare() || !self.action_needs_fresh_hit_targets(action) {
             return;
         }
-        self.apply_invalidation(*pending);
-        *pending = Invalidation::NONE;
+        self.reprepare_layout_cache();
+        *pending = pending.with_reprepare_consumed();
     }
 
     fn action_needs_fresh_hit_targets(&self, action: &Action) -> bool {
@@ -379,6 +379,7 @@ async fn compose_and_emit_with_post_clamp(
     pool: &mut SceneBufferPool,
     invalidation: Invalidation,
 ) -> bool {
+    store.consume_invalidation_effects(invalidation);
     let Some(content_extent) =
         compose_and_emit_once(store, pool, invalidation.resets_atlas()).await
     else {

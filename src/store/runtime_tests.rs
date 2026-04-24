@@ -217,18 +217,14 @@ fn text_edit_reprepare_makes_new_text_visible_on_next_compose() {
         KeyCode::Char('z'),
         KeyEventKind::Press,
     )));
-    store.apply_invalidation(invalidation);
-    let scene =
-        store.compose_scene_buffer(Bump::with_capacity(4096), false, &SceneConfig::default());
+    assert_eq!(store.reprepare_count, 0);
+    let updates = compose_and_drain_updates(&mut store, invalidation);
 
     assert!(
-        scene
-            .scene_buffer
-            .blocks()
-            .iter()
-            .any(|block| !block.glyphs().is_empty()),
+        scene_updates_have_glyphs(updates),
         "fresh compose must include glyphs for edited text"
     );
+    assert_eq!(store.reprepare_count, 1);
 }
 
 #[test]
@@ -248,7 +244,7 @@ fn batched_text_edits_reprepare_once_after_merge() {
     let invalidation = first_edit.merge(second_edit);
 
     assert_eq!(store.reprepare_count, 0);
-    store.apply_invalidation(invalidation);
+    let _updates = compose_and_drain_updates(&mut store, invalidation);
     assert_eq!(store.reprepare_count, 1);
 }
 
@@ -285,7 +281,7 @@ fn pointer_focus_refreshes_hit_targets_after_text_edit_before_compose() {
         old_rect[1] + old_rect[3] * 0.5,
     ]);
     store.flush_invalidation_for_action(&mut pending_invalidation, &click);
-    assert_eq!(pending_invalidation, Invalidation::NONE);
+    assert_eq!(pending_invalidation, Invalidation::RECOMPOSE);
     assert_eq!(store.reprepare_count, 1);
 
     let fresh_targets = store.composer.text_input_hit_targets(
@@ -472,11 +468,13 @@ fn resize_scale_change_resets_atlas_and_requests_compose() {
     assert_eq!(invalidation, Invalidation::RESET_ATLAS_AND_COMPOSE);
     assert_eq!(store.logical_atlas.generation, 0);
     assert_eq!(store.reprepare_count, 0);
-    store.apply_invalidation(invalidation);
+    let updates = compose_and_drain_updates(&mut store, invalidation);
     assert_eq!(store.logical_atlas.generation, 1);
     assert_eq!(store.reprepare_count, 0);
     assert_eq!(store.logical_atlas.scale_factor_bits, 2.0f32.to_bits());
-    assert!(store.logical_atlas.take_pending_update().is_some());
+    assert!(updates
+        .iter()
+        .any(|update| matches!(update, ViewUpdate::Atlas(atlas) if atlas.generation == 1)));
 }
 
 #[test]
@@ -1012,6 +1010,28 @@ fn drain_view_updates(
         updates.push(update);
     }
     updates
+}
+
+fn compose_and_drain_updates(store: &mut Store, invalidation: Invalidation) -> Vec<ViewUpdate> {
+    let (mut view_update_rx, mut pool) = build_pool_for_test();
+    let completed = Runtime::new()
+        .expect("tokio runtime must build")
+        .block_on(async { compose_and_emit_with_post_clamp(store, &mut pool, invalidation).await });
+    assert!(completed);
+    drain_view_updates(&mut view_update_rx)
+}
+
+fn scene_updates_have_glyphs(updates: Vec<ViewUpdate>) -> bool {
+    updates.into_iter().any(|update| {
+        let ViewUpdate::Scene(frame) = update else {
+            return false;
+        };
+        frame
+            .into_buffer()
+            .blocks()
+            .iter()
+            .any(|block| !block.glyphs().is_empty())
+    })
 }
 
 fn build_pool_for_test() -> (tokio::sync::mpsc::Receiver<ViewUpdate>, SceneBufferPool) {
