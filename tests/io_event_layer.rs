@@ -19,6 +19,7 @@ mod renderer;
 #[path = "../src/scene/mod.rs"]
 mod scene;
 
+use event::clipboard::{ClipboardProvider, ClipboardReadError};
 use event::handlers::KeyboardInput;
 use event::{EventRouter, RouteAction, ViewportSnapshot};
 use io::{
@@ -35,6 +36,16 @@ use winit::keyboard::ModifiersState;
 fn build_router() -> (EventRouter, mpsc::UnboundedReceiver<Action>) {
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     (EventRouter::new(action_tx), action_rx)
+}
+
+fn build_router_with_clipboard(
+    clipboard: FakeClipboard,
+) -> (EventRouter, mpsc::UnboundedReceiver<Action>) {
+    let (action_tx, action_rx) = mpsc::unbounded_channel();
+    (
+        EventRouter::new_with_clipboard(action_tx, Box::new(clipboard)),
+        action_rx,
+    )
 }
 
 #[test]
@@ -96,6 +107,36 @@ fn keyboard_input_is_routed_to_actions() {
                 modifiers: KeyModifiers::NONE,
                 kind: KeyEventKind::Press,
             }),
+        }
+    );
+}
+
+#[test]
+fn paste_shortcut_is_routed_to_paste_action() {
+    let (mut router, mut action_rx) =
+        build_router_with_clipboard(FakeClipboard::with_text("pasted text"));
+    let viewport = ViewportSnapshot::new(PhysicalSize::new(1280, 720), 2.0);
+
+    assert_eq!(
+        router.dispatch(
+            &WindowEvent::ModifiersChanged(ModifiersState::CONTROL.into()),
+            viewport,
+        ),
+        RouteAction::None
+    );
+    assert_eq!(
+        router.dispatch_keyboard_input(KeyboardInput::new(
+            KeyCode::Char('v'),
+            KeyEventKind::Press,
+            false,
+        )),
+        RouteAction::None
+    );
+
+    assert_eq!(
+        action_rx.try_recv().expect("paste action must be emitted"),
+        Action::Input {
+            event: InputEvent::Paste("pasted text".to_owned()),
         }
     );
 }
@@ -534,5 +575,23 @@ fn expect_mouse_event(action: Action, before: Instant, after: Instant) -> MouseE
             mouse_event
         }
         other => panic!("expected mouse event, got {other:?}"),
+    }
+}
+
+struct FakeClipboard {
+    text: Result<String, ClipboardReadError>,
+}
+
+impl FakeClipboard {
+    fn with_text(text: &str) -> Self {
+        Self {
+            text: Ok(text.to_owned()),
+        }
+    }
+}
+
+impl ClipboardProvider for FakeClipboard {
+    fn read_text(&mut self) -> Result<String, ClipboardReadError> {
+        self.text.clone()
     }
 }

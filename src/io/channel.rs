@@ -166,13 +166,9 @@ pub(crate) enum MouseEventKind {
 pub(crate) enum InputEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
-    // Phase 4 consumes paste facts in the store before a platform clipboard producer is wired in.
-    #[allow(dead_code)]
     Paste(String),
     CursorLeft,
-    FocusChanged {
-        focused: bool,
-    },
+    FocusChanged { focused: bool },
 }
 
 /// Unified input action sent from winit into the async store.

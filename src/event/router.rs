@@ -6,6 +6,7 @@ use log::{info, warn};
 use tokio::sync::mpsc::UnboundedSender;
 use winit::event::WindowEvent;
 
+use super::clipboard::{ClipboardProvider, SystemClipboard};
 use super::handlers::{
     key_modifiers_from_winit, mouse_button_kind, KeyboardHandler, KeyboardInput, MouseHandler,
     ViewportHandler, ViewportSnapshot, ViewportUpdate,
@@ -29,6 +30,7 @@ pub(crate) struct EventRouter {
     keyboard_handler: KeyboardHandler,
     mouse_handler: MouseHandler,
     viewport_handler: ViewportHandler,
+    clipboard: Box<dyn ClipboardProvider>,
     current_modifiers: KeyModifiers,
     latest_pointer_physical: Option<[f64; 2]>,
     latest_pointer_logical: Option<[f32; 2]>,
@@ -38,10 +40,27 @@ pub(crate) struct EventRouter {
 impl EventRouter {
     /// Creates the router and all event-specific handlers.
     pub(crate) fn new(action_tx: UnboundedSender<Action>) -> Self {
+        Self::with_clipboard(action_tx, Box::new(SystemClipboard::new()))
+    }
+
+    /// Creates the router with an injected clipboard provider for tests.
+    #[cfg(test)]
+    pub(crate) fn new_with_clipboard(
+        action_tx: UnboundedSender<Action>,
+        clipboard: Box<dyn ClipboardProvider>,
+    ) -> Self {
+        Self::with_clipboard(action_tx, clipboard)
+    }
+
+    fn with_clipboard(
+        action_tx: UnboundedSender<Action>,
+        clipboard: Box<dyn ClipboardProvider>,
+    ) -> Self {
         Self {
             keyboard_handler: KeyboardHandler::new(action_tx.clone()),
             mouse_handler: MouseHandler::new(action_tx.clone()),
             viewport_handler: ViewportHandler::new(action_tx.clone()),
+            clipboard,
             action_tx,
             current_modifiers: KeyModifiers::NONE,
             latest_pointer_physical: None,
@@ -161,6 +180,11 @@ impl EventRouter {
 
         let modifiers = self.effective_modifiers_for_key(&input);
         self.update_modifier_snapshot_from_key(&input);
+        if is_paste_shortcut(&input, modifiers) {
+            self.dispatch_paste();
+            return RouteAction::None;
+        }
+
         self.keyboard_handler.handle(input, modifiers);
         RouteAction::None
     }
@@ -221,6 +245,15 @@ impl EventRouter {
         self.pressed_mouse_buttons.last().copied()
     }
 
+    fn dispatch_paste(&mut self) {
+        // TODO(input): Move clipboard reads behind a serial input producer so desktop
+        // clipboard IPC cannot block winit dispatch while paste ordering stays deterministic.
+        match self.clipboard.read_text() {
+            Ok(text) => self.send_input_event(InputEvent::Paste(text)),
+            Err(error) => warn!("event.clipboard_read_failed error={}", error),
+        }
+    }
+
     fn send_input_event(&self, event: InputEvent) {
         if self.action_tx.send(Action::Input { event }).is_err() {
             warn!("event.router.send_failed action=input");
@@ -243,6 +276,20 @@ impl EventRouter {
             _ => "other",
         }
     }
+}
+
+fn is_paste_shortcut(input: &KeyboardInput, modifiers: KeyModifiers) -> bool {
+    if input.kind() != KeyEventKind::Press {
+        return false;
+    }
+    if modifiers.alt() {
+        return false;
+    }
+    if !modifiers.control() && !modifiers.super_key() {
+        return false;
+    }
+
+    matches!(input.code(), KeyCode::Char('v' | 'V'))
 }
 
 fn physical_to_logical(physical_position: [f64; 2], scale_factor: f32) -> Option<[f32; 2]> {
@@ -274,6 +321,7 @@ mod tests {
     use winit::keyboard::ModifiersState;
 
     use super::EventRouter;
+    use crate::event::clipboard::{ClipboardProvider, ClipboardReadError};
     use crate::event::handlers::KeyboardInput;
     use crate::event::{RouteAction, ViewportSnapshot};
     use crate::io::{
@@ -284,6 +332,145 @@ mod tests {
     fn build_router() -> (EventRouter, mpsc::UnboundedReceiver<Action>) {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         (EventRouter::new(action_tx), action_rx)
+    }
+
+    fn build_router_with_clipboard(
+        clipboard: FakeClipboard,
+    ) -> (EventRouter, mpsc::UnboundedReceiver<Action>) {
+        let (action_tx, action_rx) = mpsc::unbounded_channel();
+        (
+            EventRouter::new_with_clipboard(action_tx, Box::new(clipboard)),
+            action_rx,
+        )
+    }
+
+    #[test]
+    fn control_v_press_emits_paste_from_clipboard() {
+        let (mut router, mut action_rx) =
+            build_router_with_clipboard(FakeClipboard::with_text("from clipboard"));
+        router.current_modifiers = KeyModifiers::CONTROL;
+
+        assert_eq!(
+            router.dispatch_keyboard_input(KeyboardInput::new(
+                KeyCode::Char('v'),
+                KeyEventKind::Press,
+                false,
+            )),
+            RouteAction::None
+        );
+
+        assert_eq!(
+            action_rx.try_recv().expect("paste action must be emitted"),
+            Action::Input {
+                event: InputEvent::Paste("from clipboard".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn super_v_press_emits_paste_from_clipboard() {
+        let (mut router, mut action_rx) =
+            build_router_with_clipboard(FakeClipboard::with_text("command paste"));
+        router.current_modifiers = KeyModifiers::SUPER;
+
+        router.dispatch_keyboard_input(KeyboardInput::new(
+            KeyCode::Char('V'),
+            KeyEventKind::Press,
+            false,
+        ));
+
+        assert_eq!(
+            action_rx.try_recv().expect("paste action must be emitted"),
+            Action::Input {
+                event: InputEvent::Paste("command paste".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn shift_does_not_block_paste_but_alt_does() {
+        let (mut shift_router, mut shift_rx) =
+            build_router_with_clipboard(FakeClipboard::with_text("shift paste"));
+        shift_router.current_modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        shift_router.dispatch_keyboard_input(KeyboardInput::new(
+            KeyCode::Char('V'),
+            KeyEventKind::Press,
+            false,
+        ));
+
+        assert_eq!(
+            shift_rx.try_recv().expect("shift paste must be emitted"),
+            Action::Input {
+                event: InputEvent::Paste("shift paste".to_owned()),
+            }
+        );
+
+        let (mut alt_router, mut alt_rx) =
+            build_router_with_clipboard(FakeClipboard::with_text("blocked"));
+        alt_router.current_modifiers = KeyModifiers::CONTROL | KeyModifiers::ALT;
+
+        alt_router.dispatch_keyboard_input(KeyboardInput::new(
+            KeyCode::Char('v'),
+            KeyEventKind::Press,
+            false,
+        ));
+
+        assert_eq!(
+            alt_rx
+                .try_recv()
+                .expect("alt-modified key must stay a key fact"),
+            Action::Input {
+                event: InputEvent::Key(KeyEvent {
+                    code: KeyCode::Char('v'),
+                    modifiers: KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    kind: KeyEventKind::Press,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn synthetic_repeat_release_and_clipboard_errors_do_not_emit_paste() {
+        let (mut synthetic_router, mut synthetic_rx) =
+            build_router_with_clipboard(FakeClipboard::with_text("synthetic"));
+        synthetic_router.current_modifiers = KeyModifiers::CONTROL;
+        synthetic_router.dispatch_keyboard_input(KeyboardInput::new(
+            KeyCode::Char('v'),
+            KeyEventKind::Press,
+            true,
+        ));
+        assert!(synthetic_rx.try_recv().is_err());
+
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            let (mut router, mut action_rx) =
+                build_router_with_clipboard(FakeClipboard::with_text("repeat"));
+            router.current_modifiers = KeyModifiers::CONTROL;
+            router.dispatch_keyboard_input(KeyboardInput::new(KeyCode::Char('v'), kind, false));
+
+            assert_eq!(
+                action_rx
+                    .try_recv()
+                    .expect("non-press paste shortcut must stay a key fact"),
+                Action::Input {
+                    event: InputEvent::Key(KeyEvent {
+                        code: KeyCode::Char('v'),
+                        modifiers: KeyModifiers::CONTROL,
+                        kind,
+                    }),
+                }
+            );
+        }
+
+        let (mut error_router, mut error_rx) =
+            build_router_with_clipboard(FakeClipboard::with_error());
+        error_router.current_modifiers = KeyModifiers::CONTROL;
+        error_router.dispatch_keyboard_input(KeyboardInput::new(
+            KeyCode::Char('v'),
+            KeyEventKind::Press,
+            false,
+        ));
+        assert!(error_rx.try_recv().is_err());
     }
 
     #[test]
@@ -561,6 +748,30 @@ mod tests {
                 assert_eq!(mouse_event.modifiers, KeyModifiers::NONE);
             }
             other => panic!("expected drag mouse event, got {other:?}"),
+        }
+    }
+
+    struct FakeClipboard {
+        text: Result<String, ClipboardReadError>,
+    }
+
+    impl FakeClipboard {
+        fn with_text(text: &str) -> Self {
+            Self {
+                text: Ok(text.to_owned()),
+            }
+        }
+
+        fn with_error() -> Self {
+            Self {
+                text: Err(ClipboardReadError::ReadFailed("test failure".to_owned())),
+            }
+        }
+    }
+
+    impl ClipboardProvider for FakeClipboard {
+        fn read_text(&mut self) -> Result<String, ClipboardReadError> {
+            self.text.clone()
         }
     }
 }
