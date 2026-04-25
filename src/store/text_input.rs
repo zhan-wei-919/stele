@@ -6,12 +6,40 @@ use crate::layout::tree::{
     is_insertable_text_input_char, single_line_text, BlockNode, DocumentTree, TextInputId,
 };
 
+/// Caret or range selection expressed as UTF-8 byte indices.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TextSelection {
+    pub(crate) anchor: usize,
+    pub(crate) focus: usize,
+}
+
+impl TextSelection {
+    /// Creates a collapsed selection at one caret index.
+    pub(crate) fn collapsed(index: usize) -> Self {
+        Self {
+            anchor: index,
+            focus: index,
+        }
+    }
+
+    /// Returns whether the selection is a caret without selected text.
+    pub(crate) fn is_collapsed(self) -> bool {
+        self.anchor == self.focus
+    }
+
+    /// Returns the selected byte range in document order.
+    pub(crate) fn range(self) -> std::ops::Range<usize> {
+        self.anchor.min(self.focus)..self.anchor.max(self.focus)
+    }
+}
+
 /// Editable text and cursor state for a focused text input target.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TextInputState {
     text: String,
-    cursor_index: usize,
-    revision: u64,
+    selection: TextSelection,
+    content_revision: u64,
+    visual_revision: u64,
 }
 
 impl TextInputState {
@@ -19,9 +47,10 @@ impl TextInputState {
     pub(crate) fn new(text: impl Into<String>) -> Self {
         let text = single_line_text(&text.into());
         Self {
-            cursor_index: text.len(),
+            selection: TextSelection::collapsed(text.len()),
             text,
-            revision: 0,
+            content_revision: 0,
+            visual_revision: 0,
         }
     }
 
@@ -32,30 +61,54 @@ impl TextInputState {
 
     /// Returns the cursor as a UTF-8 byte index into the current text.
     pub(crate) fn cursor_index(&self) -> usize {
-        self.cursor_index
+        self.selection.focus
     }
 
-    /// Returns the monotonic state revision used for cheap change detection.
+    /// Returns the current caret/selection state.
+    pub(crate) fn selection(&self) -> TextSelection {
+        self.selection
+    }
+
+    /// Returns the aggregate monotonic revision used for cheap change detection.
     pub(crate) fn revision(&self) -> u64 {
-        self.revision
+        self.content_revision.wrapping_add(self.visual_revision)
+    }
+
+    /// Returns the monotonic revision for text content changes.
+    pub(crate) fn content_revision(&self) -> u64 {
+        self.content_revision
+    }
+
+    /// Returns the monotonic revision for caret and selection changes.
+    #[cfg(test)]
+    pub(crate) fn visual_revision(&self) -> u64 {
+        self.visual_revision
+    }
+
+    /// Returns the current selected text when the selection is non-empty.
+    pub(crate) fn selected_text(&self) -> Option<&str> {
+        self.debug_assert_selection_boundaries(self.selection);
+        (!self.selection.is_collapsed()).then(|| {
+            self.text
+                .get(self.selection.range())
+                .expect("text input selection must stay on UTF-8 boundaries")
+        })
     }
 
     /// Inserts one character at the cursor and advances past it.
     pub(crate) fn insert_char(&mut self, ch: char) -> bool {
-        self.debug_assert_cursor_boundary();
         if !is_insertable_text_input_char(ch) {
             return false;
         }
 
-        self.text.insert(self.cursor_index, ch);
-        self.cursor_index += ch.len_utf8();
-        self.bump_revision();
+        let mut inserted = [0u8; 4];
+        let inserted = ch.encode_utf8(&mut inserted);
+        self.replace_selection(inserted);
         true
     }
 
     /// Inserts text at the cursor and advances past the inserted bytes.
     pub(crate) fn insert_text(&mut self, text: &str) -> bool {
-        self.debug_assert_cursor_boundary();
         if text.is_empty() {
             return false;
         }
@@ -65,72 +118,190 @@ impl TextInputState {
             return false;
         }
 
-        self.text.insert_str(self.cursor_index, &inserted);
-        self.cursor_index += inserted.len();
-        self.bump_revision();
+        self.replace_selection(&inserted);
         true
     }
 
-    /// Deletes the character before the cursor when one exists.
+    /// Deletes the selected text or the character before the cursor.
     pub(crate) fn delete_backward(&mut self) -> bool {
-        self.debug_assert_cursor_boundary();
+        self.debug_assert_selection_boundaries(self.selection);
+        if self.delete_selection() {
+            return true;
+        }
+
         let Some(previous_index) = self.previous_cursor_index() else {
             return false;
         };
 
-        self.text.drain(previous_index..self.cursor_index);
-        self.cursor_index = previous_index;
-        self.bump_revision();
+        self.text.drain(previous_index..self.cursor_index());
+        self.bump_content_revision();
+        self.set_selection(TextSelection::collapsed(previous_index));
         true
     }
 
-    /// Moves the cursor left by one character when possible.
-    pub(crate) fn move_cursor_left(&mut self) -> bool {
-        self.debug_assert_cursor_boundary();
-        let Some(previous_index) = self.previous_cursor_index() else {
-            return false;
-        };
+    /// Deletes the selected text or the character after the cursor.
+    pub(crate) fn delete_forward(&mut self) -> bool {
+        self.debug_assert_selection_boundaries(self.selection);
+        if self.delete_selection() {
+            return true;
+        }
 
-        self.cursor_index = previous_index;
-        self.bump_revision();
-        true
-    }
-
-    /// Moves the cursor right by one character when possible.
-    pub(crate) fn move_cursor_right(&mut self) -> bool {
-        self.debug_assert_cursor_boundary();
         let Some(next_index) = self.next_cursor_index() else {
             return false;
         };
 
-        self.cursor_index = next_index;
-        self.bump_revision();
+        self.text.drain(self.cursor_index()..next_index);
+        self.bump_content_revision();
         true
     }
 
-    fn bump_revision(&mut self) {
-        self.revision = self
-            .revision
+    /// Deletes the selected text without falling back to adjacent characters.
+    pub(crate) fn delete_selected_text(&mut self) -> bool {
+        self.debug_assert_selection_boundaries(self.selection);
+        self.delete_selection()
+    }
+
+    /// Selects the full text contents.
+    pub(crate) fn select_all(&mut self) -> bool {
+        self.set_selection(TextSelection {
+            anchor: 0,
+            focus: self.text.len(),
+        })
+    }
+
+    /// Collapses the selection to one validated caret index.
+    pub(crate) fn set_cursor(&mut self, index: usize) -> bool {
+        if !self.index_is_valid(index) {
+            return false;
+        }
+        self.set_selection(TextSelection::collapsed(index))
+    }
+
+    /// Extends the current selection focus to one validated caret index.
+    pub(crate) fn extend_selection_to(&mut self, index: usize) -> bool {
+        if !self.index_is_valid(index) {
+            return false;
+        }
+        self.set_selection(TextSelection {
+            anchor: self.selection.anchor,
+            focus: index,
+        })
+    }
+
+    /// Moves the caret left by one character, optionally extending selection.
+    pub(crate) fn move_cursor_left(&mut self, extend: bool) -> bool {
+        self.debug_assert_selection_boundaries(self.selection);
+        if !extend && !self.selection.is_collapsed() {
+            return self.set_cursor(self.selection.range().start);
+        }
+
+        let Some(previous_index) = self.previous_cursor_index() else {
+            return false;
+        };
+
+        self.move_cursor_to(previous_index, extend)
+    }
+
+    /// Moves the caret right by one character, optionally extending selection.
+    pub(crate) fn move_cursor_right(&mut self, extend: bool) -> bool {
+        self.debug_assert_selection_boundaries(self.selection);
+        if !extend && !self.selection.is_collapsed() {
+            return self.set_cursor(self.selection.range().end);
+        }
+
+        let Some(next_index) = self.next_cursor_index() else {
+            return false;
+        };
+
+        self.move_cursor_to(next_index, extend)
+    }
+
+    /// Moves the caret to the start of the text, optionally extending selection.
+    pub(crate) fn move_cursor_to_start(&mut self, extend: bool) -> bool {
+        self.move_cursor_to(0, extend)
+    }
+
+    /// Moves the caret to the end of the text, optionally extending selection.
+    pub(crate) fn move_cursor_to_end(&mut self, extend: bool) -> bool {
+        self.move_cursor_to(self.text.len(), extend)
+    }
+
+    fn replace_selection(&mut self, inserted: &str) {
+        self.debug_assert_selection_boundaries(self.selection);
+        let range = self.selection.range();
+        let caret_index = range.start + inserted.len();
+        self.text.replace_range(range, inserted);
+        self.bump_content_revision();
+        self.set_selection(TextSelection::collapsed(caret_index));
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let range = self.selection.range();
+        if range.is_empty() {
+            return false;
+        }
+
+        let caret_index = range.start;
+        self.text.drain(range);
+        self.bump_content_revision();
+        self.set_selection(TextSelection::collapsed(caret_index));
+        true
+    }
+
+    fn move_cursor_to(&mut self, index: usize, extend: bool) -> bool {
+        if extend {
+            self.extend_selection_to(index)
+        } else {
+            self.set_cursor(index)
+        }
+    }
+
+    fn set_selection(&mut self, selection: TextSelection) -> bool {
+        self.debug_assert_selection_boundaries(selection);
+        if self.selection == selection {
+            return false;
+        }
+        self.selection = selection;
+        self.bump_visual_revision();
+        true
+    }
+
+    fn bump_content_revision(&mut self) {
+        self.content_revision = self
+            .content_revision
             .checked_add(1)
-            .expect("text input revision exhausted");
+            .expect("text input content revision exhausted");
+    }
+
+    fn bump_visual_revision(&mut self) {
+        self.visual_revision = self
+            .visual_revision
+            .checked_add(1)
+            .expect("text input visual revision exhausted");
     }
 
     fn previous_cursor_index(&self) -> Option<usize> {
-        self.text[..self.cursor_index]
+        self.text[..self.cursor_index()]
             .char_indices()
             .next_back()
             .map(|(index, _)| index)
     }
 
     fn next_cursor_index(&self) -> Option<usize> {
-        let ch = self.text[self.cursor_index..].chars().next()?;
-        Some(self.cursor_index + ch.len_utf8())
+        let ch = self.text[self.cursor_index()..].chars().next()?;
+        Some(self.cursor_index() + ch.len_utf8())
     }
 
-    fn debug_assert_cursor_boundary(&self) {
+    fn index_is_valid(&self, index: usize) -> bool {
+        let valid = index <= self.text.len() && self.text.is_char_boundary(index);
+        debug_assert!(valid, "text input selection must stay on UTF-8 boundaries");
+        valid
+    }
+
+    fn debug_assert_selection_boundaries(&self, selection: TextSelection) {
         debug_assert!(
-            self.text.is_char_boundary(self.cursor_index),
-            "text input cursor must stay on a UTF-8 character boundary"
+            self.index_is_valid(selection.anchor) && self.index_is_valid(selection.focus),
+            "text input selection must stay on UTF-8 boundaries"
         );
     }
 }
@@ -182,6 +353,13 @@ impl TextInputStates {
         })
     }
 
+    /// Returns a monotonic aggregate revision for text content changes.
+    pub(crate) fn content_revision(&self) -> u64 {
+        self.states.values().fold(0u64, |revision, state| {
+            revision.wrapping_add(state.content_revision())
+        })
+    }
+
     /// Returns the current text and cursor snapshot used by the prepare stage.
     pub(crate) fn prepare_value(
         &self,
@@ -224,24 +402,27 @@ mod tests {
 
         assert_eq!(text_input.revision(), 0);
         assert!(!text_input.delete_backward());
-        assert!(!text_input.move_cursor_left());
+        assert!(!text_input.move_cursor_left(false));
         assert_eq!(text_input.revision(), 0);
 
         assert!(text_input.insert_char('a'));
-        assert_eq!(text_input.revision(), 1);
+        assert_eq!(text_input.content_revision(), 1);
+        assert_eq!(text_input.visual_revision(), 1);
 
-        assert!(text_input.move_cursor_left());
-        assert_eq!(text_input.revision(), 2);
-        assert!(!text_input.move_cursor_left());
-        assert_eq!(text_input.revision(), 2);
+        assert!(text_input.move_cursor_left(false));
+        assert_eq!(text_input.content_revision(), 1);
+        assert_eq!(text_input.visual_revision(), 2);
+        assert!(!text_input.move_cursor_left(false));
+        assert_eq!(text_input.visual_revision(), 2);
 
-        assert!(text_input.move_cursor_right());
-        assert_eq!(text_input.revision(), 3);
-        assert!(!text_input.move_cursor_right());
-        assert_eq!(text_input.revision(), 3);
+        assert!(text_input.move_cursor_right(false));
+        assert_eq!(text_input.visual_revision(), 3);
+        assert!(!text_input.move_cursor_right(false));
+        assert_eq!(text_input.visual_revision(), 3);
 
         assert!(text_input.delete_backward());
-        assert_eq!(text_input.revision(), 4);
+        assert_eq!(text_input.content_revision(), 2);
+        assert_eq!(text_input.visual_revision(), 4);
         assert_eq!(text_input.text(), "");
     }
 
@@ -252,7 +433,7 @@ mod tests {
         assert!(text_input.insert_char('a'));
         assert!(text_input.insert_char('中'));
         assert!(text_input.insert_char('d'));
-        assert!(text_input.move_cursor_left());
+        assert!(text_input.move_cursor_left(false));
 
         assert!(text_input.insert_text("βc"));
 
@@ -300,7 +481,89 @@ mod tests {
 
         assert_eq!(text_input.text(), "abc中");
         assert_eq!(text_input.cursor_index(), "abc中".len());
-        assert_eq!(text_input.revision(), 1);
+        assert_eq!(text_input.content_revision(), 1);
+        assert_eq!(text_input.visual_revision(), 1);
+    }
+
+    #[test]
+    fn selection_replacement_and_deletion_preserve_utf8_boundaries() {
+        let mut text_input = TextInputState::new("a中βd");
+        assert!(text_input.move_cursor_left(true));
+        assert!(text_input.move_cursor_left(true));
+        assert_eq!(text_input.selected_text(), Some("βd"));
+
+        assert!(text_input.insert_text("ç"));
+
+        assert_eq!(text_input.text(), "a中ç");
+        assert_eq!(text_input.cursor_index(), "a中ç".len());
+        assert!(text_input
+            .text()
+            .is_char_boundary(text_input.cursor_index()));
+
+        assert!(text_input.move_cursor_left(true));
+        assert_eq!(text_input.selected_text(), Some("ç"));
+        assert!(text_input.delete_backward());
+        assert_eq!(text_input.text(), "a中");
+        assert_eq!(text_input.cursor_index(), "a中".len());
+    }
+
+    #[test]
+    fn delete_forward_deletes_selection_or_next_character() {
+        let mut text_input = TextInputState::new("a中b");
+        assert!(text_input.set_cursor(1));
+        assert!(text_input.delete_forward());
+        assert_eq!(text_input.text(), "ab");
+        assert_eq!(text_input.cursor_index(), 1);
+
+        assert!(text_input.move_cursor_right(true));
+        assert_eq!(text_input.selected_text(), Some("b"));
+        assert!(text_input.delete_forward());
+        assert_eq!(text_input.text(), "a");
+        assert_eq!(text_input.cursor_index(), 1);
+    }
+
+    #[test]
+    fn select_all_and_home_end_update_only_visual_revision() {
+        let mut text_input = TextInputState::new("a中b");
+        let content_revision = text_input.content_revision();
+
+        assert!(text_input.select_all());
+        assert_eq!(text_input.selected_text(), Some("a中b"));
+        assert_eq!(text_input.content_revision(), content_revision);
+        assert_eq!(text_input.visual_revision(), 1);
+
+        assert!(text_input.move_cursor_to_start(false));
+        assert_eq!(text_input.selection(), TextSelection::collapsed(0));
+        assert!(text_input.move_cursor_to_end(true));
+        assert_eq!(
+            text_input.selection(),
+            TextSelection {
+                anchor: 0,
+                focus: "a中b".len(),
+            }
+        );
+        assert_eq!(text_input.content_revision(), content_revision);
+    }
+
+    #[test]
+    fn shift_arrows_extend_selection_and_plain_arrows_collapse() {
+        let mut text_input = TextInputState::new("a中b");
+
+        assert!(text_input.move_cursor_left(true));
+        assert_eq!(text_input.selected_text(), Some("b"));
+        assert!(text_input.move_cursor_left(true));
+        assert_eq!(text_input.selected_text(), Some("中b"));
+        assert!(text_input.move_cursor_right(false));
+        assert_eq!(
+            text_input.selection(),
+            TextSelection::collapsed("a中b".len())
+        );
+        assert!(text_input.move_cursor_left(true));
+        assert!(text_input.move_cursor_left(false));
+        assert_eq!(
+            text_input.selection(),
+            TextSelection::collapsed("a中".len())
+        );
     }
 
     #[test]

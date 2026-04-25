@@ -8,7 +8,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::font::FreeTypeRasterizer;
 use crate::io::{
-    Action, InputEvent, IoHandle, MouseButtonKind, MouseEventKind, SceneFrame, ViewUpdate,
+    Action, InputEvent, IoHandle, MouseButtonKind, MouseEventKind, SceneFrame, UiEffect, ViewUpdate,
 };
 use crate::scene::{SceneBuffer, SceneBufferPool, SceneConfig};
 
@@ -33,6 +33,7 @@ pub(crate) struct Store {
     text_input_hit_targets_revision: u64,
     text_input_hit_targets_scroll_offset: [f32; 2],
     text_input_hit_targets_viewport: [f32; 2],
+    pending_ui_effects: Vec<UiEffect>,
     config: InteractionConfig,
     model: Model,
     layout_cache: LayoutCache,
@@ -76,6 +77,7 @@ impl Store {
             text_input_hit_targets_revision: 0,
             text_input_hit_targets_scroll_offset: [0.0, 0.0],
             text_input_hit_targets_viewport: [0.0, 0.0],
+            pending_ui_effects: Vec::new(),
             config,
             model,
             layout_cache,
@@ -109,19 +111,15 @@ impl Store {
         }
 
         let context = resolve_input_context(&self.model, &self.interaction);
-        if self.is_pointer_focus_event(event) {
-            self.refresh_text_input_hit_targets_if_stale();
-        }
-        if let Some(command) = self.resolve_pointer_focus_command(event) {
-            let outcome = self
-                .reducer
-                .apply_command(&mut self.interaction, self.config, command);
-            return self.reduce_to_action_outcome(outcome, Invalidation::RECOMPOSE);
-        }
-
         let Some(command) = resolve_command(context, event, self.config) else {
             return self.reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
         };
+        if command_needs_fresh_hit_targets(&command) {
+            self.refresh_text_input_hit_targets_if_stale();
+        }
+        if pointer_text_command(&command) {
+            return self.handle_pointer_text_command(command);
+        }
 
         let (outcome, invalidation) = match context {
             InputContext::Viewport => {
@@ -131,27 +129,25 @@ impl Store {
                 (outcome, Invalidation::RECOMPOSE)
             }
             InputContext::TextInput(text_input) => {
-                let outcome = {
-                    let Some(state) = self.model.text_inputs_mut().get_mut(text_input) else {
-                        return self
-                            .reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
-                    };
-                    self.reducer.apply_text_command(state, command)
+                let Some(state) = self.model.text_inputs_mut().get_mut(text_input) else {
+                    return self
+                        .reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
                 };
-                (outcome, Invalidation::REPREPARE_AND_COMPOSE)
+                let effect = clipboard_effect_for_command(state, &command);
+                let before_content_revision = state.content_revision();
+                let outcome = self.reducer.apply_text_command(state, command);
+                let invalidation = if state.content_revision() != before_content_revision {
+                    Invalidation::REPREPARE_AND_COMPOSE
+                } else {
+                    Invalidation::RECOMPOSE
+                };
+                if let Some(effect) = effect {
+                    self.pending_ui_effects.push(effect);
+                }
+                (outcome, invalidation)
             }
         };
         self.reduce_to_action_outcome(outcome, invalidation)
-    }
-
-    fn is_pointer_focus_event(&self, event: &InputEvent) -> bool {
-        let InputEvent::Mouse(mouse_event) = event else {
-            return false;
-        };
-        matches!(
-            mouse_event.kind,
-            MouseEventKind::Down(MouseButtonKind::Left)
-        ) && mouse_event.logical_position.is_some()
     }
 
     fn refresh_text_input_hit_targets_if_stale(&mut self) {
@@ -167,31 +163,74 @@ impl Store {
     }
 
     fn text_input_hit_targets_are_stale(&self) -> bool {
-        self.text_input_hit_targets_revision != self.model.text_inputs().revision()
+        self.text_input_hit_targets_revision != self.model.text_inputs().content_revision()
             || self.text_input_hit_targets_scroll_offset != self.interaction.scroll_offset
             || self.text_input_hit_targets_viewport != self.viewport.logical_size()
     }
 
     fn record_text_input_hit_target_state(&mut self) {
-        self.text_input_hit_targets_revision = self.model.text_inputs().revision();
+        self.text_input_hit_targets_revision = self.model.text_inputs().content_revision();
         self.text_input_hit_targets_scroll_offset = self.interaction.scroll_offset;
         self.text_input_hit_targets_viewport = self.viewport.logical_size();
     }
 
-    fn resolve_pointer_focus_command(&self, event: &InputEvent) -> Option<Command> {
-        let InputEvent::Mouse(mouse_event) = event else {
-            return None;
-        };
-        if !matches!(
-            mouse_event.kind,
-            MouseEventKind::Down(MouseButtonKind::Left)
-        ) {
-            return None;
+    fn handle_pointer_text_command(&mut self, command: Command) -> ActionOutcome {
+        match command {
+            Command::SetCursorFromPoint { point } => self.set_cursor_from_point(point),
+            Command::ExtendSelectionFromPoint { point } => self.extend_selection_from_point(point),
+            Command::EndSelectionDrag => {
+                self.interaction.selection_drag_text_input = None;
+                self.reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE)
+            }
+            _ => self.reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE),
         }
-        let position = mouse_event.logical_position?;
-        let focused = hit_test_text_inputs(&self.text_input_hit_targets, position)
-            .filter(|text_input| self.model.text_inputs().contains(*text_input));
-        Some(Command::FocusTextInput(focused))
+    }
+
+    fn set_cursor_from_point(&mut self, point: [f32; 2]) -> ActionOutcome {
+        let target = hit_test_text_input_targets(&self.text_input_hit_targets, point)
+            .filter(|target| self.model.text_inputs().contains(target.text_input_id));
+        let previous_focus = self.interaction.focused_text_input;
+        let previous_drag = self.interaction.selection_drag_text_input;
+
+        let Some(target) = target else {
+            self.interaction.focused_text_input = None;
+            self.interaction.selection_drag_text_input = None;
+            let changed = previous_focus.is_some() || previous_drag.is_some();
+            return self
+                .reduce_to_action_outcome(changed_outcome(changed), Invalidation::RECOMPOSE);
+        };
+
+        let text_input = target.text_input_id;
+        self.interaction.focused_text_input = Some(text_input);
+        self.interaction.selection_drag_text_input = Some(text_input);
+        let index = target.nearest_caret_index(point);
+        let selection_changed = self
+            .model
+            .text_inputs_mut()
+            .get_mut(text_input)
+            .is_some_and(|state| state.set_cursor(index));
+        let interaction_changed =
+            previous_focus != Some(text_input) || previous_drag != Some(text_input);
+        self.reduce_to_action_outcome(
+            changed_outcome(selection_changed || interaction_changed),
+            Invalidation::RECOMPOSE,
+        )
+    }
+
+    fn extend_selection_from_point(&mut self, point: [f32; 2]) -> ActionOutcome {
+        let Some(text_input) = self.interaction.selection_drag_text_input else {
+            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
+        };
+        let Some(target) = text_input_target(&self.text_input_hit_targets, text_input) else {
+            return self.reduce_to_action_outcome(ReduceOutcome::NoChange, Invalidation::NONE);
+        };
+        let index = target.nearest_caret_index(point);
+        let changed = self
+            .model
+            .text_inputs_mut()
+            .get_mut(text_input)
+            .is_some_and(|state| state.extend_selection_to(index));
+        self.reduce_to_action_outcome(changed_outcome(changed), Invalidation::RECOMPOSE)
     }
 
     fn handle_system_action(&mut self, action: &Action) -> ActionOutcome {
@@ -325,7 +364,9 @@ pub(crate) async fn run_store(mut store: Store, mut handle: IoHandle, mut pool: 
 
         for action in batch.actions {
             store.flush_invalidation_for_action(&mut invalidation, &action);
-            match store.handle_action(action) {
+            let action_outcome = store.handle_action(action);
+            store.flush_pending_ui_effects(&handle);
+            match action_outcome {
                 ActionOutcome::Shutdown => {
                     shutdown_seen = true;
                     break;
@@ -370,7 +411,18 @@ impl Store {
         let Action::Input { event } = action else {
             return false;
         };
-        self.is_pointer_focus_event(event)
+        input_event_needs_fresh_hit_targets(event)
+    }
+
+    fn flush_pending_ui_effects(&mut self, handle: &IoHandle) {
+        for effect in self.pending_ui_effects.drain(..) {
+            let _ = handle.dispatch_ui_effect(effect);
+        }
+    }
+
+    #[cfg(test)]
+    fn drain_pending_ui_effects_for_test(&mut self) -> Vec<UiEffect> {
+        self.pending_ui_effects.drain(..).collect()
     }
 }
 
@@ -533,16 +585,69 @@ fn update_post_compose_state(store: &mut Store, content_extent: [f32; 2]) {
     store.interaction.last_known_content_extent = content_extent;
 }
 
-fn hit_test_text_inputs(
+fn changed_outcome(changed: bool) -> ReduceOutcome {
+    if changed {
+        ReduceOutcome::Changed
+    } else {
+        ReduceOutcome::NoChange
+    }
+}
+
+fn clipboard_effect_for_command(
+    state: &super::text_input::TextInputState,
+    command: &Command,
+) -> Option<UiEffect> {
+    match command {
+        Command::CopySelection | Command::CutSelection => state
+            .selected_text()
+            .map(|text| UiEffect::ClipboardWrite(text.to_owned())),
+        _ => None,
+    }
+}
+
+fn pointer_text_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::SetCursorFromPoint { .. }
+            | Command::ExtendSelectionFromPoint { .. }
+            | Command::EndSelectionDrag
+    )
+}
+
+fn command_needs_fresh_hit_targets(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::SetCursorFromPoint { .. } | Command::ExtendSelectionFromPoint { .. }
+    )
+}
+
+fn input_event_needs_fresh_hit_targets(event: &InputEvent) -> bool {
+    let InputEvent::Mouse(mouse_event) = event else {
+        return false;
+    };
+    matches!(
+        mouse_event.kind,
+        MouseEventKind::Down(MouseButtonKind::Left) | MouseEventKind::Drag(MouseButtonKind::Left)
+    ) && mouse_event.logical_position.is_some()
+}
+
+fn hit_test_text_input_targets(
     targets: &[TextInputHitTarget],
     position: [f32; 2],
-) -> Option<crate::layout::tree::TextInputId> {
+) -> Option<&TextInputHitTarget> {
     targets
         .iter()
-        .copied()
         .filter(|target| target.contains(position))
         .max_by_key(|target| target.paint_order())
-        .map(|target| target.text_input_id)
+}
+
+fn text_input_target(
+    targets: &[TextInputHitTarget],
+    text_input: crate::layout::tree::TextInputId,
+) -> Option<&TextInputHitTarget> {
+    targets
+        .iter()
+        .find(|target| target.text_input_id == text_input)
 }
 
 fn drain_action_batch(first_action: Action, handle: &mut IoHandle) -> ActionBatch {

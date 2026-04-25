@@ -9,7 +9,7 @@ use winit::window::WindowId;
 use super::super::{AppRenderer, AppRuntime, AppWindow, SteleApp};
 use crate::draw_list::ClipRect;
 use crate::event::EventRouter;
-use crate::io::{Action, AtlasPatch, ViewUpdate, ViewUpdateDriver};
+use crate::io::{Action, AtlasPatch, UiEffectDriver, ViewUpdate, ViewUpdateDriver};
 use crate::scene::instance::AtlasRegion;
 use crate::scene::{
     BlockDataArena, BlockId, SceneBuffer, SceneBufferInner, SceneConfig, SceneFrameMetadata,
@@ -182,11 +182,14 @@ pub(super) fn build_app_with_scene_config(scene_config: SceneConfig) -> Harness 
     let router = EventRouter::new(action_tx);
     let (view_update_tx, view_update_rx) = mpsc::channel(4);
     let view_update_driver = ViewUpdateDriver::new(view_update_rx);
+    let (_ui_effect_tx, ui_effect_rx) = mpsc::unbounded_channel();
+    let ui_effect_driver = UiEffectDriver::new(ui_effect_rx);
     let (return_tx, return_rx) = mpsc::channel(3);
     let scene_pipeline = ScenePipeline::new(return_tx);
     let mut app = SteleApp::new(
         runtime,
         view_update_driver,
+        ui_effect_driver,
         router,
         scene_pipeline,
         scene_config,

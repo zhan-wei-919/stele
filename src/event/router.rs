@@ -13,6 +13,7 @@ use super::handlers::{
 };
 use crate::io::{
     Action, InputEvent, KeyCode, KeyEventKind, KeyModifiers, MouseButtonKind, MouseEventKind,
+    UiEffect,
 };
 
 /// Semantic actions returned to `SteleApp` after routing.
@@ -189,6 +190,17 @@ impl EventRouter {
         RouteAction::None
     }
 
+    /// Applies one UI side effect produced by the async store.
+    pub(crate) fn apply_ui_effect(&mut self, effect: UiEffect) {
+        match effect {
+            UiEffect::ClipboardWrite(text) => {
+                if let Err(error) = self.clipboard.write_text(text) {
+                    warn!("event.clipboard_write_failed error={}", error);
+                }
+            }
+        }
+    }
+
     fn effective_modifiers_for_key(&self, input: &KeyboardInput) -> KeyModifiers {
         let mut modifiers = self.current_modifiers;
         if let Some(flag) = modifier_flag(input.code()) {
@@ -321,7 +333,7 @@ mod tests {
     use winit::keyboard::ModifiersState;
 
     use super::EventRouter;
-    use crate::event::clipboard::{ClipboardProvider, ClipboardReadError};
+    use crate::event::clipboard::{ClipboardProvider, ClipboardReadError, ClipboardWriteError};
     use crate::event::handlers::KeyboardInput;
     use crate::event::{RouteAction, ViewportSnapshot};
     use crate::io::{
@@ -753,18 +765,21 @@ mod tests {
 
     struct FakeClipboard {
         text: Result<String, ClipboardReadError>,
+        written: Vec<String>,
     }
 
     impl FakeClipboard {
         fn with_text(text: &str) -> Self {
             Self {
                 text: Ok(text.to_owned()),
+                written: Vec::new(),
             }
         }
 
         fn with_error() -> Self {
             Self {
                 text: Err(ClipboardReadError::ReadFailed("test failure".to_owned())),
+                written: Vec::new(),
             }
         }
     }
@@ -772,6 +787,11 @@ mod tests {
     impl ClipboardProvider for FakeClipboard {
         fn read_text(&mut self) -> Result<String, ClipboardReadError> {
             self.text.clone()
+        }
+
+        fn write_text(&mut self, text: String) -> Result<(), ClipboardWriteError> {
+            self.written.push(text);
+            Ok(())
         }
     }
 }

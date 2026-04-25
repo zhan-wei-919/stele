@@ -103,6 +103,7 @@ impl<'window> Renderer<'window> {
             draw_calls += self.draw_path_range(pass, block.path_range);
             draw_calls += self.draw_images(pass, &block.image_batches);
             draw_calls += self.draw_glyph_range(pass, block.glyph_range);
+            draw_calls += self.draw_rect_range(pass, block.foreground_rect_range);
         }
         draw_calls
     }

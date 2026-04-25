@@ -77,8 +77,12 @@ impl Reducer {
     ) -> ReduceOutcome {
         if let Command::FocusTextInput(text_input) = command {
             let previous = interaction.focused_text_input;
+            let previous_drag = interaction.selection_drag_text_input;
             interaction.focused_text_input = text_input;
-            return if interaction.focused_text_input == previous {
+            interaction.selection_drag_text_input = None;
+            return if interaction.focused_text_input == previous
+                && interaction.selection_drag_text_input == previous_drag
+            {
                 ReduceOutcome::NoChange
             } else {
                 ReduceOutcome::Changed
@@ -108,8 +112,17 @@ impl Reducer {
             Command::InsertChar(ch) => text_input.insert_char(ch),
             Command::InsertText(text) => text_input.insert_text(&text),
             Command::DeleteBackward => text_input.delete_backward(),
-            Command::MoveCursorLeft => text_input.move_cursor_left(),
-            Command::MoveCursorRight => text_input.move_cursor_right(),
+            Command::DeleteForward => text_input.delete_forward(),
+            Command::SelectAll => text_input.select_all(),
+            Command::CutSelection => text_input.delete_selected_text(),
+            Command::MoveCursorLeft { extend } => text_input.move_cursor_left(extend),
+            Command::MoveCursorRight { extend } => text_input.move_cursor_right(extend),
+            Command::MoveCursorToStart { extend } => text_input.move_cursor_to_start(extend),
+            Command::MoveCursorToEnd { extend } => text_input.move_cursor_to_end(extend),
+            Command::SetCursorFromPoint { .. }
+            | Command::ExtendSelectionFromPoint { .. }
+            | Command::EndSelectionDrag
+            | Command::CopySelection => false,
             Command::FocusTextInput(_)
             | Command::ScrollByLine(_)
             | Command::ScrollByPage(_)
@@ -148,8 +161,17 @@ fn next_scroll_y(
         | Command::InsertChar(_)
         | Command::InsertText(_)
         | Command::DeleteBackward
-        | Command::MoveCursorLeft
-        | Command::MoveCursorRight => return None,
+        | Command::DeleteForward
+        | Command::SelectAll
+        | Command::CopySelection
+        | Command::CutSelection
+        | Command::MoveCursorLeft { .. }
+        | Command::MoveCursorRight { .. }
+        | Command::MoveCursorToStart { .. }
+        | Command::MoveCursorToEnd { .. }
+        | Command::SetCursorFromPoint { .. }
+        | Command::ExtendSelectionFromPoint { .. }
+        | Command::EndSelectionDrag => return None,
     };
     Some(next_y.clamp(0.0, max_scroll_y))
 }
@@ -176,7 +198,7 @@ mod tests {
         assert_eq!(text_input.cursor_index(), 2);
 
         assert!(matches!(
-            reducer.apply_text_command(&mut text_input, Command::MoveCursorLeft),
+            reducer.apply_text_command(&mut text_input, Command::MoveCursorLeft { extend: false }),
             ReduceOutcome::Changed
         ));
         assert!(matches!(
@@ -237,7 +259,7 @@ mod tests {
             Command::InsertChar('a'),
             Command::InsertChar('b'),
             Command::InsertChar('c'),
-            Command::MoveCursorLeft,
+            Command::MoveCursorLeft { extend: false },
             Command::DeleteBackward,
         ] {
             reducer.apply_text_command(&mut text_input, command);
@@ -253,7 +275,7 @@ mod tests {
         let mut text_input = TextInputState::default();
 
         assert!(matches!(
-            reducer.apply_text_command(&mut text_input, Command::MoveCursorLeft),
+            reducer.apply_text_command(&mut text_input, Command::MoveCursorLeft { extend: false }),
             ReduceOutcome::NoChange
         ));
         assert!(matches!(
@@ -264,7 +286,7 @@ mod tests {
         reducer.apply_text_command(&mut text_input, Command::InsertChar('a'));
 
         assert!(matches!(
-            reducer.apply_text_command(&mut text_input, Command::MoveCursorRight),
+            reducer.apply_text_command(&mut text_input, Command::MoveCursorRight { extend: false }),
             ReduceOutcome::NoChange
         ));
         assert_eq!(text_input.text(), "a");
@@ -280,7 +302,7 @@ mod tests {
             Command::InsertChar('a'),
             Command::InsertChar('中'),
             Command::InsertChar('é'),
-            Command::MoveCursorLeft,
+            Command::MoveCursorLeft { extend: false },
             Command::DeleteBackward,
         ] {
             reducer.apply_text_command(&mut text_input, command);
@@ -293,7 +315,7 @@ mod tests {
         assert_eq!(text_input.cursor_index(), 1);
 
         assert!(matches!(
-            reducer.apply_text_command(&mut text_input, Command::MoveCursorRight),
+            reducer.apply_text_command(&mut text_input, Command::MoveCursorRight { extend: false }),
             ReduceOutcome::Changed
         ));
         assert_eq!(text_input.cursor_index(), "aé".len());
@@ -308,7 +330,7 @@ mod tests {
             Command::InsertChar('a'),
             Command::InsertChar('中'),
             Command::InsertChar('d'),
-            Command::MoveCursorLeft,
+            Command::MoveCursorLeft { extend: false },
         ] {
             reducer.apply_text_command(&mut text_input, command);
         }
@@ -379,8 +401,14 @@ mod tests {
             Command::InsertChar('a'),
             Command::InsertText("abc".to_owned()),
             Command::DeleteBackward,
-            Command::MoveCursorLeft,
-            Command::MoveCursorRight,
+            Command::DeleteForward,
+            Command::SelectAll,
+            Command::CopySelection,
+            Command::CutSelection,
+            Command::MoveCursorLeft { extend: false },
+            Command::MoveCursorRight { extend: false },
+            Command::MoveCursorToStart { extend: false },
+            Command::MoveCursorToEnd { extend: false },
         ] {
             let mut interaction = previous;
             let outcome =

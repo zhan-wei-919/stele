@@ -20,7 +20,7 @@ use super::paragraph::{
 use super::EmptyTextInputResolver;
 use super::{
     PreparedBlockNode, PreparedOverlay, PreparedStack, PreparedTextInput, PreparedTree,
-    TextInputResolver, TextInputValue,
+    TextCaretStop, TextInputResolver, TextInputValue,
 };
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -428,9 +428,8 @@ fn prepare_text_input(
         .iter()
         .map(|glyph| glyph.advance.max(0.0))
         .sum::<f32>();
-    let caret_advance = caret_advance(
+    let caret_stops = prepare_caret_stops(
         value.text,
-        value.cursor_index,
         text_input.text_style,
         font_selection,
         metrics,
@@ -442,7 +441,7 @@ fn prepare_text_input(
         text_input_id: text_input.text_input_id,
         glyphs,
         content_width,
-        caret_advance,
+        caret_stops,
         default_ascent: metrics.ascent,
         default_line_height: metrics.line_height,
         style: text_input.style,
@@ -485,21 +484,28 @@ fn prepare_text_glyphs(
     glyphs
 }
 
-fn caret_advance(
+fn prepare_caret_stops(
     text: &str,
-    cursor_index: usize,
     style: TextStyle,
     font_selection: FontSelection,
     metrics: LineMetrics,
     rasterizer: &FreeTypeRasterizer,
-) -> f32 {
-    let prefix = text
-        .get(..cursor_index)
-        .expect("text input cursor must be a validated UTF-8 boundary");
-    prepare_text_glyphs(prefix, style, font_selection, metrics, rasterizer)
-        .into_iter()
-        .map(|glyph| glyph.advance.max(0.0))
-        .sum()
+) -> Vec<TextCaretStop> {
+    let glyphs = prepare_text_glyphs(text, style, font_selection, metrics, rasterizer);
+    let mut stops = Vec::with_capacity(glyphs.len() + 1);
+    let mut advance = 0.0;
+    stops.push(TextCaretStop {
+        byte_index: 0,
+        advance,
+    });
+    for (glyph, (byte_index, ch)) in glyphs.iter().zip(text.char_indices()) {
+        advance += glyph.advance.max(0.0);
+        stops.push(TextCaretStop {
+            byte_index: byte_index + ch.len_utf8(),
+            advance,
+        });
+    }
+    stops
 }
 
 fn atom_ascent(atom: &PreparedInlineAtom) -> f32 {
@@ -591,7 +597,7 @@ mod tests {
     };
     use crate::renderer::subpixel::detect_subpixel_layout;
 
-    use super::prepare_tree;
+    use super::{prepare_tree, prepare_tree_with_text_inputs, TextInputResolver, TextInputValue};
 
     fn rasterizer() -> FreeTypeRasterizer {
         let font_discovery = FontDiscovery::new().expect("fonts must exist");
@@ -678,5 +684,75 @@ mod tests {
                 super::PreparedBlockNode::TextInput(_)
             ]
         ));
+    }
+
+    #[test]
+    fn text_input_caret_stops_use_real_text_not_placeholder() {
+        let body = TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let input = TextInputNode::new(
+            TextInputId::new(10),
+            "placeholder",
+            body,
+            TextInputStyle::default(),
+        )
+        .expect("text input must be valid");
+        let tree = text_input_tree(input);
+
+        let prepared =
+            prepare_tree_with_text_inputs(&tree, &rasterizer(), &StaticTextInputResolver("a中b"));
+        let text_input = prepared_text_input(&prepared);
+
+        assert_eq!(
+            text_input
+                .caret_stops
+                .iter()
+                .map(|stop| stop.byte_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, "a中".len(), "a中b".len()]
+        );
+        assert!(text_input
+            .caret_stops
+            .windows(2)
+            .all(|pair| pair[0].advance <= pair[1].advance));
+
+        let empty =
+            prepare_tree_with_text_inputs(&tree, &rasterizer(), &StaticTextInputResolver(""));
+        let empty_input = prepared_text_input(&empty);
+        assert_eq!(empty_input.caret_stops.len(), 1);
+        assert_eq!(empty_input.caret_stops[0].byte_index, 0);
+        assert!(!empty_input.glyphs.is_empty());
+    }
+
+    struct StaticTextInputResolver(&'static str);
+
+    impl TextInputResolver for StaticTextInputResolver {
+        fn resolve_text_input(&self, _text_input: TextInputId) -> Option<TextInputValue<'_>> {
+            Some(TextInputValue {
+                text: self.0,
+                cursor_index: self.0.len(),
+            })
+        }
+    }
+
+    fn text_input_tree(input: TextInputNode) -> DocumentTree {
+        DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::TextInput(input)],
+                crate::layout::tree::BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid")
+    }
+
+    fn prepared_text_input(prepared: &super::PreparedTree) -> &super::PreparedTextInput {
+        let super::PreparedBlockNode::Stack(root) = &prepared.root else {
+            panic!("root must be stack");
+        };
+        let super::PreparedBlockNode::TextInput(text_input) = &root.children[0] else {
+            panic!("child must be text input");
+        };
+        text_input
     }
 }

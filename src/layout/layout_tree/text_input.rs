@@ -8,7 +8,6 @@ use crate::layout::prepare_tree::PreparedTextInput;
 use super::types::{LayoutRect, LayoutTextInput};
 
 const SUBPIXEL_BIN_COUNT: f32 = 4.0;
-const CARET_WIDTH: f32 = 1.0;
 
 /// Measures the text input's visible text width without block padding or borders.
 pub(crate) fn measure_text_input_content_width(text_input: &PreparedTextInput) -> f32 {
@@ -31,13 +30,6 @@ pub(crate) fn layout_text_input(
             positioned
         })
         .collect();
-    let caret_rect = LayoutRect::new(
-        content_rect.x() + text_input.caret_advance,
-        content_rect.y(),
-        CARET_WIDTH,
-        text_input.default_line_height,
-    );
-
     LayoutTextInput {
         text_input_id: text_input.text_input_id,
         rect: LayoutRect::new(
@@ -47,8 +39,10 @@ pub(crate) fn layout_text_input(
             text_input.default_line_height,
         ),
         glyphs,
-        caret_rect,
+        caret_stops: text_input.caret_stops.clone(),
+        line_height: text_input.default_line_height,
         caret_color: text_input.style.caret_color,
+        selection_color: text_input.style.selection_color,
     }
 }
 

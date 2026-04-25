@@ -52,6 +52,7 @@ pub(super) struct ImageBatch {
 pub(super) struct BlockGpuBatch {
     pub clip_rect: ClipRect,
     pub rect_range: PrimitiveRange,
+    pub foreground_rect_range: PrimitiveRange,
     pub path_range: PrimitiveRange,
     pub glyph_range: PrimitiveRange,
     pub image_batches: Vec<ImageBatch>,
@@ -63,6 +64,7 @@ impl BlockGpuBatch {
         Self {
             clip_rect,
             rect_range: PrimitiveRange::default(),
+            foreground_rect_range: PrimitiveRange::default(),
             path_range: PrimitiveRange::default(),
             glyph_range: PrimitiveRange::default(),
             image_batches: Vec::new(),

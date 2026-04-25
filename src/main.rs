@@ -18,7 +18,7 @@ use std::sync::Arc;
 use self::app::DesktopApp;
 use self::event::EventRouter;
 use self::font::{FontDiscovery, FreeTypeRasterizer};
-use self::io::{IoRuntime, ViewUpdateDriver, WakeEvent};
+use self::io::{IoRuntime, UiEffectDriver, ViewUpdateDriver, WakeEvent};
 use self::renderer::Renderer;
 use self::scene::SceneConfig;
 use self::store::{run_store, ViewportState};
@@ -42,11 +42,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (mut io_runtime, io_handle, scene_pool, scene_pipeline) =
         IoRuntime::new(proxy, scene_config.clone())?;
     let view_update_driver = ViewUpdateDriver::new(io_runtime.take_view_update_rx());
+    let ui_effect_driver = UiEffectDriver::new(io_runtime.take_ui_effect_rx());
     let router = EventRouter::new(io_runtime.action_tx());
 
     let mut app = DesktopApp::new(
         io_runtime,
         view_update_driver,
+        ui_effect_driver,
         router,
         scene_pipeline,
         scene_config.clone(),

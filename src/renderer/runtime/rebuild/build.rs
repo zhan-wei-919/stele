@@ -16,11 +16,12 @@ impl<'window> Renderer<'window> {
     pub(in crate::renderer::runtime) fn rebuild_gpu_data(&mut self, scene_buffer: &SceneBuffer) {
         debug_assert_scene_buffer_order(scene_buffer);
         let ordered_blocks = scene_buffer.blocks();
-        let (glyph_instances, glyph_ranges) = self.build_glyph_instances(&ordered_blocks);
-        let (rect_instances, rect_ranges) = self.build_rect_instances(&ordered_blocks);
+        let (glyph_instances, glyph_ranges) = self.build_glyph_instances(ordered_blocks);
+        let (rect_instances, rect_ranges, foreground_rect_ranges) =
+            self.build_rect_instances(ordered_blocks);
         let (path_vertices, path_indices, path_ranges, tessellation_count) =
-            self.build_path_geometry(&ordered_blocks);
-        let (image_instances, image_batches) = self.build_image_instances(&ordered_blocks);
+            self.build_path_geometry(ordered_blocks);
+        let (image_instances, image_batches) = self.build_image_instances(ordered_blocks);
 
         self.ensure_instance_capacity(
             glyph_instances.len(),
@@ -34,9 +35,10 @@ impl<'window> Renderer<'window> {
         self.upload_path_geometry(&path_vertices, &path_indices);
         self.upload_image_instances(&image_instances);
         self.block_batches = assemble_block_batches(
-            &ordered_blocks,
+            ordered_blocks,
             &glyph_ranges,
             &rect_ranges,
+            &foreground_rect_ranges,
             &path_ranges,
             &image_batches,
         );
@@ -71,9 +73,10 @@ impl<'window> Renderer<'window> {
     fn build_rect_instances(
         &self,
         ordered_blocks: &[BlockDataArena<'_>],
-    ) -> (Vec<RectInstance>, Vec<PrimitiveRange>) {
+    ) -> (Vec<RectInstance>, Vec<PrimitiveRange>, Vec<PrimitiveRange>) {
         let mut rect_instances = Vec::new();
         let mut block_ranges = Vec::with_capacity(ordered_blocks.len());
+        let mut foreground_block_ranges = Vec::with_capacity(ordered_blocks.len());
 
         for block in ordered_blocks {
             let start = rect_instances.len() as u32;
@@ -82,9 +85,16 @@ impl<'window> Renderer<'window> {
                 start,
                 rect_instances.len() as u32 - start,
             ));
+
+            let foreground_start = rect_instances.len() as u32;
+            rect_instances.extend_from_slice(block.foreground_rects());
+            foreground_block_ranges.push(PrimitiveRange::new(
+                foreground_start,
+                rect_instances.len() as u32 - foreground_start,
+            ));
         }
 
-        (rect_instances, block_ranges)
+        (rect_instances, block_ranges, foreground_block_ranges)
     }
 
     fn build_path_geometry(
@@ -174,6 +184,7 @@ fn assemble_block_batches(
     ordered_blocks: &[BlockDataArena<'_>],
     glyph_ranges: &[PrimitiveRange],
     rect_ranges: &[PrimitiveRange],
+    foreground_rect_ranges: &[PrimitiveRange],
     path_ranges: &[PrimitiveRange],
     image_batches: &[Vec<ImageBatch>],
 ) -> Vec<BlockGpuBatch> {
@@ -184,6 +195,7 @@ fn assemble_block_batches(
             let mut batch = BlockGpuBatch::empty(block.clip_rect());
             batch.glyph_range = glyph_ranges[index];
             batch.rect_range = rect_ranges[index];
+            batch.foreground_rect_range = foreground_rect_ranges[index];
             batch.path_range = path_ranges[index];
             batch.image_batches = image_batches[index].clone();
             batch

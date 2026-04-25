@@ -11,7 +11,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender};
 use winit::event_loop::EventLoopProxy;
 
-use super::{Action, ViewUpdate, WakeEvent};
+use super::{Action, UiEffect, ViewUpdate, WakeEvent};
 use crate::scene::{
     SceneBufferPool, SceneConfig, ScenePipeline, SCENE_BUFFER_SLOTS, VIEW_UPDATE_CHANNEL_CAPACITY,
 };
@@ -42,6 +42,7 @@ impl WakeHandle {
 pub(crate) struct IoRuntime {
     runtime: Runtime,
     view_update_rx: Option<Receiver<ViewUpdate>>,
+    ui_effect_rx: Option<UnboundedReceiver<UiEffect>>,
     action_tx: UnboundedSender<Action>,
     wake_handle: WakeHandle,
 }
@@ -49,6 +50,8 @@ pub(crate) struct IoRuntime {
 /// Async-side handle used by the store task.
 pub(crate) struct IoHandle {
     action_rx: UnboundedReceiver<Action>,
+    ui_effect_tx: Option<UnboundedSender<UiEffect>>,
+    wake_handle: Option<WakeHandle>,
     pending_action: Option<Action>,
 }
 
@@ -61,6 +64,7 @@ impl IoRuntime {
         let runtime = Runtime::new()?;
         let wake_handle = WakeHandle::new(proxy);
         let (view_update_tx, view_update_rx) = mpsc::channel(VIEW_UPDATE_CHANNEL_CAPACITY);
+        let (ui_effect_tx, ui_effect_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         let (return_tx, return_rx) = mpsc::channel(SCENE_BUFFER_SLOTS);
 
@@ -78,11 +82,14 @@ impl IoRuntime {
             Self {
                 runtime,
                 view_update_rx: Some(view_update_rx),
+                ui_effect_rx: Some(ui_effect_rx),
                 action_tx,
                 wake_handle: wake_handle.clone(),
             },
             IoHandle {
                 action_rx,
+                ui_effect_tx: Some(ui_effect_tx),
+                wake_handle: Some(wake_handle.clone()),
                 pending_action: None,
             },
             SceneBufferPool::new(return_rx, view_update_tx, wake_handle, scene_config),
@@ -100,6 +107,13 @@ impl IoRuntime {
         self.view_update_rx
             .take()
             .expect("view update receiver must only be taken once")
+    }
+
+    /// Moves the winit-side UI-effect receiver into the shared driver.
+    pub(crate) fn take_ui_effect_rx(&mut self) -> UnboundedReceiver<UiEffect> {
+        self.ui_effect_rx
+            .take()
+            .expect("UI effect receiver must only be taken once")
     }
 
     /// Spawns one async task on the owned runtime.
@@ -148,6 +162,21 @@ impl IoHandle {
         self.pending_action = Some(action);
     }
 
+    /// Sends one UI side effect to the winit side.
+    pub(crate) fn dispatch_ui_effect(&self, effect: UiEffect) -> bool {
+        let Some(ui_effect_tx) = self.ui_effect_tx.as_ref() else {
+            return false;
+        };
+        if ui_effect_tx.send(effect).is_err() {
+            warn!("io.runtime.ui_effect_send_failed");
+            return false;
+        }
+        if let Some(wake_handle) = self.wake_handle.as_ref() {
+            let _ = wake_handle.wake();
+        }
+        true
+    }
+
     #[cfg(test)]
     // Top-level integration tests pull the runtime in via `#[path]`, so this helper is only
     // consumed outside the main crate's unit-test target.
@@ -159,8 +188,45 @@ impl IoHandle {
             action_tx,
             Self {
                 action_rx,
+                ui_effect_tx: None,
+                wake_handle: None,
                 pending_action: None,
             },
         )
+    }
+
+    #[cfg(test)]
+    /// Builds an isolated handle pair with an observable UI-effect receiver.
+    pub(crate) fn new_for_test_with_effects(
+    ) -> (UnboundedSender<Action>, Self, UnboundedReceiver<UiEffect>) {
+        let (action_tx, action_rx) = mpsc::unbounded_channel();
+        let (ui_effect_tx, ui_effect_rx) = mpsc::unbounded_channel();
+        (
+            action_tx,
+            Self {
+                action_rx,
+                ui_effect_tx: Some(ui_effect_tx),
+                wake_handle: None,
+                pending_action: None,
+            },
+            ui_effect_rx,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IoHandle, UiEffect};
+
+    #[test]
+    fn test_handle_dispatches_ui_effects_to_receiver() {
+        let (_action_tx, handle, mut ui_effect_rx) = IoHandle::new_for_test_with_effects();
+
+        assert!(handle.dispatch_ui_effect(UiEffect::ClipboardWrite("copied".to_owned())));
+
+        assert_eq!(
+            ui_effect_rx.try_recv().expect("effect must be queued"),
+            UiEffect::ClipboardWrite("copied".to_owned())
+        );
     }
 }

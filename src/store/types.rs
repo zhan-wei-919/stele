@@ -2,6 +2,8 @@
 
 use std::time::Instant;
 
+use crate::layout::prepare_tree::TextCaretStop;
+
 use super::input::TextInputId;
 
 /// Store-owned interaction state derived from input batches and compose results.
@@ -11,13 +13,16 @@ pub(crate) struct InteractionState {
     pub(crate) last_known_content_extent: [f32; 2],
     pub(crate) last_known_viewport: [f32; 2],
     pub(crate) focused_text_input: Option<TextInputId>,
+    pub(crate) selection_drag_text_input: Option<TextInputId>,
 }
 
 /// Last composed viewport-space hit target for a text input block.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TextInputHitTarget {
     pub(crate) text_input_id: TextInputId,
     rect: [f32; 4],
+    content_rect: [f32; 4],
+    caret_stops: Vec<TextCaretStop>,
     z_order: u32,
     doc_order: u32,
 }
@@ -27,6 +32,8 @@ impl TextInputHitTarget {
     pub(crate) fn new(
         text_input_id: TextInputId,
         rect: [f32; 4],
+        content_rect: [f32; 4],
+        caret_stops: Vec<TextCaretStop>,
         z_order: u32,
         doc_order: u32,
     ) -> Self {
@@ -34,32 +41,82 @@ impl TextInputHitTarget {
             rect.into_iter().all(f32::is_finite) && rect[2] >= 0.0 && rect[3] >= 0.0,
             "text input hit target rect must stay finite and non-negative"
         );
+        debug_assert!(
+            content_rect.into_iter().all(f32::is_finite)
+                && content_rect[2] >= 0.0
+                && content_rect[3] >= 0.0,
+            "text input hit target content rect must stay finite and non-negative"
+        );
+        debug_assert!(
+            !caret_stops.is_empty(),
+            "text input hit targets must include at least one caret stop"
+        );
         Self {
             text_input_id,
             rect,
+            content_rect,
+            caret_stops,
             z_order,
             doc_order,
         }
     }
 
     /// Returns whether the viewport-space point falls inside this target.
-    pub(crate) fn contains(self, point: [f32; 2]) -> bool {
+    pub(crate) fn contains(&self, point: [f32; 2]) -> bool {
         point[0] >= self.rect[0]
             && point[1] >= self.rect[1]
             && point[0] <= self.rect[0] + self.rect[2]
             && point[1] <= self.rect[1] + self.rect[3]
     }
 
+    /// Returns the nearest caret byte index for a viewport-space point.
+    pub(crate) fn nearest_caret_index(&self, point: [f32; 2]) -> usize {
+        if point[0] <= self.content_rect[0] {
+            return self.first_caret_index();
+        }
+        if point[0] >= self.content_rect[0] + self.content_rect[2] {
+            return self.last_caret_index();
+        }
+
+        let local_x = point[0] - self.content_rect[0];
+        self.caret_stops
+            .iter()
+            .min_by(|left, right| {
+                stop_distance(left.advance, local_x)
+                    .total_cmp(&stop_distance(right.advance, local_x))
+            })
+            .map(|stop| stop.byte_index)
+            .expect("caret stops must not be empty")
+    }
+
     /// Returns the z/doc ordering tuple used to pick the topmost hit.
-    pub(crate) fn paint_order(self) -> (u32, u32) {
+    pub(crate) fn paint_order(&self) -> (u32, u32) {
         (self.z_order, self.doc_order)
     }
 
     /// Returns the viewport-space rectangle as x, y, width, height.
     #[cfg(test)]
-    pub(crate) fn rect(self) -> [f32; 4] {
+    pub(crate) fn rect(&self) -> [f32; 4] {
         self.rect
     }
+
+    fn first_caret_index(&self) -> usize {
+        self.caret_stops
+            .first()
+            .expect("caret stops must not be empty")
+            .byte_index
+    }
+
+    fn last_caret_index(&self) -> usize {
+        self.caret_stops
+            .last()
+            .expect("caret stops must not be empty")
+            .byte_index
+    }
+}
+
+fn stop_distance(stop_advance: f32, local_x: f32) -> f32 {
+    (stop_advance - local_x).abs()
 }
 
 impl InteractionState {

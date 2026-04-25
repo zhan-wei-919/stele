@@ -24,6 +24,7 @@ pub(crate) struct BlockDataArena<'a> {
     z_order: u32,
     glyphs: BumpVec<'a, GlyphInstance>,
     rects: BumpVec<'a, RectInstance>,
+    foreground_rects: BumpVec<'a, RectInstance>,
     paths: BumpVec<'a, PathCmd>,
     images: BumpVec<'a, ImageCmd>,
     // Retained so diagnostics can correlate one rendered block with the composer fingerprint
@@ -47,6 +48,7 @@ impl<'a> BlockDataArena<'a> {
             z_order,
             glyphs: BumpVec::new_in(owner),
             rects: BumpVec::new_in(owner),
+            foreground_rects: BumpVec::new_in(owner),
             paths: BumpVec::new_in(owner),
             images: BumpVec::new_in(owner),
             fingerprint,
@@ -78,6 +80,11 @@ impl<'a> BlockDataArena<'a> {
         self.rects.as_slice()
     }
 
+    /// Returns rectangle instances that must draw above text glyphs.
+    pub(crate) fn foreground_rects(&self) -> &[RectInstance] {
+        self.foreground_rects.as_slice()
+    }
+
     /// Returns the view-side path commands still requiring tessellation.
     pub(crate) fn paths(&self) -> &[PathCmd] {
         self.paths.as_slice()
@@ -96,6 +103,11 @@ impl<'a> BlockDataArena<'a> {
     /// Returns the mutable rectangle arena while the composer is assembling this block.
     pub(crate) fn rects_mut(&mut self) -> &mut BumpVec<'a, RectInstance> {
         &mut self.rects
+    }
+
+    /// Returns the mutable foreground rectangle arena while assembling this block.
+    pub(crate) fn foreground_rects_mut(&mut self) -> &mut BumpVec<'a, RectInstance> {
+        &mut self.foreground_rects
     }
 
     /// Returns the mutable path arena while the composer is assembling this block.

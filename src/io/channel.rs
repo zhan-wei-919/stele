@@ -257,6 +257,12 @@ pub(crate) enum ViewUpdate {
     Scene(SceneFrame),
 }
 
+/// UI-side side effects produced by the async store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UiEffect {
+    ClipboardWrite(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::KeyModifiers;

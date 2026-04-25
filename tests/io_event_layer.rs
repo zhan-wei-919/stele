@@ -19,12 +19,13 @@ mod renderer;
 #[path = "../src/scene/mod.rs"]
 mod scene;
 
-use event::clipboard::{ClipboardProvider, ClipboardReadError};
+use event::clipboard::{ClipboardProvider, ClipboardReadError, ClipboardWriteError};
 use event::handlers::KeyboardInput;
 use event::{EventRouter, RouteAction, ViewportSnapshot};
 use io::{
     Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButtonKind, MouseEvent,
-    MouseEventKind, MouseScroll, SceneFrame, ViewUpdate, ViewUpdateDriver, WakeEvent,
+    MouseEventKind, MouseScroll, SceneFrame, UiEffect, UiEffectDriver, ViewUpdate,
+    ViewUpdateDriver, WakeEvent,
 };
 use tokio::sync::mpsc;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -62,6 +63,7 @@ fn async_side_exports_remain_available_for_future_mounts() {
     let _ = std::mem::size_of::<Option<io::SceneFrame>>();
     let _ = std::mem::size_of::<Option<io::ViewUpdate>>();
     let _ = std::mem::size_of::<Option<ViewUpdateDriver>>();
+    let _ = std::mem::size_of::<Option<UiEffectDriver>>();
     let _ = std::mem::size_of::<Option<WakeEvent>>();
     let _ = std::mem::size_of::<Option<scene::SceneProtocolState>>();
 }
@@ -84,6 +86,34 @@ fn drain_limit_preserves_overflow_for_the_next_wake() {
     let second = driver.on_wake(2);
     assert_eq!(second.drained, 1);
     assert_eq!(scene_revision(&second.updates[0]), 3);
+}
+
+#[test]
+fn ui_effect_drain_limit_preserves_overflow_for_the_next_wake() {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut driver = UiEffectDriver::new(rx);
+    for text in ["first", "second", "third"] {
+        tx.send(UiEffect::ClipboardWrite(text.to_owned()))
+            .expect("UI effect send must succeed");
+    }
+
+    let first = driver.on_wake(2);
+    assert_eq!(first.drained, 2);
+    assert!(first.wake_again);
+    assert_eq!(
+        first.effects,
+        vec![
+            UiEffect::ClipboardWrite("first".to_owned()),
+            UiEffect::ClipboardWrite("second".to_owned()),
+        ]
+    );
+
+    let second = driver.on_wake(2);
+    assert_eq!(second.drained, 1);
+    assert_eq!(
+        second.effects,
+        vec![UiEffect::ClipboardWrite("third".to_owned())]
+    );
 }
 
 #[test]
@@ -580,12 +610,14 @@ fn expect_mouse_event(action: Action, before: Instant, after: Instant) -> MouseE
 
 struct FakeClipboard {
     text: Result<String, ClipboardReadError>,
+    written: Vec<String>,
 }
 
 impl FakeClipboard {
     fn with_text(text: &str) -> Self {
         Self {
             text: Ok(text.to_owned()),
+            written: Vec::new(),
         }
     }
 }
@@ -593,5 +625,10 @@ impl FakeClipboard {
 impl ClipboardProvider for FakeClipboard {
     fn read_text(&mut self) -> Result<String, ClipboardReadError> {
         self.text.clone()
+    }
+
+    fn write_text(&mut self, text: String) -> Result<(), ClipboardWriteError> {
+        self.written.push(text);
+        Ok(())
     }
 }

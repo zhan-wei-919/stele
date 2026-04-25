@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::draw_list::{ImageData, PathVerb, PositionedGlyph, RectCmd};
+use crate::layout::prepare_tree::TextCaretStop;
 use crate::layout::tree::{BorderStyle, LocalPaintCommand, NodeId, PathStroke};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -191,6 +192,8 @@ pub(crate) struct LayoutTextInput {
     pub(crate) text_input_id: crate::layout::tree::TextInputId,
     pub(crate) rect: LayoutRect,
     pub(crate) glyphs: Vec<PositionedGlyph>,
-    pub(crate) caret_rect: LayoutRect,
+    pub(crate) caret_stops: Vec<TextCaretStop>,
+    pub(crate) line_height: f32,
     pub(crate) caret_color: [f32; 4],
+    pub(crate) selection_color: [f32; 4],
 }

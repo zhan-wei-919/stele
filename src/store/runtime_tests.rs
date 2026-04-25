@@ -10,7 +10,7 @@ use super::{compose_and_emit_with_post_clamp, Invalidation, Store};
 use crate::font::{FontDiscovery, FreeTypeRasterizer};
 use crate::io::{
     Action, InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButtonKind, MouseEvent,
-    MouseEventKind, MouseScroll, SceneFrame, ViewUpdate,
+    MouseEventKind, MouseScroll, SceneFrame, UiEffect, ViewUpdate,
 };
 use crate::layout::tree::{
     Align, BlockNode, BlockStyle, BorderStyle, DocumentTree, Edges, FlowDirection, InlineNode,
@@ -168,20 +168,98 @@ fn focused_text_input_navigation_and_backspace_update_text_state() {
     let first = TextInputId::new(1);
     store.interaction.focused_text_input = Some(first);
 
-    for code in [
-        KeyCode::Char('a'),
-        KeyCode::Char('c'),
-        KeyCode::Left,
-        KeyCode::Char('b'),
-        KeyCode::Right,
-        KeyCode::Backspace,
+    for (code, expected) in [
+        (KeyCode::Char('a'), Invalidation::REPREPARE_AND_COMPOSE),
+        (KeyCode::Char('c'), Invalidation::REPREPARE_AND_COMPOSE),
+        (KeyCode::Left, Invalidation::RECOMPOSE),
+        (KeyCode::Char('b'), Invalidation::REPREPARE_AND_COMPOSE),
+        (KeyCode::Right, Invalidation::RECOMPOSE),
+        (KeyCode::Backspace, Invalidation::REPREPARE_AND_COMPOSE),
     ] {
         let outcome = store.handle_action(key_input_action_with_kind(code, KeyEventKind::Press));
-        assert_compose_invalidation(outcome, Invalidation::REPREPARE_AND_COMPOSE);
+        assert_compose_invalidation(outcome, expected);
     }
 
     assert_eq!(text_input_text(&store, first), "ab");
     assert_eq!(text_input_cursor(&store, first), 2);
+}
+
+#[test]
+fn copy_and_cut_selection_emit_clipboard_effects() {
+    let mut store = build_text_input_store();
+    let first = TextInputId::new(1);
+    store.interaction.focused_text_input = Some(first);
+
+    let paste = store.handle_action(Action::Input {
+        event: InputEvent::Paste("abc中".to_owned()),
+    });
+    assert_compose_invalidation(paste, Invalidation::REPREPARE_AND_COMPOSE);
+    let select_all = store.handle_action(key_input_action_with_modifiers(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL,
+    ));
+    assert_compose_invalidation(select_all, Invalidation::RECOMPOSE);
+
+    let copy = store.handle_action(key_input_action_with_modifiers(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    ));
+    assert!(matches!(copy, super::ActionOutcome::NoChange));
+    assert_eq!(
+        store.drain_pending_ui_effects_for_test(),
+        vec![UiEffect::ClipboardWrite("abc中".to_owned())]
+    );
+    assert_eq!(text_input_text(&store, first), "abc中");
+
+    let cut = store.handle_action(key_input_action_with_modifiers(
+        KeyCode::Char('x'),
+        KeyModifiers::CONTROL,
+    ));
+    assert_compose_invalidation(cut, Invalidation::REPREPARE_AND_COMPOSE);
+    assert_eq!(
+        store.drain_pending_ui_effects_for_test(),
+        vec![UiEffect::ClipboardWrite("abc中".to_owned())]
+    );
+    assert_eq!(text_input_text(&store, first), "");
+    assert_eq!(text_input_cursor(&store, first), 0);
+}
+
+#[test]
+fn mouse_drag_selection_recomposes_without_reprepare() {
+    let mut store = build_text_input_store();
+    let _ = compose_and_record_state(&mut store);
+    let first = TextInputId::new(1);
+    store.interaction.focused_text_input = Some(first);
+
+    let paste = compose_invalidation(store.handle_action(Action::Input {
+        event: InputEvent::Paste("abcd".to_owned()),
+    }));
+    let _updates = compose_and_drain_updates(&mut store, paste);
+    let reprepare_count = store.reprepare_count;
+    let rect = text_input_hit_rect(&store, first);
+
+    let down = store.handle_action(mouse_down_action([rect[0] + 1.0, rect[1] + rect[3] * 0.5]));
+    assert_compose_invalidation(down, Invalidation::RECOMPOSE);
+    assert_eq!(store.reprepare_count, reprepare_count);
+
+    let drag = store.handle_action(mouse_drag_action([
+        rect[0] + rect[2] + 12.0,
+        rect[1] + rect[3] * 0.5,
+    ]));
+    assert_compose_invalidation(drag, Invalidation::RECOMPOSE);
+    assert_eq!(store.reprepare_count, reprepare_count);
+    assert_eq!(
+        store
+            .model
+            .text_inputs()
+            .get(first)
+            .expect("state must exist")
+            .selected_text(),
+        Some("abcd")
+    );
+
+    let up = store.handle_action(mouse_up_action([rect[0] + rect[2], rect[1]]));
+    assert!(matches!(up, super::ActionOutcome::NoChange));
 }
 
 #[test]
@@ -301,7 +379,7 @@ fn pointer_focus_refreshes_hit_targets_after_text_edit_before_compose() {
 
     let outcome = store.handle_action(click);
 
-    assert!(matches!(outcome, super::ActionOutcome::NoChange));
+    assert_compose_invalidation(outcome, Invalidation::RECOMPOSE);
     assert_eq!(store.interaction.focused_text_input, Some(input));
     assert_eq!(text_input_hit_rect(&store, input), fresh_rect);
 }
@@ -831,6 +909,7 @@ fn build_text_input_test_document() -> DocumentTree {
         },
         border: Some(BorderStyle::new([0.35, 0.48, 0.62, 1.0], 1.0).expect("border must be valid")),
         caret_color: [1.0, 1.0, 1.0, 1.0],
+        selection_color: [0.18, 0.42, 0.92, 0.35],
     };
     let children = [TextInputId::new(1), TextInputId::new(2)]
         .into_iter()
@@ -859,6 +938,7 @@ fn build_dynamic_text_input_test_document() -> DocumentTree {
         },
         border: Some(BorderStyle::new([0.35, 0.48, 0.62, 1.0], 1.0).expect("border must be valid")),
         caret_color: [1.0, 1.0, 1.0, 1.0],
+        selection_color: [0.18, 0.42, 0.92, 0.35],
     };
     let input = TextInputNode::new(TextInputId::new(1), "", style, input_style)
         .expect("text input must be valid");
@@ -921,10 +1001,22 @@ fn assert_key_scrolls_to(store: &mut Store, code: KeyCode, kind: KeyEventKind, e
 }
 
 fn key_input_action_with_kind(code: KeyCode, kind: KeyEventKind) -> Action {
+    key_input_action_with_modifiers_and_kind(code, KeyModifiers::NONE, kind)
+}
+
+fn key_input_action_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> Action {
+    key_input_action_with_modifiers_and_kind(code, modifiers, KeyEventKind::Press)
+}
+
+fn key_input_action_with_modifiers_and_kind(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    kind: KeyEventKind,
+) -> Action {
     Action::Input {
         event: InputEvent::Key(KeyEvent {
             code,
-            modifiers: KeyModifiers::NONE,
+            modifiers,
             kind,
         }),
     }
@@ -943,9 +1035,21 @@ fn mouse_input_action(scroll_delta: MouseScroll) -> Action {
 }
 
 fn mouse_down_action(position: [f32; 2]) -> Action {
+    mouse_button_action(MouseEventKind::Down(MouseButtonKind::Left), position)
+}
+
+fn mouse_drag_action(position: [f32; 2]) -> Action {
+    mouse_button_action(MouseEventKind::Drag(MouseButtonKind::Left), position)
+}
+
+fn mouse_up_action(position: [f32; 2]) -> Action {
+    mouse_button_action(MouseEventKind::Up(MouseButtonKind::Left), position)
+}
+
+fn mouse_button_action(kind: MouseEventKind, position: [f32; 2]) -> Action {
     Action::Input {
         event: InputEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButtonKind::Left),
+            kind,
             logical_position: Some(position),
             scroll_delta: None,
             modifiers: KeyModifiers::NONE,

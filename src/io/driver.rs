@@ -1,9 +1,9 @@
 //! Testable view-update drain state machine shared by the app and integration tests.
 
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 
-use super::ViewUpdate;
+use super::{UiEffect, ViewUpdate};
 
 /// Result of draining pending view updates on one wake.
 #[derive(Debug)]
@@ -18,6 +18,21 @@ pub(crate) struct WakeOutcome {
 pub(crate) struct ViewUpdateDriver {
     view_update_rx: Receiver<ViewUpdate>,
     overflow_view_update: Option<ViewUpdate>,
+}
+
+/// Result of draining pending UI effects on one wake.
+#[derive(Debug)]
+pub(crate) struct UiEffectWakeOutcome {
+    pub(crate) drained: usize,
+    pub(crate) effects: Vec<UiEffect>,
+    pub(crate) wake_again: bool,
+    pub(crate) disconnected: bool,
+}
+
+/// Owns winit-side drain state for queued UI side effects.
+pub(crate) struct UiEffectDriver {
+    ui_effect_rx: UnboundedReceiver<UiEffect>,
+    overflow_ui_effect: Option<UiEffect>,
 }
 
 impl ViewUpdateDriver {
@@ -75,5 +90,63 @@ impl ViewUpdateDriver {
         }
 
         (updates, wake_again, disconnected)
+    }
+}
+
+impl UiEffectDriver {
+    /// Creates a new driver around the winit-side UI-effect receiver.
+    pub(crate) fn new(ui_effect_rx: UnboundedReceiver<UiEffect>) -> Self {
+        Self {
+            ui_effect_rx,
+            overflow_ui_effect: None,
+        }
+    }
+
+    /// Drains pending UI effects and reports what the app should do next.
+    pub(crate) fn on_wake(&mut self, limit: usize) -> UiEffectWakeOutcome {
+        let (effects, wake_again, disconnected) = self.drain_effects(limit);
+        let drained = effects.len();
+
+        UiEffectWakeOutcome {
+            drained,
+            effects,
+            wake_again,
+            disconnected,
+        }
+    }
+
+    fn drain_effects(&mut self, limit: usize) -> (Vec<UiEffect>, bool, bool) {
+        debug_assert!(limit > 0, "drain limit must stay positive");
+
+        let mut effects = Vec::new();
+        let mut disconnected = false;
+        if let Some(effect) = self.overflow_ui_effect.take() {
+            effects.push(effect);
+        }
+
+        while effects.len() < limit {
+            match self.ui_effect_rx.try_recv() {
+                Ok(effect) => effects.push(effect),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    return (effects, false, disconnected);
+                }
+            }
+        }
+
+        let mut wake_again = false;
+        if effects.len() == limit {
+            match self.ui_effect_rx.try_recv() {
+                Ok(effect) => {
+                    self.overflow_ui_effect = Some(effect);
+                    wake_again = true;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => disconnected = true,
+            }
+        }
+
+        (effects, wake_again, disconnected)
     }
 }

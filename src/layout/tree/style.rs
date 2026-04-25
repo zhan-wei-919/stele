@@ -238,6 +238,7 @@ pub(crate) struct TextInputStyle {
     pub(crate) block: BlockStyle,
     pub(crate) border: Option<BorderStyle>,
     pub(crate) caret_color: [f32; 4],
+    pub(crate) selection_color: [f32; 4],
 }
 
 impl Default for TextInputStyle {
@@ -246,6 +247,7 @@ impl Default for TextInputStyle {
             block: BlockStyle::default(),
             border: None,
             caret_color: [1.0, 1.0, 1.0, 1.0],
+            selection_color: [0.18, 0.42, 0.92, 0.35],
         }
     }
 }
@@ -254,6 +256,7 @@ impl TextInputStyle {
     pub(crate) fn validate(self) -> Result<(), DocumentError> {
         self.block.validate()?;
         validate_optional_color(Some(self.caret_color))?;
+        validate_optional_color(Some(self.selection_color))?;
         if let Some(border) = self.border {
             let _ = BorderStyle::new(border.color, border.width)?;
         }
@@ -380,6 +383,7 @@ mod tests {
         let style = TextInputStyle {
             border: Some(border),
             caret_color: [1.0, 1.0, 1.0, 1.0],
+            selection_color: [0.2, 0.4, 1.0, 0.3],
             ..TextInputStyle::default()
         };
 
@@ -390,5 +394,14 @@ mod tests {
             ..TextInputStyle::default()
         };
         assert_eq!(invalid.validate(), Err(DocumentError::InvalidColor));
+
+        let invalid_selection = TextInputStyle {
+            selection_color: [0.2, 0.4, 1.0, -0.1],
+            ..TextInputStyle::default()
+        };
+        assert_eq!(
+            invalid_selection.validate(),
+            Err(DocumentError::InvalidColor)
+        );
     }
 }

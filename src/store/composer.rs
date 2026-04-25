@@ -21,12 +21,14 @@ use crate::scene::{BlockDataArena, BlockId, SceneBufferInner, SceneFrameMetadata
 
 use super::logical_atlas::LogicalAtlas;
 use super::model::{LayoutCache, Model};
+use super::text_input::{TextInputState, TextInputStates};
 use super::types::{TextInputHitTarget, ViewportState};
 
 /// Stateless composer from logical layout output to one render-ready scene buffer.
 pub(crate) struct Composer;
 
 type OrderedBlock<'a> = (u32, BlockDataArena<'a>);
+const CARET_WIDTH: f32 = 1.0;
 
 /// One compose pass plus the document extent measured before viewport clipping.
 pub(crate) struct ComposeOutcome<'a> {
@@ -39,14 +41,27 @@ pub(crate) struct ComposeOutcome<'a> {
 struct MaterializedPrimitives {
     glyphs: Vec<GlyphInstance>,
     rects: Vec<RectInstance>,
+    foreground_rects: Vec<RectInstance>,
     paths: Vec<PathCmd>,
     images: Vec<ImageCmd>,
+}
+
+struct BatchFingerprintInput<'a> {
+    clip_rect: ClipRect,
+    z_order: u32,
+    glyphs: &'a [GlyphInstance],
+    rects: &'a [RectInstance],
+    foreground_rects: &'a [RectInstance],
+    paths: &'a [PathCmd],
+    images: &'a [ImageCmd],
+    atlas_generation: Option<u64>,
 }
 
 impl MaterializedPrimitives {
     fn is_empty(&self) -> bool {
         self.glyphs.is_empty()
             && self.rects.is_empty()
+            && self.foreground_rects.is_empty()
             && self.paths.is_empty()
             && self.images.is_empty()
     }
@@ -109,6 +124,7 @@ impl Composer {
             rasterizer,
             viewport,
             scroll_offset,
+            model.text_inputs(),
             focused_text_input,
         );
 
@@ -154,6 +170,7 @@ fn compose_tree_entries<'a>(
     rasterizer: &FreeTypeRasterizer,
     viewport: ViewportState,
     scroll_offset: [f32; 2],
+    text_inputs: &TextInputStates,
     focused_text_input: Option<crate::layout::tree::TextInputId>,
 ) -> (Vec<OrderedBlock<'a>>, [f32; 2], Vec<TextInputHitTarget>) {
     let layout_tree: layout_tree::LayoutTree = layout_tree::layout_tree(
@@ -177,6 +194,7 @@ fn compose_tree_entries<'a>(
         logical_atlas,
         rasterizer,
         viewport.scale_factor,
+        text_inputs,
         viewport_rect,
         scroll_translation,
         focused_text_input,
@@ -192,6 +210,7 @@ fn compose_tree_entries<'a>(
             logical_atlas,
             rasterizer,
             viewport.scale_factor,
+            text_inputs,
             viewport_rect,
             scroll_translation,
             focused_text_input,
@@ -227,6 +246,7 @@ fn collect_hit_targets_for_block(
         block,
         translated_rect,
         translated_clip_rect,
+        translation,
         viewport_rect,
     );
 
@@ -242,6 +262,7 @@ fn push_text_input_hit_target(
     block: &TreeLayoutBlock,
     rect: TreeLayoutRect,
     clip_rect: TreeLayoutRect,
+    translation: [f32; 2],
     viewport_rect: TreeLayoutRect,
 ) {
     let TreeLayoutBlockContent::TextInput(text_input) = &block.content else {
@@ -259,6 +280,8 @@ fn push_text_input_hit_target(
             visible_rect.width(),
             visible_rect.height(),
         ],
+        layout_rect_array(translate_layout_rect(text_input.rect, translation)),
+        text_input.caret_stops.clone(),
         block.z_order,
         block.doc_order,
     ));
@@ -273,6 +296,7 @@ fn collect_tree_entries<'a>(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    text_inputs: &TextInputStates,
     viewport_rect: TreeLayoutRect,
     scroll_translation: [f32; 2],
     focused_text_input: Option<crate::layout::tree::TextInputId>,
@@ -296,6 +320,7 @@ fn collect_tree_entries<'a>(
         block,
         translated_rect,
         translated_clip_rect,
+        translation,
         viewport_rect,
     );
 
@@ -308,6 +333,7 @@ fn collect_tree_entries<'a>(
         logical_atlas,
         rasterizer,
         scale_factor,
+        text_inputs,
         focused_text_input,
     ) {
         entries.push((block.doc_order, materialized));
@@ -324,6 +350,7 @@ fn collect_tree_entries<'a>(
                 logical_atlas,
                 rasterizer,
                 scale_factor,
+                text_inputs,
                 viewport_rect,
                 scroll_translation,
                 focused_text_input,
@@ -342,6 +369,7 @@ fn compose_tree_block<'a>(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    text_inputs: &TextInputStates,
     focused_text_input: Option<crate::layout::tree::TextInputId>,
 ) -> Option<BlockDataArena<'a>> {
     if rect.is_empty() || clip_rect.is_empty() {
@@ -358,6 +386,7 @@ fn compose_tree_block<'a>(
         logical_atlas,
         rasterizer,
         scale_factor,
+        text_inputs,
         focused_text_input,
     );
     build_block_arena(owner, block, clip_rect, logical_atlas.generation, batch)
@@ -370,7 +399,7 @@ fn push_block_background(
     scale_factor: f32,
 ) {
     if let Some(background) = background {
-        push_rect_instance(&mut batch.rects, rect, background, scale_factor);
+        push_rect_instance(batch, rect, background, scale_factor);
     }
 }
 
@@ -381,7 +410,7 @@ fn push_block_border(
     scale_factor: f32,
 ) {
     if let Some(border) = border {
-        push_border_instances(&mut batch.rects, rect, border, scale_factor);
+        push_border_instances(batch, rect, border, scale_factor);
     }
 }
 
@@ -392,6 +421,7 @@ fn materialize_block_content(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    text_inputs: &TextInputStates,
     focused_text_input: Option<crate::layout::tree::TextInputId>,
 ) {
     match content {
@@ -423,6 +453,7 @@ fn materialize_block_content(
             logical_atlas,
             rasterizer,
             scale_factor,
+            text_inputs,
             focused_text_input,
         ),
     }
@@ -533,7 +564,7 @@ fn materialize_atom_run(
             for glyph in glyphs {
                 push_glyph_instance(
                     &mut batch.glyphs,
-                    &glyph,
+                    glyph,
                     translation,
                     logical_atlas,
                     rasterizer,
@@ -544,7 +575,7 @@ fn materialize_atom_run(
         LayoutAtomPayload::Icon { glyph } => {
             push_glyph_instance(
                 &mut batch.glyphs,
-                &glyph,
+                glyph,
                 translation,
                 logical_atlas,
                 rasterizer,
@@ -560,9 +591,7 @@ fn materialize_atom_run(
             );
         }
         LayoutAtomPayload::Custom { paint } => append_local_paint_translated(
-            &mut batch.rects,
-            &mut batch.paths,
-            &mut batch.images,
+            batch,
             paint.as_ref(),
             [translated_content_rect.x(), translated_content_rect.y()],
             scale_factor,
@@ -578,10 +607,10 @@ fn push_atom_frame(
     scale_factor: f32,
 ) {
     if let Some(color) = background {
-        push_rect_instance(&mut batch.rects, rect, color, scale_factor);
+        push_rect_instance(batch, rect, color, scale_factor);
     }
     if let Some(border) = border {
-        push_border_instances(&mut batch.rects, rect, border, scale_factor);
+        push_border_instances(batch, rect, border, scale_factor);
     }
 }
 
@@ -612,13 +641,11 @@ fn materialize_embed(
             translated_rect,
             intrinsic_size,
             verbs.as_slice(),
-            fill.clone(),
-            stroke.clone(),
+            *fill,
+            *stroke,
         ),
         LayoutEmbedKind::Custom { paint } => append_local_paint_scaled(
-            &mut batch.rects,
-            &mut batch.paths,
-            &mut batch.images,
+            batch,
             paint.as_ref(),
             translated_rect,
             intrinsic_size,
@@ -634,8 +661,23 @@ fn materialize_text_input(
     logical_atlas: &mut LogicalAtlas,
     rasterizer: &FreeTypeRasterizer,
     scale_factor: f32,
+    text_inputs: &TextInputStates,
     focused_text_input: Option<crate::layout::tree::TextInputId>,
 ) {
+    let state = text_inputs.get(text_input.text_input_id);
+    let content_rect = translate_layout_rect(text_input.rect, translation);
+    if let Some(state) = state {
+        if let Some(selection_rect) = text_input_selection_rect(text_input, state, content_rect) {
+            push_rect_instance_with_layer(
+                batch,
+                selection_rect,
+                text_input.selection_color,
+                RenderLayer::Content,
+                scale_factor,
+            );
+        }
+    }
+
     for glyph in &text_input.glyphs {
         push_glyph_instance(
             &mut batch.glyphs,
@@ -647,14 +689,71 @@ fn materialize_text_input(
         );
     }
     if focused_text_input == Some(text_input.text_input_id) {
-        push_rect_instance_with_layer(
-            &mut batch.rects,
-            translate_layout_rect(text_input.caret_rect, translation),
-            text_input.caret_color,
-            RenderLayer::Foreground,
-            scale_factor,
-        );
+        let caret_index = state.map_or(0, TextInputState::cursor_index);
+        if let Some(caret_rect) = text_input_caret_rect(text_input, caret_index, content_rect) {
+            push_rect_instance_with_layer(
+                batch,
+                caret_rect,
+                text_input.caret_color,
+                RenderLayer::Foreground,
+                scale_factor,
+            );
+        }
     }
+}
+
+fn text_input_selection_rect(
+    text_input: &TreeLayoutTextInput,
+    state: &TextInputState,
+    content_rect: TreeLayoutRect,
+) -> Option<TreeLayoutRect> {
+    let selection = state.selection();
+    if selection.is_collapsed() {
+        return None;
+    }
+
+    let range = selection.range();
+    let start = caret_advance_for_index(text_input, range.start)?;
+    let end = caret_advance_for_index(text_input, range.end)?;
+    let left = (content_rect.x() + start).clamp(content_rect.x(), content_rect.right());
+    let right = (content_rect.x() + end).clamp(content_rect.x(), content_rect.right());
+    let width = (right - left).max(0.0);
+    (width > 0.0)
+        .then(|| TreeLayoutRect::new(left, content_rect.y(), width, text_input.line_height))
+}
+
+fn text_input_caret_rect(
+    text_input: &TreeLayoutTextInput,
+    byte_index: usize,
+    content_rect: TreeLayoutRect,
+) -> Option<TreeLayoutRect> {
+    let advance = caret_advance_for_index(text_input, byte_index)?;
+    let x = (content_rect.x() + advance).clamp(content_rect.x(), content_rect.right());
+    Some(TreeLayoutRect::new(
+        x,
+        content_rect.y(),
+        CARET_WIDTH,
+        text_input.line_height,
+    ))
+}
+
+fn caret_advance_for_index(text_input: &TreeLayoutTextInput, byte_index: usize) -> Option<f32> {
+    if let Some(advance) = text_input
+        .caret_stops
+        .iter()
+        .find(|stop| stop.byte_index == byte_index)
+        .map(|stop| stop.advance)
+    {
+        return Some(advance);
+    }
+
+    text_input
+        .caret_stops
+        .iter()
+        .take_while(|stop| stop.byte_index <= byte_index)
+        .last()
+        .or_else(|| text_input.caret_stops.first())
+        .map(|stop| stop.advance)
 }
 
 fn materialize_path_embed(
@@ -738,15 +837,16 @@ fn build_block_arena<'a>(
     }
 
     let clip_rect = tree_clip_rect(clip_rect);
-    let fingerprint = fingerprint_batch(
+    let fingerprint = fingerprint_batch(BatchFingerprintInput {
         clip_rect,
-        block.z_order,
-        &batch.glyphs,
-        &batch.rects,
-        &batch.paths,
-        &batch.images,
-        (!batch.glyphs.is_empty()).then_some(logical_atlas_generation),
-    );
+        z_order: block.z_order,
+        glyphs: &batch.glyphs,
+        rects: &batch.rects,
+        foreground_rects: &batch.foreground_rects,
+        paths: &batch.paths,
+        images: &batch.images,
+        atlas_generation: (!batch.glyphs.is_empty()).then_some(logical_atlas_generation),
+    });
     let mut arena = BlockDataArena::new_in(
         owner,
         BlockId::new(block.node_id.value()),
@@ -796,6 +896,10 @@ fn translate_layout_rect(rect: TreeLayoutRect, translation: [f32; 2]) -> TreeLay
     )
 }
 
+fn layout_rect_array(rect: TreeLayoutRect) -> [f32; 4] {
+    [rect.x(), rect.y(), rect.width(), rect.height()]
+}
+
 fn translate_rect_cmd(rect: RectCmd, translation: [f32; 2]) -> RectCmd {
     let pos = translate_point(rect.pos(), translation);
     RectCmd::new(pos, rect.size(), rect.color(), rect.layer())
@@ -809,26 +913,28 @@ fn populate_block_arena(arena: &mut BlockDataArena<'_>, batch: MaterializedPrimi
     let MaterializedPrimitives {
         glyphs,
         rects,
+        foreground_rects,
         paths,
         images,
     } = batch;
     arena.glyphs_mut().extend(glyphs);
     arena.rects_mut().extend(rects);
+    arena.foreground_rects_mut().extend(foreground_rects);
     arena.paths_mut().extend(paths);
     arena.images_mut().extend(images);
 }
 
 fn push_rect_instance(
-    rects: &mut Vec<RectInstance>,
+    batch: &mut MaterializedPrimitives,
     rect: TreeLayoutRect,
     color: [f32; 4],
     scale_factor: f32,
 ) {
-    push_rect_instance_with_layer(rects, rect, color, RenderLayer::Background, scale_factor);
+    push_rect_instance_with_layer(batch, rect, color, RenderLayer::Background, scale_factor);
 }
 
 fn push_rect_instance_with_layer(
-    rects: &mut Vec<RectInstance>,
+    batch: &mut MaterializedPrimitives,
     rect: TreeLayoutRect,
     color: [f32; 4],
     layer: RenderLayer,
@@ -837,7 +943,7 @@ fn push_rect_instance_with_layer(
     if rect.is_empty() {
         return;
     }
-    rects.push(RectInstance::from_rect(
+    let instance = RectInstance::from_rect(
         RectCmd::new(
             [rect.x(), rect.y()],
             [rect.width(), rect.height()],
@@ -845,11 +951,15 @@ fn push_rect_instance_with_layer(
             layer,
         ),
         scale_factor,
-    ));
+    );
+    match layer {
+        RenderLayer::Foreground | RenderLayer::Overlay => batch.foreground_rects.push(instance),
+        RenderLayer::Background | RenderLayer::Content => batch.rects.push(instance),
+    }
 }
 
 fn push_border_instances(
-    rects: &mut Vec<RectInstance>,
+    batch: &mut MaterializedPrimitives,
     rect: TreeLayoutRect,
     border: BorderStyle,
     scale_factor: f32,
@@ -863,14 +973,14 @@ fn push_border_instances(
     }
 
     push_rect_instance_with_layer(
-        rects,
+        batch,
         TreeLayoutRect::new(rect.x(), rect.y(), rect.width(), width),
         border.color,
         RenderLayer::Content,
         scale_factor,
     );
     push_rect_instance_with_layer(
-        rects,
+        batch,
         TreeLayoutRect::new(
             rect.x(),
             rect.y() + rect.height() - width,
@@ -885,14 +995,14 @@ fn push_border_instances(
     let inner_height = (rect.height() - width * 2.0).max(0.0);
     if inner_height > 0.0 {
         push_rect_instance_with_layer(
-            rects,
+            batch,
             TreeLayoutRect::new(rect.x(), rect.y() + width, width, inner_height),
             border.color,
             RenderLayer::Content,
             scale_factor,
         );
         push_rect_instance_with_layer(
-            rects,
+            batch,
             TreeLayoutRect::new(
                 rect.x() + rect.width() - width,
                 rect.y() + width,
@@ -928,28 +1038,16 @@ fn transform_path_verbs(
 }
 
 fn append_local_paint_translated(
-    rects: &mut Vec<RectInstance>,
-    paths: &mut Vec<PathCmd>,
-    images: &mut Vec<ImageCmd>,
+    batch: &mut MaterializedPrimitives,
     paint: &[LocalPaintCommand],
     origin: [f32; 2],
     scale_factor: f32,
 ) {
-    append_local_paint_with_transform(
-        rects,
-        paths,
-        images,
-        paint,
-        origin,
-        [1.0, 1.0],
-        scale_factor,
-    );
+    append_local_paint_with_transform(batch, paint, origin, [1.0, 1.0], scale_factor);
 }
 
 fn append_local_paint_scaled(
-    rects: &mut Vec<RectInstance>,
-    paths: &mut Vec<PathCmd>,
-    images: &mut Vec<ImageCmd>,
+    batch: &mut MaterializedPrimitives,
     paint: &[LocalPaintCommand],
     rect: TreeLayoutRect,
     intrinsic_size: [f32; 2],
@@ -966,9 +1064,7 @@ fn append_local_paint_scaled(
         1.0
     };
     append_local_paint_with_transform(
-        rects,
-        paths,
-        images,
+        batch,
         paint,
         [rect.x(), rect.y()],
         [scale_x, scale_y],
@@ -977,9 +1073,7 @@ fn append_local_paint_scaled(
 }
 
 fn append_local_paint_with_transform(
-    rects: &mut Vec<RectInstance>,
-    paths: &mut Vec<PathCmd>,
-    images: &mut Vec<ImageCmd>,
+    batch: &mut MaterializedPrimitives,
     paint: &[LocalPaintCommand],
     origin: [f32; 2],
     scale: [f32; 2],
@@ -989,7 +1083,7 @@ fn append_local_paint_with_transform(
         match command {
             LocalPaintCommand::Rect { pos, size, color } => {
                 push_rect_instance_with_layer(
-                    rects,
+                    batch,
                     TreeLayoutRect::new(
                         origin[0] + pos[0] * scale[0],
                         origin[1] + pos[1] * scale[1],
@@ -1006,7 +1100,7 @@ fn append_local_paint_with_transform(
                 fill,
                 stroke,
             } => {
-                paths.push(PathCmd::new(
+                batch.paths.push(PathCmd::new(
                     verbs
                         .iter()
                         .map(|verb| {
@@ -1025,7 +1119,7 @@ fn append_local_paint_with_transform(
             } => {
                 let transformed_size = [size[0] * scale[0], size[1] * scale[1]];
                 if transformed_size[0] > 0.0 && transformed_size[1] > 0.0 {
-                    images.push(ImageCmd::new(
+                    batch.images.push(ImageCmd::new(
                         [origin[0] + pos[0] * scale[0], origin[1] + pos[1] * scale[1]],
                         transformed_size,
                         data_ref.clone(),
@@ -1068,23 +1162,16 @@ fn transform_path_verb(verb: &PathVerb, x: f32, y: f32, scale_x: f32, scale_y: f
     }
 }
 
-fn fingerprint_batch(
-    clip_rect: ClipRect,
-    z_order: u32,
-    glyphs: &[GlyphInstance],
-    rects: &[RectInstance],
-    paths: &[PathCmd],
-    images: &[ImageCmd],
-    atlas_generation: Option<u64>,
-) -> u64 {
+fn fingerprint_batch(input: BatchFingerprintInput<'_>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    hash_clip_rect(&mut hasher, clip_rect);
-    z_order.hash(&mut hasher);
-    hash_pod_slice(&mut hasher, glyphs);
-    hash_pod_slice(&mut hasher, rects);
-    hash_paths(&mut hasher, paths);
-    hash_images(&mut hasher, images);
-    atlas_generation.hash(&mut hasher);
+    hash_clip_rect(&mut hasher, input.clip_rect);
+    input.z_order.hash(&mut hasher);
+    hash_pod_slice(&mut hasher, input.glyphs);
+    hash_pod_slice(&mut hasher, input.rects);
+    hash_pod_slice(&mut hasher, input.foreground_rects);
+    hash_paths(&mut hasher, input.paths);
+    hash_images(&mut hasher, input.images);
+    input.atlas_generation.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1136,14 +1223,15 @@ mod tests {
         StrokeStyle,
     };
     use crate::font::{FontDiscovery, FreeTypeRasterizer};
-    use crate::layout::prepare_tree::prepare_tree;
+    use crate::layout::prepare_tree::{prepare_tree, prepare_tree_with_text_inputs};
     use crate::layout::tree::{
         Align, AnchorKey, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle, BorderStyle,
         ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind, InlineAtomStyle,
         InlineNode, LocalPaintCommand, OverlayAnchor, OverlayNode, ParagraphNode, ParagraphStyle,
-        StackNode, TextRun, TextStyle,
+        StackNode, TextInputId, TextInputNode, TextInputStyle, TextRun, TextStyle,
     };
     use crate::renderer::subpixel::detect_subpixel_layout;
+    use crate::scene::instance::RectInstance;
     use crate::scene::{BlockDataArena, BlockId};
     use crate::store::logical_atlas::LogicalAtlas;
     use crate::store::{Model, ViewportState};
@@ -1179,10 +1267,7 @@ mod tests {
 
     #[test]
     fn fingerprint_changes_when_image_content_changes() {
-        let before = super::fingerprint_batch(
-            ClipRect::new(0.0, 0.0, 100.0, 80.0),
-            0,
-            &[],
+        let before = fingerprint_for_test(
             &[],
             &[],
             &[sample_image(
@@ -1191,12 +1276,8 @@ mod tests {
                 vec![255, 0, 0, 255],
                 RenderLayer::Foreground,
             )],
-            None,
         );
-        let after = super::fingerprint_batch(
-            ClipRect::new(0.0, 0.0, 100.0, 80.0),
-            0,
-            &[],
+        let after = fingerprint_for_test(
             &[],
             &[],
             &[sample_image(
@@ -1205,7 +1286,6 @@ mod tests {
                 vec![0, 255, 0, 255],
                 RenderLayer::Foreground,
             )],
-            None,
         );
 
         assert_ne!(before, after);
@@ -1213,10 +1293,7 @@ mod tests {
 
     #[test]
     fn fingerprint_changes_when_image_geometry_or_layer_changes() {
-        let baseline = super::fingerprint_batch(
-            ClipRect::new(0.0, 0.0, 100.0, 80.0),
-            0,
-            &[],
+        let baseline = fingerprint_for_test(
             &[],
             &[],
             &[sample_image(
@@ -1225,12 +1302,8 @@ mod tests {
                 vec![255, 0, 0, 255],
                 RenderLayer::Foreground,
             )],
-            None,
         );
-        let moved = super::fingerprint_batch(
-            ClipRect::new(0.0, 0.0, 100.0, 80.0),
-            0,
-            &[],
+        let moved = fingerprint_for_test(
             &[],
             &[],
             &[sample_image(
@@ -1239,12 +1312,8 @@ mod tests {
                 vec![255, 0, 0, 255],
                 RenderLayer::Foreground,
             )],
-            None,
         );
-        let relayered = super::fingerprint_batch(
-            ClipRect::new(0.0, 0.0, 100.0, 80.0),
-            0,
-            &[],
+        let relayered = fingerprint_for_test(
             &[],
             &[],
             &[sample_image(
@@ -1253,11 +1322,23 @@ mod tests {
                 vec![255, 0, 0, 255],
                 RenderLayer::Overlay,
             )],
-            None,
         );
 
         assert_ne!(baseline, moved);
         assert_ne!(baseline, relayered);
+    }
+
+    #[test]
+    fn fingerprint_changes_when_foreground_rect_changes() {
+        let baseline = fingerprint_for_test(&[], &[], &[]);
+        let caret = RectInstance {
+            pos: [12.0, 8.0],
+            size: [1.0, 16.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        };
+        let with_foreground = fingerprint_for_test(&[caret], &[], &[]);
+
+        assert_ne!(baseline, with_foreground);
     }
 
     #[test]
@@ -1330,24 +1411,8 @@ mod tests {
 
     #[test]
     fn fingerprint_changes_when_path_content_changes() {
-        let before = super::fingerprint_batch(
-            ClipRect::new(0.0, 0.0, 100.0, 80.0),
-            0,
-            &[],
-            &[],
-            &[sample_path(12.0)],
-            &[],
-            None,
-        );
-        let after = super::fingerprint_batch(
-            ClipRect::new(0.0, 0.0, 100.0, 80.0),
-            0,
-            &[],
-            &[],
-            &[sample_path(24.0)],
-            &[],
-            None,
-        );
+        let before = fingerprint_for_test(&[], &[sample_path(12.0)], &[]);
+        let after = fingerprint_for_test(&[], &[sample_path(24.0)], &[]);
 
         assert_ne!(before, after);
     }
@@ -1450,6 +1515,48 @@ mod tests {
         assert_eq!(batch.rects().len(), 1);
         assert_eq!(batch.paths().len(), 1);
         assert_eq!(batch.images().len(), 1);
+    }
+
+    #[test]
+    fn focused_text_input_caret_materializes_as_foreground_rect() {
+        let owner = Bump::new();
+        let input_id = TextInputId::new(42);
+        let tree = tree_with_text_input(input_id);
+        let rasterizer = build_rasterizer_for_test();
+        let mut model = Model::new(tree.clone());
+        let text_input = model
+            .text_inputs_mut()
+            .get_mut(input_id)
+            .expect("text input state must exist");
+        assert!(text_input.insert_text("abc"));
+        assert!(text_input.select_all());
+
+        let prepared_tree = prepare_tree_with_text_inputs(&tree, &rasterizer, &model);
+        let layout_cache = LayoutCache::new(prepared_tree);
+        let mut logical_atlas = LogicalAtlas::new(1.0);
+        let scene = Composer
+            .compose_into_buffer(
+                &owner,
+                &model,
+                &layout_cache,
+                &mut logical_atlas,
+                &rasterizer,
+                ViewportState::new(120, 90, 1.0, 7, None),
+                [0.0, 0.0],
+                Some(input_id),
+                false,
+                512,
+            )
+            .scene;
+
+        let batch = scene
+            .blocks()
+            .iter()
+            .find(|batch| !batch.foreground_rects().is_empty())
+            .expect("focused text input must emit a foreground caret rect");
+        assert_eq!(batch.foreground_rects().len(), 1);
+        assert!(!batch.glyphs().is_empty());
+        assert!(!batch.rects().is_empty());
     }
 
     #[test]
@@ -1613,6 +1720,23 @@ mod tests {
         ImageCmd::new(pos, size, Arc::new(ImageData::new(rgba, 1, 1)), layer)
     }
 
+    fn fingerprint_for_test(
+        foreground_rects: &[RectInstance],
+        paths: &[PathCmd],
+        images: &[ImageCmd],
+    ) -> u64 {
+        super::fingerprint_batch(super::BatchFingerprintInput {
+            clip_rect: ClipRect::new(0.0, 0.0, 100.0, 80.0),
+            z_order: 0,
+            glyphs: &[],
+            rects: &[],
+            foreground_rects,
+            paths,
+            images,
+            atlas_generation: None,
+        })
+    }
+
     fn sample_path(offset: f32) -> PathCmd {
         PathCmd::new(
             vec![
@@ -1678,6 +1802,27 @@ mod tests {
                     )
                     .expect("paragraph must be valid"),
                 )],
+                BlockStyle::default(),
+            )
+            .expect("stack must be valid"),
+        ))
+        .expect("tree must be valid")
+    }
+
+    fn tree_with_text_input(input_id: TextInputId) -> DocumentTree {
+        let text_style =
+            TextStyle::new(0, 14.0, [1.0, 1.0, 1.0, 1.0]).expect("style must be valid");
+        let input = TextInputNode::new(
+            input_id,
+            "placeholder",
+            text_style,
+            TextInputStyle::default(),
+        )
+        .expect("text input must be valid");
+        DocumentTree::new(BlockNode::Stack(
+            StackNode::new(
+                FlowDirection::Vertical,
+                vec![BlockNode::TextInput(input)],
                 BlockStyle::default(),
             )
             .expect("stack must be valid"),

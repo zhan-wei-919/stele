@@ -14,12 +14,13 @@ mod support;
 mod updates;
 
 use crate::event::{EventRouter, RouteAction, ViewportSnapshot};
-use crate::io::{IoRuntime, ViewUpdate, ViewUpdateDriver};
+use crate::io::{IoRuntime, UiEffectDriver, ViewUpdate, ViewUpdateDriver};
 use crate::renderer::Renderer;
 use crate::scene::{SceneBuffer, SceneConfig, ScenePipeline, SceneProtocolState};
 pub(crate) use support::{AppRenderer, AppRuntime, AppWindow};
 
 const MAX_VIEW_UPDATE_DRAIN: usize = 4096;
+const MAX_UI_EFFECT_DRAIN: usize = 1024;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub(crate) type DesktopApp = SteleApp<IoRuntime, Arc<Window>, Renderer<'static>>;
@@ -37,6 +38,7 @@ where
     renderer: Option<Rend>,
     io_runtime: Option<Rt>,
     view_update_driver: Option<ViewUpdateDriver>,
+    ui_effect_driver: Option<UiEffectDriver>,
     router: Option<EventRouter>,
     scene_pipeline: Option<ScenePipeline>,
     scene_protocol: SceneProtocolState,
@@ -56,6 +58,7 @@ where
     pub(crate) fn new(
         io_runtime: Rt,
         view_update_driver: ViewUpdateDriver,
+        ui_effect_driver: UiEffectDriver,
         router: EventRouter,
         scene_pipeline: ScenePipeline,
         scene_config: SceneConfig,
@@ -66,6 +69,7 @@ where
             renderer: None,
             io_runtime: Some(io_runtime),
             view_update_driver: Some(view_update_driver),
+            ui_effect_driver: Some(ui_effect_driver),
             router: Some(router),
             scene_pipeline: Some(scene_pipeline),
             scene_protocol: SceneProtocolState::new(),
@@ -145,6 +149,8 @@ where
 
     /// Handles one async-to-winit wake and reports whether shutdown began.
     pub(crate) fn on_wake(&mut self) -> bool {
+        self.drain_ui_effects();
+
         let Some(view_update_driver) = self.view_update_driver.as_mut() else {
             return false;
         };
@@ -284,7 +290,35 @@ where
 
     fn drop_scene_transport(&mut self) {
         self.view_update_driver = None;
+        self.ui_effect_driver = None;
         self.scene_pipeline = None;
+    }
+
+    fn drain_ui_effects(&mut self) {
+        let Some(ui_effect_driver) = self.ui_effect_driver.as_mut() else {
+            return;
+        };
+        let outcome = ui_effect_driver.on_wake(MAX_UI_EFFECT_DRAIN);
+        if outcome.drained > 0 {
+            info!("view.ui_effect_wake drained={}", outcome.drained);
+        }
+        if let Some(router) = self.router.as_mut() {
+            for effect in outcome.effects {
+                router.apply_ui_effect(effect);
+            }
+        }
+        if outcome.disconnected {
+            warn!("view.ui_effect_channel_disconnected");
+        }
+        if outcome.wake_again {
+            warn!(
+                "view.ui_effect_drain_overflow count={} limit={}",
+                outcome.drained, MAX_UI_EFFECT_DRAIN
+            );
+            if let Some(io_runtime) = self.io_runtime.as_ref() {
+                io_runtime.wake_loop();
+            }
+        }
     }
 
     fn retire_scene_buffer(&self, scene_buffer: Box<SceneBuffer>, reason: &'static str) {

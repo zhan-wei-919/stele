@@ -19,7 +19,7 @@ pub(crate) use prepare::prepare_tree;
 pub(crate) use prepare::prepare_tree_with_text_inputs;
 #[cfg(test)]
 pub(crate) use text_input::EmptyTextInputResolver;
-pub(crate) use text_input::{PreparedTextInput, TextInputResolver, TextInputValue};
+pub(crate) use text_input::{PreparedTextInput, TextCaretStop, TextInputResolver, TextInputValue};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedTree {
