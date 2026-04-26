@@ -92,7 +92,7 @@ impl FreeTypeRasterizer {
     }
 
     /// Returns the default face chosen during system font discovery.
-    pub(crate) fn default_font_id(&self) -> u32 {
+    pub fn default_font_id(&self) -> u32 {
         self.fonts.default_font_id()
     }
 
@@ -107,7 +107,7 @@ impl FreeTypeRasterizer {
     }
 
     /// Returns the LCD subpixel layout used for glyph rasterization.
-    pub(crate) fn subpixel_layout(&self) -> SubpixelLayout {
+    pub fn subpixel_layout(&self) -> SubpixelLayout {
         self.subpixel_layout
     }
 

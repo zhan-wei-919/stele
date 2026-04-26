@@ -5,3 +5,5 @@ mod line_break;
 mod prepare;
 pub(crate) mod prepare_tree;
 pub(crate) mod tree;
+
+pub use document::DocumentError;

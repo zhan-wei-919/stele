@@ -11,18 +11,18 @@ use crate::layout::document::{
 use super::validation::validate_dimension;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PathStroke {
-    pub(crate) color: [f32; 4],
-    pub(crate) width: f32,
-    pub(crate) line_cap: LineCap,
-    pub(crate) line_join: LineJoin,
+pub struct PathStroke {
+    pub color: [f32; 4],
+    pub width: f32,
+    pub line_cap: LineCap,
+    pub line_join: LineJoin,
 }
 
 // The semantic tree keeps all supported local paint primitives available even though current
 // production demo content does not instantiate every variant yet.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub(crate) enum LocalPaintCommand {
+pub enum LocalPaintCommand {
     Rect {
         pos: [f32; 2],
         size: [f32; 2],

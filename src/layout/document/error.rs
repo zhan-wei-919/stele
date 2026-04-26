@@ -2,7 +2,7 @@
 
 /// Validation errors produced while constructing document input types.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DocumentError {
+pub enum DocumentError {
     InvalidColor,
     InvalidFontSize,
     InvalidLetterSpacing,

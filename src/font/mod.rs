@@ -5,7 +5,8 @@ mod glyph;
 mod layout;
 mod rasterizer;
 
-pub(crate) use discovery::FontDiscovery;
+pub use discovery::FontDiscovery;
 pub(crate) use glyph::{GlyphKey, SubpixelBin};
 pub(crate) use layout::{FontSelection, LineMetrics, MeasuredGlyph};
-pub(crate) use rasterizer::{FreeTypeRasterizer, RasterizedGlyph, SubpixelLayout};
+pub(crate) use rasterizer::RasterizedGlyph;
+pub use rasterizer::{FreeTypeRasterizer, SubpixelLayout};

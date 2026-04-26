@@ -2,16 +2,14 @@
 
 use std::sync::Arc;
 
-use crate::draw_list::{ImageData, LineCap, LineJoin, PathVerb};
-use crate::font::FreeTypeRasterizer;
-use crate::layout::tree::{
+use crate::ui::{
     Align, AnchorKey, AtomBaseline, BlockEmbedKind, BlockEmbedNode, BlockNode, BlockStyle,
-    BorderStyle, ClipMode, DocumentTree, Edges, FlowDirection, InlineAtom, InlineAtomKind,
-    InlineAtomStyle, InlineNode, LineHeight, LocalPaintCommand, OverlayAnchor, OverlayNode,
-    ParagraphNode, ParagraphStyle, PathStroke, StackNode, TextInputId, TextInputNode,
-    TextInputStyle, TextRun, TextStyle, WrapMode,
+    BorderStyle, ClipMode, DocumentTree, Edges, FlowDirection, FreeTypeRasterizer, ImageData,
+    InlineAtom, InlineAtomKind, InlineAtomStyle, InlineNode, LineCap, LineHeight, LineJoin,
+    LocalPaintCommand, Model, OverlayAnchor, OverlayNode, ParagraphNode, ParagraphStyle,
+    PathStroke, PathVerb, StackNode, Store, StoreBootstrap, StoreDelegate, TextInputId,
+    TextInputNode, TextInputStyle, TextRun, TextStyle, ViewportState, WrapMode,
 };
-use crate::store::{Model, Store, StoreBootstrap, StoreDelegate, ViewportState};
 
 const PAGE_BG: [f32; 4] = [0.05, 0.07, 0.08, 1.0];
 const PANEL_BG: [f32; 4] = [0.11, 0.14, 0.17, 1.0];

@@ -5,7 +5,7 @@ use super::DocumentError;
 
 /// Inline styling applied to a span's text.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TextStyle {
+pub struct TextStyle {
     font_id: u32,
     font_size: f32,
     color: [f32; 4],
@@ -19,11 +19,7 @@ pub(crate) struct TextStyle {
 
 impl TextStyle {
     /// Creates a style with validated font and color inputs.
-    pub(crate) fn new(
-        font_id: u32,
-        font_size: f32,
-        color: [f32; 4],
-    ) -> Result<Self, DocumentError> {
+    pub fn new(font_id: u32, font_size: f32, color: [f32; 4]) -> Result<Self, DocumentError> {
         if !font_size.is_finite() || font_size <= 0.0 {
             return Err(DocumentError::InvalidFontSize);
         }
@@ -43,76 +39,76 @@ impl TextStyle {
     }
 
     /// Returns the base font id requested by the span.
-    pub(crate) fn font_id(self) -> u32 {
+    pub fn font_id(self) -> u32 {
         self.font_id
     }
 
     /// Returns the validated font size in logical pixels.
-    pub(crate) fn font_size(self) -> f32 {
+    pub fn font_size(self) -> f32 {
         self.font_size
     }
 
     /// Returns the validated text color.
-    pub(crate) fn color(self) -> [f32; 4] {
+    pub fn color(self) -> [f32; 4] {
         self.color
     }
 
     /// Returns whether bold face selection is requested.
-    pub(crate) fn bold(self) -> bool {
+    pub fn bold(self) -> bool {
         self.bold
     }
 
     /// Returns whether italic face selection is requested.
-    pub(crate) fn italic(self) -> bool {
+    pub fn italic(self) -> bool {
         self.italic
     }
 
     /// Returns whether underline decoration is enabled.
-    pub(crate) fn underline(self) -> bool {
+    pub fn underline(self) -> bool {
         self.underline
     }
 
     /// Returns whether strikethrough decoration is enabled.
-    pub(crate) fn strikethrough(self) -> bool {
+    pub fn strikethrough(self) -> bool {
         self.strikethrough
     }
 
     /// Returns the optional background color behind this span.
-    pub(crate) fn background_color(self) -> Option<[f32; 4]> {
+    pub fn background_color(self) -> Option<[f32; 4]> {
         self.background_color
     }
 
     /// Returns the additional spacing inserted after each non-final glyph.
-    pub(crate) fn letter_spacing(self) -> f32 {
+    pub fn letter_spacing(self) -> f32 {
         self.letter_spacing
     }
 
     /// Returns the same style with bold selection enabled or disabled.
-    pub(crate) fn with_bold(mut self, bold: bool) -> Self {
+    pub fn with_bold(mut self, bold: bool) -> Self {
         self.bold = bold;
         self
     }
 
     /// Returns the same style with italic selection enabled or disabled.
-    pub(crate) fn with_italic(mut self, italic: bool) -> Self {
+    pub fn with_italic(mut self, italic: bool) -> Self {
         self.italic = italic;
         self
     }
 
     /// Returns the same style with underline decoration enabled or disabled.
-    pub(crate) fn with_underline(mut self, underline: bool) -> Self {
+    pub fn with_underline(mut self, underline: bool) -> Self {
         self.underline = underline;
         self
     }
 
     /// Returns the same style with strikethrough decoration enabled or disabled.
-    pub(crate) fn with_strikethrough(mut self, strikethrough: bool) -> Self {
+    pub fn with_strikethrough(mut self, strikethrough: bool) -> Self {
         self.strikethrough = strikethrough;
         self
     }
 
     /// Returns the same style with an optional validated background color.
-    pub(crate) fn with_background_color(
+    pub fn with_background_color(
         mut self,
         background_color: Option<[f32; 4]>,
     ) -> Result<Self, DocumentError> {
@@ -122,10 +118,7 @@ impl TextStyle {
     }
 
     /// Returns the same style with validated letter spacing.
-    pub(crate) fn with_letter_spacing(
-        mut self,
-        letter_spacing: f32,
-    ) -> Result<Self, DocumentError> {
+    pub fn with_letter_spacing(mut self, letter_spacing: f32) -> Result<Self, DocumentError> {
         if !letter_spacing.is_finite() || letter_spacing < 0.0 {
             return Err(DocumentError::InvalidLetterSpacing);
         }

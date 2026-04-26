@@ -57,7 +57,7 @@ impl FontDiscovery {
     }
 
     /// Returns the default sans-serif font chosen for the current system.
-    pub(crate) fn default_font_id(&self) -> u32 {
+    pub fn default_font_id(&self) -> u32 {
         self.default_font_id
     }
 

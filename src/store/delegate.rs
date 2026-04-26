@@ -7,7 +7,7 @@ use super::model::{Model, StoreBootstrap};
 use super::types::{InputFilter, InteractionConfig, InteractionState};
 
 /// Boundary interface implemented by application code that wants to drive the store.
-pub(crate) trait StoreDelegate: Send + Sync {
+pub trait StoreDelegate: Send + Sync {
     /// Builds the initial store state for the first viewport.
     fn bootstrap(
         &self,

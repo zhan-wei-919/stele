@@ -4,5 +4,5 @@ mod error;
 mod style;
 pub(crate) mod validation;
 
-pub(crate) use error::DocumentError;
-pub(crate) use style::TextStyle;
+pub use error::DocumentError;
+pub use style::TextStyle;

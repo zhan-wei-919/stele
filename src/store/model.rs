@@ -7,14 +7,14 @@ use crate::layout::tree::DocumentTree;
 use super::text_input::TextInputStates;
 
 /// Bootstrap payload supplied by the application boundary.
-pub(crate) struct StoreBootstrap {
+pub struct StoreBootstrap {
     model: Model,
     layout_cache: LayoutCache,
 }
 
 impl StoreBootstrap {
     /// Creates a store bootstrap payload from a semantic document tree.
-    pub(crate) fn new(document: DocumentTree, rasterizer: &FreeTypeRasterizer) -> Self {
+    pub fn new(document: DocumentTree, rasterizer: &FreeTypeRasterizer) -> Self {
         let model = Model::new(document);
         let layout_cache = LayoutCache::from_model(&model, rasterizer);
         Self {
@@ -30,14 +30,14 @@ impl StoreBootstrap {
 }
 
 /// Store-owned logical document model.
-pub(crate) struct Model {
+pub struct Model {
     document: DocumentTree,
     text_inputs: TextInputStates,
 }
 
 impl Model {
     /// Creates the model from a rich-text tree.
-    pub(crate) fn new(document: DocumentTree) -> Self {
+    pub fn new(document: DocumentTree) -> Self {
         let text_inputs = TextInputStates::from_document(&document);
         Self {
             document,
@@ -46,7 +46,7 @@ impl Model {
     }
 
     /// Returns the current semantic document.
-    pub(crate) fn document(&self) -> &DocumentTree {
+    pub fn document(&self) -> &DocumentTree {
         &self.document
     }
 

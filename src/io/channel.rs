@@ -14,7 +14,7 @@ pub(crate) enum WakeEvent {
 
 /// High-level mouse button independent of the windowing backend.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum MouseButtonKind {
+pub enum MouseButtonKind {
     Left,
     Right,
     Middle,
@@ -25,55 +25,55 @@ pub(crate) enum MouseButtonKind {
 
 /// High-level scroll payload independent of the windowing backend.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum MouseScroll {
+pub enum MouseScroll {
     LineDelta { x: f32, y: f32 },
     PixelDelta { x: f64, y: f64 },
 }
 
 /// Backend-agnostic keyboard modifiers snapshot.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct KeyModifiers(u8);
+pub struct KeyModifiers(u8);
 
 #[allow(dead_code)]
 impl KeyModifiers {
-    pub(crate) const NONE: Self = Self(0);
-    pub(crate) const SHIFT: Self = Self(1 << 0);
-    pub(crate) const CONTROL: Self = Self(1 << 1);
-    pub(crate) const ALT: Self = Self(1 << 2);
-    pub(crate) const SUPER: Self = Self(1 << 3);
+    pub const NONE: Self = Self(0);
+    pub const SHIFT: Self = Self(1 << 0);
+    pub const CONTROL: Self = Self(1 << 1);
+    pub const ALT: Self = Self(1 << 2);
+    pub const SUPER: Self = Self(1 << 3);
 
     /// Returns whether no modifier bits are active.
-    pub(crate) fn is_empty(self) -> bool {
+    pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// Returns whether all bits from `other` are active in this snapshot.
-    pub(crate) fn contains(self, other: Self) -> bool {
+    pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
     /// Returns whether the shift key is active in this snapshot.
-    pub(crate) fn shift(self) -> bool {
+    pub fn shift(self) -> bool {
         self.contains(Self::SHIFT)
     }
 
     /// Returns whether the control key is active in this snapshot.
-    pub(crate) fn control(self) -> bool {
+    pub fn control(self) -> bool {
         self.contains(Self::CONTROL)
     }
 
     /// Returns whether the alt key is active in this snapshot.
-    pub(crate) fn alt(self) -> bool {
+    pub fn alt(self) -> bool {
         self.contains(Self::ALT)
     }
 
     /// Returns whether the super key is active in this snapshot.
-    pub(crate) fn super_key(self) -> bool {
+    pub fn super_key(self) -> bool {
         self.contains(Self::SUPER)
     }
 
     /// Sets or clears one modifier bit.
-    pub(crate) fn set(&mut self, flag: Self, enabled: bool) {
+    pub fn set(&mut self, flag: Self, enabled: bool) {
         if enabled {
             self.0 |= flag.0;
         } else {
@@ -98,7 +98,7 @@ impl BitOrAssign for KeyModifiers {
 
 /// Backend-agnostic keyboard event kind.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum KeyEventKind {
+pub enum KeyEventKind {
     Press,
     Release,
     Repeat,
@@ -106,7 +106,7 @@ pub(crate) enum KeyEventKind {
 
 /// Backend-agnostic key code carried by keyboard input facts.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum KeyCode {
+pub enum KeyCode {
     Char(char),
     Enter,
     Tab,
@@ -132,25 +132,25 @@ pub(crate) enum KeyCode {
 
 /// Backend-agnostic keyboard input fact.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct KeyEvent {
-    pub(crate) code: KeyCode,
-    pub(crate) modifiers: KeyModifiers,
-    pub(crate) kind: KeyEventKind,
+pub struct KeyEvent {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+    pub kind: KeyEventKind,
 }
 
 /// Backend-agnostic mouse input fact.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct MouseEvent {
-    pub(crate) kind: MouseEventKind,
-    pub(crate) logical_position: Option<[f32; 2]>,
-    pub(crate) scroll_delta: Option<MouseScroll>,
-    pub(crate) modifiers: KeyModifiers,
-    pub(crate) event_time: Instant,
+pub struct MouseEvent {
+    pub kind: MouseEventKind,
+    pub logical_position: Option<[f32; 2]>,
+    pub scroll_delta: Option<MouseScroll>,
+    pub modifiers: KeyModifiers,
+    pub event_time: Instant,
 }
 
 /// Backend-agnostic mouse event kind.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum MouseEventKind {
+pub enum MouseEventKind {
     Down(MouseButtonKind),
     Up(MouseButtonKind),
     Drag(MouseButtonKind),
@@ -163,7 +163,7 @@ pub(crate) enum MouseEventKind {
 
 /// Typed input fact crossing the winit/async boundary.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum InputEvent {
+pub enum InputEvent {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),

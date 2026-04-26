@@ -12,7 +12,7 @@ use super::validation::color_is_valid;
 /// do not fork the draw-list API.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
-pub(crate) enum PathVerb {
+pub enum PathVerb {
     MoveTo {
         to: [f32; 2],
     },
@@ -36,7 +36,7 @@ pub(crate) enum PathVerb {
 /// These variants are kept in the schema even before a path-producing store bridge exists.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(crate) enum LineCap {
+pub enum LineCap {
     Butt,
     Round,
     Square,
@@ -47,7 +47,7 @@ pub(crate) enum LineCap {
 /// These variants are kept in the schema even before a path-producing store bridge exists.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(crate) enum LineJoin {
+pub enum LineJoin {
     Miter,
     Round,
     Bevel,

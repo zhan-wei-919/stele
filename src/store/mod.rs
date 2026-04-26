@@ -11,7 +11,8 @@ mod runtime;
 mod text_input;
 pub(crate) mod types;
 
-pub(crate) use delegate::StoreDelegate;
-pub(crate) use model::{Model, StoreBootstrap};
-pub(crate) use runtime::{run_store, Store};
-pub(crate) use types::ViewportState;
+pub use delegate::StoreDelegate;
+pub use model::{Model, StoreBootstrap};
+pub(crate) use runtime::run_store;
+pub use runtime::Store;
+pub use types::{InputFilter, InteractionConfig, InteractionState, ViewportState};

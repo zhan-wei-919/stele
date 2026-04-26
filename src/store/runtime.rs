@@ -26,7 +26,7 @@ use super::types::{
 const INPUT_COALESCE_DRAIN_COUNT: usize = 256;
 
 /// Async-side store that owns the logical app state and full-scene composition pipeline.
-pub(crate) struct Store {
+pub struct Store {
     viewport: ViewportState,
     interaction: InteractionState,
     text_input_hit_targets: Vec<TextInputHitTarget>,
@@ -51,7 +51,7 @@ pub(crate) struct Store {
 
 impl Store {
     /// Builds the store from application-supplied model state and viewport hooks.
-    pub(crate) fn new(
+    pub fn new(
         rasterizer: FreeTypeRasterizer,
         viewport: ViewportState,
         delegate: Arc<dyn StoreDelegate>,

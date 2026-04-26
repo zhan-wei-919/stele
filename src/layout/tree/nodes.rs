@@ -14,36 +14,36 @@ use super::validate_local_paint_commands;
 use super::validation::validate_dimension;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct NodeId(u64);
+pub struct NodeId(u64);
 
 impl NodeId {
-    pub(crate) const fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    pub(crate) const fn value(self) -> u64 {
+    pub const fn value(self) -> u64 {
         self.0
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct TextInputId(u64);
+pub struct TextInputId(u64);
 
 impl TextInputId {
-    pub(crate) const fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    pub(crate) const fn value(self) -> u64 {
+    pub const fn value(self) -> u64 {
         self.0
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct AnchorKey(String);
+pub struct AnchorKey(String);
 
 impl AnchorKey {
-    pub(crate) fn new(value: impl Into<String>) -> Result<Self, DocumentError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, DocumentError> {
         let value = value.into();
         if value.trim().is_empty() {
             return Err(DocumentError::InvalidAnchorKey);
@@ -51,7 +51,7 @@ impl AnchorKey {
         Ok(Self(value))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -60,21 +60,21 @@ impl AnchorKey {
 // vertical stacks in production code.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum FlowDirection {
+pub enum FlowDirection {
     #[default]
     Vertical,
     Horizontal,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DocumentTree {
+pub struct DocumentTree {
     root: BlockNode,
     anchor_index: HashMap<AnchorKey, NodeId>,
     text_input_ids: HashSet<TextInputId>,
 }
 
 impl DocumentTree {
-    pub(crate) fn new(mut root: BlockNode) -> Result<Self, DocumentError> {
+    pub fn new(mut root: BlockNode) -> Result<Self, DocumentError> {
         if matches!(root, BlockNode::Overlay(_)) {
             return Err(DocumentError::RootOverlay);
         }
@@ -100,21 +100,21 @@ impl DocumentTree {
         })
     }
 
-    pub(crate) fn root(&self) -> &BlockNode {
+    pub fn root(&self) -> &BlockNode {
         &self.root
     }
 
-    pub(crate) fn anchor_index(&self) -> &HashMap<AnchorKey, NodeId> {
+    pub fn anchor_index(&self) -> &HashMap<AnchorKey, NodeId> {
         &self.anchor_index
     }
 
-    pub(crate) fn text_input_ids(&self) -> &HashSet<TextInputId> {
+    pub fn text_input_ids(&self) -> &HashSet<TextInputId> {
         &self.text_input_ids
     }
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum BlockNode {
+pub enum BlockNode {
     Stack(StackNode),
     Paragraph(ParagraphNode),
     Embed(BlockEmbedNode),
@@ -135,16 +135,16 @@ impl BlockNode {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct StackNode {
-    pub(crate) node_id: NodeId,
-    pub(crate) anchor_key: Option<AnchorKey>,
-    pub(crate) direction: FlowDirection,
-    pub(crate) children: Vec<BlockNode>,
-    pub(crate) style: BlockStyle,
+pub struct StackNode {
+    pub node_id: NodeId,
+    pub anchor_key: Option<AnchorKey>,
+    pub direction: FlowDirection,
+    pub children: Vec<BlockNode>,
+    pub style: BlockStyle,
 }
 
 impl StackNode {
-    pub(crate) fn new(
+    pub fn new(
         direction: FlowDirection,
         children: Vec<BlockNode>,
         style: BlockStyle,
@@ -161,18 +161,15 @@ impl StackNode {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ParagraphNode {
-    pub(crate) node_id: NodeId,
-    pub(crate) anchor_key: Option<AnchorKey>,
-    pub(crate) inlines: Vec<InlineNode>,
-    pub(crate) style: ParagraphStyle,
+pub struct ParagraphNode {
+    pub node_id: NodeId,
+    pub anchor_key: Option<AnchorKey>,
+    pub inlines: Vec<InlineNode>,
+    pub style: ParagraphStyle,
 }
 
 impl ParagraphNode {
-    pub(crate) fn new(
-        inlines: Vec<InlineNode>,
-        style: ParagraphStyle,
-    ) -> Result<Self, DocumentError> {
+    pub fn new(inlines: Vec<InlineNode>, style: ParagraphStyle) -> Result<Self, DocumentError> {
         style.validate()?;
         Ok(Self {
             node_id: NodeId::new(0),
@@ -184,19 +181,19 @@ impl ParagraphNode {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum InlineNode {
+pub enum InlineNode {
     Text(TextRun),
     Atom(InlineAtom),
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TextRun {
-    pub(crate) text: String,
-    pub(crate) style: TextStyle,
+pub struct TextRun {
+    pub text: String,
+    pub style: TextStyle,
 }
 
 impl TextRun {
-    pub(crate) fn new(text: impl Into<String>, style: TextStyle) -> Self {
+    pub fn new(text: impl Into<String>, style: TextStyle) -> Self {
         Self {
             text: text.into(),
             style,
@@ -205,13 +202,13 @@ impl TextRun {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct InlineAtom {
-    pub(crate) kind: InlineAtomKind,
-    pub(crate) style: InlineAtomStyle,
+pub struct InlineAtom {
+    pub kind: InlineAtomKind,
+    pub style: InlineAtomStyle,
 }
 
 impl InlineAtom {
-    pub(crate) fn new(kind: InlineAtomKind, style: InlineAtomStyle) -> Result<Self, DocumentError> {
+    pub fn new(kind: InlineAtomKind, style: InlineAtomStyle) -> Result<Self, DocumentError> {
         style.validate()?;
         kind.validate()?;
         Ok(Self { kind, style })
@@ -222,7 +219,7 @@ impl InlineAtom {
 // a subset of them in production code.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub(crate) enum InlineAtomKind {
+pub enum InlineAtomKind {
     Chip {
         label: String,
         text_style: TextStyle,
@@ -260,15 +257,15 @@ impl InlineAtomKind {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct BlockEmbedNode {
-    pub(crate) node_id: NodeId,
-    pub(crate) anchor_key: Option<AnchorKey>,
-    pub(crate) kind: BlockEmbedKind,
-    pub(crate) style: BlockStyle,
+pub struct BlockEmbedNode {
+    pub node_id: NodeId,
+    pub anchor_key: Option<AnchorKey>,
+    pub kind: BlockEmbedKind,
+    pub style: BlockStyle,
 }
 
 impl BlockEmbedNode {
-    pub(crate) fn new(kind: BlockEmbedKind, style: BlockStyle) -> Result<Self, DocumentError> {
+    pub fn new(kind: BlockEmbedKind, style: BlockStyle) -> Result<Self, DocumentError> {
         style.validate()?;
         kind.validate()?;
         Ok(Self {
@@ -284,7 +281,7 @@ impl BlockEmbedNode {
 // and path embeds in production code.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub(crate) enum BlockEmbedKind {
+pub enum BlockEmbedKind {
     Image {
         data_ref: Arc<ImageData>,
         intrinsic_size: [f32; 2],
@@ -318,17 +315,17 @@ impl BlockEmbedKind {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TextInputNode {
-    pub(crate) node_id: NodeId,
-    pub(crate) anchor_key: Option<AnchorKey>,
-    pub(crate) text_input_id: TextInputId,
-    pub(crate) placeholder: String,
-    pub(crate) text_style: TextStyle,
-    pub(crate) style: TextInputStyle,
+pub struct TextInputNode {
+    pub node_id: NodeId,
+    pub anchor_key: Option<AnchorKey>,
+    pub text_input_id: TextInputId,
+    pub placeholder: String,
+    pub text_style: TextStyle,
+    pub style: TextInputStyle,
 }
 
 impl TextInputNode {
-    pub(crate) fn new(
+    pub fn new(
         text_input_id: TextInputId,
         placeholder: impl Into<String>,
         text_style: TextStyle,
@@ -348,14 +345,14 @@ impl TextInputNode {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct OverlayNode {
-    pub(crate) node_id: NodeId,
-    pub(crate) anchor: OverlayAnchor,
-    pub(crate) child: Box<BlockNode>,
+pub struct OverlayNode {
+    pub node_id: NodeId,
+    pub anchor: OverlayAnchor,
+    pub child: Box<BlockNode>,
 }
 
 impl OverlayNode {
-    pub(crate) fn new(anchor: OverlayAnchor, child: BlockNode) -> Self {
+    pub fn new(anchor: OverlayAnchor, child: BlockNode) -> Self {
         Self {
             node_id: NodeId::new(0),
             anchor,
@@ -368,7 +365,7 @@ impl OverlayNode {
 // instantiates only the block-relative path in production code.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub(crate) enum OverlayAnchor {
+pub enum OverlayAnchor {
     Viewport { offset: [f32; 2] },
     BlockRelative { target: AnchorKey, offset: [f32; 2] },
 }

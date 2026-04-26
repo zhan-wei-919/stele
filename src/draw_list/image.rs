@@ -8,7 +8,7 @@ use super::layer::RenderLayer;
 
 /// Immutable RGBA image payload whose content hash is computed once at creation.
 #[derive(Debug)]
-pub(crate) struct ImageData {
+pub struct ImageData {
     rgba: Vec<u8>,
     width: u32,
     height: u32,
@@ -17,7 +17,7 @@ pub(crate) struct ImageData {
 
 impl ImageData {
     /// Creates image data and precomputes the deduplication hash.
-    pub(crate) fn new(rgba: Vec<u8>, width: u32, height: u32) -> Self {
+    pub fn new(rgba: Vec<u8>, width: u32, height: u32) -> Self {
         let content_hash = hash_image(&rgba, width, height);
         Self {
             rgba,
@@ -28,29 +28,29 @@ impl ImageData {
     }
 
     /// Returns whether the image payload matches its declared dimensions.
-    pub(crate) fn is_valid(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.width > 0
             && self.height > 0
             && self.rgba.len() == self.width as usize * self.height as usize * 4
     }
 
     /// Returns the deduplication hash derived from dimensions and RGBA bytes.
-    pub(crate) fn content_hash(&self) -> u64 {
+    pub fn content_hash(&self) -> u64 {
         self.content_hash
     }
 
     /// Returns the texture width in pixels.
-    pub(crate) fn width(&self) -> u32 {
+    pub fn width(&self) -> u32 {
         self.width
     }
 
     /// Returns the texture height in pixels.
-    pub(crate) fn height(&self) -> u32 {
+    pub fn height(&self) -> u32 {
         self.height
     }
 
     /// Returns the raw RGBA8 bytes ready for `queue.write_texture`.
-    pub(crate) fn rgba(&self) -> &[u8] {
+    pub fn rgba(&self) -> &[u8] {
         &self.rgba
     }
 }
